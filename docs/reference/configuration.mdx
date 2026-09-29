@@ -120,6 +120,7 @@ their id from the file name. [More about themes →](/customization/themes)
 | `cursor_blink` | bool | `true` | |
 | `bell` | enum | `"visual"` | `none`, `visual`, `audible`, `both`. |
 | `per_pane_history` | bool | `false` | Give each pane its own shell history file. |
+| `onekey_entries` | array | `[]` | WindTerm-style OneKey credentials, filled manually via **OneKey: Autofill…** (<kbd>Ctrl Shift I</kbd>), the terminal right-click menu, or the Settings → Terminal → OneKey group. Each entry: `{"id","kind":"account"/"ssh-bound","title","username","password","host_binding?"}`. **Security warning:** secrets are plaintext in `config.json` — use only in a SECURE environment; anyone reading the file recovers them, and listing/sending exposes them. |
 
 ## Mouse and scrolling
 

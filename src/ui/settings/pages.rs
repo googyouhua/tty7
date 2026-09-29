@@ -1028,6 +1028,7 @@ impl Tty7App {
         Self::settings_page([
             self.render_shell_group(cx),
             self.render_prompt_group(cx),
+            self.render_onekey_group(cx),
             self.settings_group(
                 Some(t(L10nKey::SettingsScrolling)),
                 None,
@@ -1104,6 +1105,205 @@ impl Tty7App {
                 cx,
             ),
         ])
+    }
+
+    fn render_onekey_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        use tty7_core::core::onekey::OneKeyKind;
+        let cfg = cx.global::<Config>();
+        let entries = cfg.onekey_entries.clone();
+        let count = entries.len();
+        let title = match count {
+            0 => "OneKey autofill (no entries yet)".to_string(),
+            _ => format!("OneKey autofill ({count} entries)"),
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        rows.push(
+            self.settings_row(
+                "Security warning",
+                tty7_core::core::onekey::ONEKEY_SECURITY_WARNING,
+                div().into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+        );
+        // Add/edit form when open; entry rows with Edit/Delete otherwise.
+        if let Some(form) = self
+            .active_settings()
+            .and_then(|s| s.onekey_form.as_ref())
+        {
+            let form_title = match form.editing.is_some() {
+                true => "Edit entry",
+                false => "Add entry",
+            };
+            let kind_idx = match form.kind {
+                OneKeyKind::Account => 0,
+                OneKeyKind::SshBound => 1,
+            };
+            let kind_choice = self.settings_choice(
+                "onekey-kind",
+                &["account", "ssh-bound"],
+                kind_idx,
+                cx,
+                |this, ix, _w, cx| {
+                    this.set_onekey_kind(
+                        match ix {
+                            1 => OneKeyKind::SshBound,
+                            _ => OneKeyKind::Account,
+                        },
+                        cx,
+                    );
+                },
+            );
+            let show_label = match form.show_password {
+                true => "Hide",
+                false => "Show",
+            };
+            let show_toggle = kit::button("onekey-show", show_label, BtnKind::Link).on_click(
+                cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
+                    this.toggle_onekey_password_shown(window, cx);
+                }),
+            );
+            let save = kit::button("onekey-save", "Save", BtnKind::Primary).on_click(
+                cx.listener(|this, _ev: &gpui::ClickEvent, _w, cx| {
+                    this.save_onekey_form(cx);
+                }),
+            );
+            let cancel = kit::button("onekey-cancel", "Cancel", BtnKind::Secondary).on_click(
+                cx.listener(|this, _ev: &gpui::ClickEvent, _w, cx| {
+                    this.cancel_onekey_form(cx);
+                }),
+            );
+            const W: f32 = 280.;
+            rows.push(
+                self.settings_row(
+                    "Title",
+                    "1–64 characters, unique across entries.",
+                    self.settings_text_input(&form.title, W, form.error.is_some(), cx)
+                        .into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+            rows.push(
+                self.settings_row(
+                    "Username",
+                    "Filled when you pick Username or the both-sequence.",
+                    self.settings_text_input(&form.username, W, false, cx)
+                        .into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+            rows.push(
+                self.settings_row(
+                    "Password",
+                    "Masked; stored as plaintext in config.json (see warning).",
+                    h_flex()
+                        .gap(px(8.))
+                        .child(self.settings_text_input(&form.password, W, false, cx))
+                        .child(show_toggle)
+                        .into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+            rows.push(
+                self.settings_row(
+                    "Kind",
+                    "ssh-bound entries carry an optional host hint for filtering.",
+                    kind_choice,
+                    cx,
+                )
+                .into_any_element(),
+            );
+            rows.push(
+                self.settings_row(
+                    "Host binding",
+                    "Optional: shown and matched when filtering the picker.",
+                    self.settings_text_input(&form.binding, W, false, cx)
+                        .into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+            if let Some(err) = form.error.clone() {
+                let tk = Tk::of(cx);
+                rows.push(
+                    div()
+                        .text_size(fs(12.))
+                        .text_color(tk.danger)
+                        .child(err)
+                        .into_any_element(),
+                );
+            }
+            rows.push(
+                self.settings_row(
+                    form_title,
+                    String::new(),
+                    h_flex()
+                        .gap(px(8.))
+                        .child(save)
+                        .child(cancel)
+                        .into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+        } else {
+            let add = kit::button("onekey-add", "Add entry", BtnKind::Secondary).on_click(
+                cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
+                    this.start_onekey_add(window, cx);
+                }),
+            );
+            rows.push(
+                self.settings_row(
+                    "Entries",
+                    "Persisted in config.json `onekey_entries` across restarts.",
+                    add.into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+            for e in entries {
+                let id = e.id.clone();
+                let edit_id = id.clone();
+                let row_id = format!("onekey-del-{id}");
+                let label = format!(
+                    "{} ({}, {})",
+                    e.title,
+                    match e.kind {
+                        OneKeyKind::Account => "account",
+                        OneKeyKind::SshBound => "ssh",
+                    },
+                    e.username,
+                );
+                let edit =
+                    kit::button(format!("onekey-edit-{edit_id}"), "Edit", BtnKind::Link).on_click(
+                        cx.listener(move |this, _ev: &gpui::ClickEvent, window, cx| {
+                            this.start_onekey_edit(&edit_id, window, cx);
+                        }),
+                    );
+                let delete = kit::button(row_id, "Delete", BtnKind::Danger).on_click(
+                    cx.listener(move |this, _ev: &gpui::ClickEvent, _w, cx| {
+                        this.delete_onekey_entry(&id, cx);
+                    }),
+                );
+                rows.push(
+                    self.settings_row(
+                        label,
+                        String::new(),
+                        h_flex()
+                            .gap(px(8.))
+                            .child(edit)
+                            .child(delete)
+                            .into_any_element(),
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+        }
+        self.settings_group(Some(title.as_str()), None, rows, cx)
     }
 
     fn render_prompt_group(&self, cx: &mut Context<Self>) -> AnyElement {

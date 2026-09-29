@@ -1,0 +1,259 @@
+schema: comet.native.v4
+name: shell-onekey-autofill
+language: en
+phase: archive
+status: active
+state_version: 17
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 21024511a8acf02290d7d05a61faff90bc226ff1bd54ff6e5eb71bc80ecb94c6
+spec_changes:
+  - capability: onekey-autofill
+    operation: create
+    source: specs/onekey-autofill/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/shell-onekey-autofill
+  target_branch: main
+  finish: push
+loop:
+  stage: archive-ready
+  goal_cycle: 1
+  iteration: 4
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 1
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: archive
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "A1: In an active shell pane, invoking OneKey picker shows saved entries
+      (both SSH-bound and generic account kinds); picking an entry and choosing
+      `Username` types the username into the PTY input (via prompt-editor-aware
+      paste path)."
+    result: passed
+    reason:
+      text: "render_onekey_menu (view.rs:7443) wired into render via
+        .children(onekey_menu) at :7879; early on_key_down routing at :2532 and
+        handle_onekey_key at :5305 drive Stage/handle_key/filtered_entries
+        (onekey.rs). cargo test --bin tty7-app onekey: 11 pass incl. 2 view e2e
+        tests."
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: Same picker choosing `Password` fills the password without echoing it
+      into visible UI beyond masked picker; works when prompt editor is active
+      and when raw PTY owns input."
+    result: passed
+    reason:
+      text: fill_onekey (view.rs:3284) routes username via paste and password direct
+        to PTY; overlay rows paint title/username/kind only (:7501-7508), never
+        password. View e2e fills pw2 to raw PTY with nothing in editor state.
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: Picker offers `Username+Password` (username, then Enter/Tab
+      equivalent, then password per spec) as one action; user can cancel with
+      Esc without sending bytes."
+    result: passed
+    reason:
+      text: fill_bytes emits user\rpass with no final submit (core/onekey.rs:78-83);
+        Esc/Ctrl-G/Ctrl-C map to Cancel (onekey.rs:154). Unit
+        cancel_sends_zero_bytes + view
+        onekey_escape_cancels_without_touching_the_pty both pass.
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "A4: Entries are manageable (add/edit/delete) and persist across restarts
+      via config file; `tty7 ls`-style restart does not lose entries."
+    result: passed
+    reason:
+      text: OneKeyForm (settings.rs:1440) rendered in pages.rs render_onekey_group
+        (:1110) with Add/Edit form, 1-64 char + unique-title validation
+        (save_onekey_form :2254), per-row Edit/Delete (:1281/:1286), persistence
+        via update_config (:2298) and delete_onekey_entry (app.rs:3032).
+        settings suite 53 pass; terminal::view 288 pass.
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: Docs/settings surface the WindTerm-derived security warning
+      (secure-environment use; config-file secrets are recoverable by local
+      readers)."
+    result: passed
+    reason:
+      text: ONEKEY_SECURITY_WARNING defined core/onekey.rs:104, surfaced in Settings
+        group (pages.rs:1123) and docs/reference/configuration.mdx:123.
+      truncated: false
+builder_handoff:
+  candidate_id: cbc04682-2457-40ad-8444-054be34c7910
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:ed6db488-2dfc-4b14-8996-93f0fa629cd4
+  iteration: 4
+  summary:
+    text: "OneKey repair iteration: picker overlay render_onekey_menu wired into
+      TerminalView render (both kinds listed, passwords never painted,
+      manage-hint footer); full keyboard flow via early on_key_down routing
+      (type filter, arrows, Enter choose, u/p/b/Enter fill, backspace step-back,
+      Esc cancel, works in prompt editor and raw PTY); Settings OneKey add/edit
+      form with masked password + show toggle, kind choice, validation (1-64
+      chars, unique titles) and per-row Edit/Delete persisted to config.json;
+      OneKeyEntry Debug redacted. A1 overlay+keys, A4 add/edit, plus review note
+      addressed."
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+  checks:
+    - name:
+        text: cargo check (workspace)
+        truncated: false
+      result: passed
+      note:
+        text: warnings only
+        truncated: false
+    - name:
+        text: tty7-core onekey unit tests (8)
+        truncated: false
+      result: passed
+      note:
+        text: incl. Debug redaction
+        truncated: false
+    - name:
+        text: tty7-core config tests (60)
+        truncated: false
+      result: passed
+      note:
+        text: persistence/sanitize
+        truncated: false
+    - name:
+        text: bin onekey picker tests (9)
+        truncated: false
+      result: passed
+      note:
+        text: state machine incl. handle_key stages
+        truncated: false
+    - name:
+        text: bin onekey view tests (2)
+        truncated: false
+      result: passed
+      note:
+        text: end-to-end keys to PTY bytes + cancel-zero-bytes
+        truncated: false
+    - name:
+        text: bin terminal::view suite (288)
+        truncated: false
+      result: passed
+      note:
+        text: no regressions
+        truncated: false
+    - name:
+        text: bin keymap tests (50)
+        truncated: false
+      result: passed
+      note: null
+    - name:
+        text: bin search tests (169)
+        truncated: false
+      result: passed
+      note: null
+    - name:
+        text: bin settings tests (53)
+        truncated: false
+      result: passed
+      note: null
+  checks_truncated: false
+  known_limits:
+    - text: Picker rows are keyboard-driven only; mouse clicks fall through to the
+        grid (same as completion menu)
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-09-29T13:59:44.797Z
+blockers: []
+verification:
+  candidate_id: cbc04682-2457-40ad-8444-054be34c7910
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:51264911-983a-4ffe-b996-1c3607611177
+  iteration: 4
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: "Iteration 4 repairs verified: A1 overlay+keys and A4 add/edit now present
+      in code with green suites (core onekey 8, bin onekey 11, settings 53,
+      terminal::view 288). OneKeyEntry Debug redaction confirmed with passing
+      test."
+    truncated: false
+  risks: []
+  risks_truncated: false
+  completed_at: 2026-09-29T14:01:39.632Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native check input changed after the candidate was built; a new Builder
+        candidate is required before checks can run again.
+      truncated: false
+    completed_at: 2026-09-29T13:40:13.711Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native check input changed after the candidate was built; a new Builder
+        candidate is required before checks can run again.
+      truncated: false
+    completed_at: 2026-09-29T13:41:14.429Z
+  - goal_cycle: 1
+    iteration: 3
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A1
+      - A4
+    summary:
+      text: "3/5 passed (A2, A3, A5). A1 fails: picker state + triggers wired but
+        never rendered or keyboard-drivable in the GUI. A4 fails: persistence +
+        delete work, but Settings add/edit UI required by spec section 5 is
+        missing (config-file hand-edit only). All executed suites green:
+        tty7-core onekey 7/7, bin onekey 4/4, keymap 50/50, config 60/60,
+        settings 53/53, search 169/169."
+      truncated: false
+    completed_at: 2026-09-29T13:46:50.453Z
+  - goal_cycle: 1
+    iteration: 4
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: "Iteration 4 repairs verified: A1 overlay+keys and A4 add/edit now present
+        in code with green suites (core onekey 8, bin onekey 11, settings 53,
+        terminal::view 288). OneKeyEntry Debug redaction confirmed with passing
+        test."
+      truncated: false
+    completed_at: 2026-09-29T14:01:39.632Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: false
+created_at: 2026-09-29T13:08:07.319Z

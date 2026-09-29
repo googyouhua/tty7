@@ -17,6 +17,7 @@ use crate::core::config::{
     BellMode, Config, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition, NotifyMode,
     PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
 };
+use tty7_core::core::onekey::{OneKeyEntry, OneKeyKind};
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
 };
@@ -1223,6 +1224,8 @@ pub(crate) struct SettingsState {
     pub(crate) ssh_copied: Option<Uuid>,
     pub(crate) ssh_filter: Entity<InputState>,
     pub(crate) ssh_collapsed_groups: std::collections::HashSet<String>,
+    /// The OneKey add/edit form (None when closed).
+    pub(crate) onekey_form: Option<OneKeyForm>,
     pub(crate) agent_hooks_host: HostId,
     pub(crate) agent_hooks_states: AgentHooksView,
     pub(crate) agent_hooks_seq: u64,
@@ -1429,6 +1432,22 @@ fn password_plan(was: &str, typed: &str, moved: bool) -> PasswordPlan {
         // under is the address, and the address is what changed.
         store: !typed.is_empty() && (typed != was || moved),
     }
+}
+
+/// The Settings → Terminal → OneKey add/edit form (A4). Secrets stay in
+/// `config.json` `onekey_entries` by explicit user decision — the group always
+/// renders the secure-environment warning beside this form.
+pub(crate) struct OneKeyForm {
+    /// `None` adds a new entry; `Some(id)` edits the entry with that id.
+    editing: Option<String>,
+    title: Entity<InputState>,
+    username: Entity<InputState>,
+    password: Entity<InputState>,
+    binding: Entity<InputState>,
+    kind: OneKeyKind,
+    show_password: bool,
+    error: Option<String>,
+    _subs: Vec<Subscription>,
 }
 
 pub(crate) struct ForwardRuleForm {
@@ -2102,6 +2121,191 @@ impl Tty7App {
 
     fn ssh_form_mut(&mut self) -> Option<&mut SshProfileForm> {
         self.active_settings_mut().and_then(|s| s.ssh_form.as_mut())
+    }
+
+    fn onekey_form_mut(&mut self) -> Option<&mut OneKeyForm> {
+        self.active_settings_mut()
+            .and_then(|s| s.onekey_form.as_mut())
+    }
+
+    fn onekey_seed(
+        &mut self,
+        editing: Option<&OneKeyEntry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = seed_input(window, cx, editing.map(|e| e.title.as_str()).unwrap_or(""), false);
+        let username = seed_input(
+            window,
+            cx,
+            editing.map(|e| e.username.as_str()).unwrap_or(""),
+            false,
+        );
+        let password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .default_value(editing.map(|e| e.password.as_str()).unwrap_or("").to_string())
+        });
+        let binding = seed_input(
+            window,
+            cx,
+            editing.and_then(|e| e.host_binding.as_deref()).unwrap_or(""),
+            false,
+        );
+        let mut subs = Vec::new();
+        for input in [&title, &username, &password, &binding] {
+            subs.push(
+                cx.subscribe_in(input, window, |this, _i, ev: &InputEvent, _w, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        let _ = this.onekey_form_mut();
+                        cx.notify();
+                    }
+                }),
+            );
+        }
+        let form = OneKeyForm {
+            editing: editing.map(|e| e.id.clone()),
+            title,
+            username,
+            password,
+            binding,
+            kind: editing.map(|e| e.kind).unwrap_or(OneKeyKind::Account),
+            show_password: false,
+            error: None,
+            _subs: subs,
+        };
+        if let Some(s) = self.active_settings_mut() {
+            s.onekey_form = Some(form);
+        }
+        cx.notify();
+    }
+
+    /// Open a blank OneKey add form.
+    pub(crate) fn start_onekey_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.onekey_seed(None, window, cx);
+    }
+
+    /// Open the OneKey edit form for `id`.
+    pub(crate) fn start_onekey_edit(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = cx
+            .global::<Config>()
+            .onekey_entries
+            .iter()
+            .find(|e| e.id == id)
+            .cloned();
+        if let Some(entry) = entry {
+            self.onekey_seed(Some(&entry), window, cx);
+        }
+    }
+
+    pub(crate) fn cancel_onekey_form(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.active_settings_mut() {
+            s.onekey_form = None;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_onekey_kind(&mut self, kind: OneKeyKind, cx: &mut Context<Self>) {
+        if let Some(form) = self.onekey_form_mut() {
+            form.kind = kind;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_onekey_password_shown(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // `masked` is builder-only, so showing rebuilds the field around the
+        // value it holds — the secret itself never leaves the form.
+        let (value, show) = match self.onekey_form_mut() {
+            Some(form) => (form.password.read(cx).value().to_string(), !form.show_password),
+            None => return,
+        };
+        let field = cx.new(|cx| {
+            let state = InputState::new(window, cx).default_value(value);
+            match show {
+                true => state,
+                false => state.masked(true),
+            }
+        });
+        let sub = cx.subscribe_in(&field, window, |this, _i, ev: &InputEvent, _w, cx| {
+            if matches!(ev, InputEvent::Change) {
+                let _ = this.onekey_form_mut();
+                cx.notify();
+            }
+        });
+        if let Some(form) = self.onekey_form_mut() {
+            form.password = field;
+            form.show_password = show;
+            form._subs.push(sub);
+        }
+        cx.notify();
+    }
+
+    /// Validate and save the OneKey form into `config.json` (A4). Titles are
+    /// 1–64 chars and unique; errors render under the form, nothing persists.
+    pub(crate) fn save_onekey_form(&mut self, cx: &mut Context<Self>) {
+        let draft = match self.onekey_form_mut() {
+            Some(form) => {
+                let title = form.title.read(cx).value().trim().to_string();
+                let username = form.username.read(cx).value().trim().to_string();
+                // Untrimmed on purpose: a trailing space is a character of the
+                // secret, and the server decides whether it belongs.
+                let password = form.password.read(cx).value().to_string();
+                let binding = form.binding.read(cx).value().trim().to_string();
+                (form.editing.clone(), form.kind, title, username, password, binding)
+            }
+            None => return,
+        };
+        let (editing, kind, title, username, password, binding) = draft;
+        let err = if title.is_empty() || title.chars().count() > 64 {
+            Some("Title must be 1–64 characters.".to_string())
+        } else if cx
+            .global::<Config>()
+            .onekey_entries
+            .iter()
+            .any(|e| e.id != editing.as_deref().unwrap_or("") && e.title.trim().eq_ignore_ascii_case(title.trim()))
+        {
+            Some("Another entry already uses this title.".to_string())
+        } else {
+            None
+        };
+        if let Some(err) = err {
+            if let Some(form) = self.onekey_form_mut() {
+                form.error = Some(err);
+            }
+            cx.notify();
+            return;
+        }
+        let entry = OneKeyEntry {
+            id: editing.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            kind,
+            title,
+            username,
+            password,
+            host_binding: match binding.is_empty() {
+                true => None,
+                false => Some(binding),
+            },
+        };
+        self.update_config(cx, |cfg| {
+            if let Some(slot) = cfg.onekey_entries.iter_mut().find(|e| e.id == entry.id) {
+                *slot = entry.clone();
+            } else {
+                cfg.onekey_entries.push(entry.clone());
+            }
+        });
+        if let Some(s) = self.active_settings_mut() {
+            s.onekey_form = None;
+        }
+        cx.notify();
     }
 
     pub(crate) fn ssh_form_load(

@@ -124,7 +124,12 @@ actions!(
         FindPrevious,
         ClearScrollback,
         InsertNewline,
-        InsertNewlineFallback
+        InsertNewlineFallback,
+        OneKeyOpen,
+        OneKeyFillUsername,
+        OneKeyFillPassword,
+        OneKeyFillBoth,
+        OneKeyCancel
     ]
 );
 
@@ -479,6 +484,7 @@ pub struct TerminalView {
     last_word_nav: Option<LastWordWalk>,
     pending_history: Option<PendingHistory>,
     completion: Option<CompletionSession>,
+    pub onekey_picker: Option<super::onekey::OneKeyPicker>,
     remote_completion_inflight: bool,
     /// Why the last remote listing produced nothing, when it failed: "no
     /// candidates" and "the listing itself failed" used to end in the same
@@ -1856,6 +1862,7 @@ impl TerminalView {
             last_word_nav: None,
             pending_history: None,
             completion: None,
+            onekey_picker: None,
             completion_generation: 0,
             editor_handoff: None,
             editor_handoff_interrupt_seq: None,
@@ -2518,6 +2525,15 @@ impl TerminalView {
         };
         let ks = reshaped.as_ref().unwrap_or(&ev.keystroke);
         let m = &ks.modifiers;
+
+        // The OneKey picker owns the pane's keys while open — in the prompt
+        // editor and on a raw PTY alike, so passwords can be filled straight
+        // into full-screen programs too.
+        if self.onekey_picker.is_some() {
+            self.handle_onekey_key(ks, cx);
+            cx.stop_propagation();
+            return;
+        }
 
         if self.search.is_some() && self.search_focused {
             if ks.key == "escape" {
@@ -3241,6 +3257,86 @@ impl TerminalView {
         self.terminal.write(bytes.to_vec());
         self.cursor_visible = true;
         self.jump_to_prompt();
+        cx.notify();
+    }
+
+    /// Open the manual OneKey picker for this pane (A1). Entries come from
+    /// `Config::onekey_entries`; an empty list still opens (showing empty)
+    /// so the user learns where to add entries.
+    pub fn open_onekey_picker(&mut self, cx: &mut Context<Self>) {
+        let entries = cx
+            .global::<Config>()
+            .onekey_entries
+            .clone();
+        self.onekey_picker = Some(super::onekey::OneKeyPicker::new(entries));
+        cx.notify();
+    }
+
+    pub fn close_onekey_picker(&mut self, cx: &mut Context<Self>) {
+        self.onekey_picker = None;
+        cx.notify();
+    }
+
+    /// Fill the chosen entry with `fill`. Routing respects the prompt editor:
+    /// username text goes through `paste()` when the inline editor owns input,
+    /// otherwise direct to the PTY; passwords bypass the editor when it is
+    /// not active so they never land in visible editor state.
+    pub fn fill_onekey(
+        &mut self,
+        fill: tty7_core::core::onekey::OneKeyFill,
+        cx: &mut Context<Self>,
+    ) {
+        let bytes = match &self.onekey_picker {
+            Some(p) => match p.fill(fill) {
+                super::onekey::OneKeyAction::Fill(b) => b,
+                super::onekey::OneKeyAction::Cancelled
+                | super::onekey::OneKeyAction::Pending => return,
+            },
+            None => return,
+        };
+        if bytes.is_empty() {
+            self.onekey_picker = None;
+            cx.notify();
+            return;
+        }
+        // `UsernameAndPassword` arrives as `user\rpass`; split so the username
+        // keeps paste semantics while the password never touches editor state
+        // when the editor is not active.
+        if matches!(fill, tty7_core::core::onekey::OneKeyFill::UsernameAndPassword) {
+            if let Some(pos) = bytes.iter().position(|&b| b == b'\r') {
+                let (user, pass) = bytes.split_at(pos);
+                let pass = &pass[1..];
+                if !user.is_empty() {
+                    self.paste(
+                        String::from_utf8_lossy(user).into_owned(),
+                        cx,
+                    );
+                } else {
+                    self.send_to_pty(b"\r", cx);
+                }
+                if !user.is_empty() {
+                    self.send_to_pty(b"\r", cx);
+                }
+                if !pass.is_empty() {
+                    if self.input_active() {
+                        self.paste(String::from_utf8_lossy(pass).into_owned(), cx);
+                    } else {
+                        self.send_to_pty(pass, cx);
+                    }
+                }
+                self.onekey_picker = None;
+                cx.notify();
+                return;
+            }
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if matches!(fill, tty7_core::core::onekey::OneKeyFill::Username) || self.input_active()
+        {
+            self.paste(text, cx);
+        } else {
+            self.send_to_pty(&bytes, cx);
+        }
+        self.onekey_picker = None;
         cx.notify();
     }
 
@@ -5202,6 +5298,34 @@ impl TerminalView {
                 self.cmd.set(&line);
                 self.submit_command(cx);
             }
+        }
+        cx.notify();
+    }
+
+    fn handle_onekey_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let m = &ks.modifiers;
+        let entry_stage =
+            self.onekey_picker.as_ref().is_some_and(|p| p.stage() == super::onekey::Stage::PickEntry);
+        // Printable text filters the entry list, the way typing filters
+        // reverse-search — control chords fall through to the picker below.
+        if entry_stage && !m.control && !m.platform && !m.alt {
+            if let Some(ch) = ks.key_char.as_deref() {
+                if !ch.is_empty() && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}') {
+                    if let Some(p) = self.onekey_picker.as_mut() {
+                        p.push_filter_char(ch);
+                    }
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        let Some(p) = self.onekey_picker.as_mut() else {
+            return;
+        };
+        match p.handle_key(ks) {
+            super::onekey::UiAction::Redraw => {}
+            super::onekey::UiAction::Cancel => self.onekey_picker = None,
+            super::onekey::UiAction::Fill(fill) => self.fill_onekey(fill, cx),
         }
         cx.notify();
     }
@@ -7313,6 +7437,154 @@ impl TerminalView {
         )
     }
 
+    /// The manual OneKey picker overlay (A1): filtered credential entries with
+    /// a header naming the filter and the keys that drive it. Passwords are
+    /// never painted — rows show title, username, and kind only (A2).
+    fn render_onekey_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let picker = self.onekey_picker.as_ref()?;
+        let shown = picker.filtered_entries();
+        let (srow, _) = self.cursor_cell()?;
+
+        const MAX_ROWS: usize = 10;
+        const HEADER_ROWS: usize = 1;
+        let (total_rows, total_cols) = {
+            let term = self.terminal.term.lock();
+            (term.screen_lines(), term.columns())
+        };
+        let (place_above, visible, first) = menu_layout(
+            total_rows,
+            srow,
+            shown.len() + HEADER_ROWS,
+            picker.cursor(),
+            MAX_ROWS,
+        );
+        let hidden_below = (shown.len() + HEADER_ROWS)
+            .saturating_sub(first)
+            .saturating_sub(visible);
+
+        let theme = cx.theme();
+        let lh = self.line_height;
+        let header_hint = match picker.stage() {
+            super::onekey::Stage::PickEntry => format!(
+                "OneKey: {} — type to filter, ↑↓ move, Enter select, Esc cancel",
+                picker.filter_text()
+            ),
+            super::onekey::Stage::PickFill => {
+                let title = picker
+                    .chosen_entry()
+                    .map(|e| e.title.as_str())
+                    .unwrap_or("");
+                format!("OneKey: {title} — u username · p password · b both · ⌫ back · Esc cancel")
+            }
+        };
+        let row = |i: usize| {
+            let e = shown[i];
+            let selected = picker.cursor().min(shown.len().saturating_sub(1)) == i
+                && picker.stage() == super::onekey::Stage::PickEntry;
+            let kind = match e.kind {
+                tty7_core::core::onekey::OneKeyKind::Account => "account",
+                tty7_core::core::onekey::OneKeyKind::SshBound => "ssh",
+            };
+            div()
+                .h(lh)
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .whitespace_nowrap()
+                .when(selected, |d| {
+                    d.bg(theme.list_active).text_color(theme.foreground)
+                })
+                .child(div().flex_none().child(e.title.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{} · {kind}", e.username)),
+                )
+                .into_any_element()
+        };
+        let rows: Vec<gpui::AnyElement> = (first..first + visible)
+            .filter_map(|i| {
+                if i == 0 {
+                    (first == 0).then(|| {
+                        div()
+                            .h(lh)
+                            .flex()
+                            .items_center()
+                            .px_2()
+                            .whitespace_nowrap()
+                            .text_color(theme.blue)
+                            .child(header_hint.clone())
+                            .into_any_element()
+                    })
+                } else {
+                    shown.get(i - 1).map(|_| row(i - 1))
+                }
+            })
+            .collect();
+
+        let footer_lines = usize::from(hidden_below > 0);
+        let line_count = visible + footer_lines + 1;
+        let menu_h = lh * (line_count as f32) + px(10.);
+
+        let gap = px(6.);
+        let grid_w = self.cell_width * (total_cols as f32);
+        let menu_w = if grid_w < px(720.) { grid_w } else { px(720.) };
+        let y = if place_above {
+            px(GRID_PAD_Y) + lh * (srow as f32) - menu_h - gap
+        } else {
+            px(GRID_PAD_Y) + lh * ((srow + 1) as f32) + gap
+        };
+
+        Some(
+            div()
+                .absolute()
+                .left(px(GRID_PAD_X))
+                .top(y)
+                // Same fall-through as the completion menu (#541): a bare div
+                // inserts no hitbox, so a click on a row lands on the grid.
+                .occlude()
+                .flex()
+                .flex_col()
+                .py_1()
+                .w(menu_w)
+                .overflow_hidden()
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(6.))
+                .font_family(self.font.family.clone())
+                .text_size(self.font_size)
+                .text_color(theme.muted_foreground)
+                .children(rows)
+                .children((hidden_below > 0).then(|| {
+                    div()
+                        .h(lh)
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("↓ {hidden_below} more"))
+                        .into_any_element()
+                }))
+                .child(
+                    div()
+                        .h(lh)
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .text_color(theme.muted_foreground)
+                        .child("Manage entries in Settings → Terminal → OneKey")
+                        .into_any_element(),
+                ),
+        )
+    }
+
     fn render_integration_notice(
         &self,
         cx: &mut Context<Self>,
@@ -7463,6 +7735,7 @@ impl Render for TerminalView {
             .input_active()
             .then(|| self.render_reverse_search_menu(cx))
             .flatten();
+        let onekey_menu = self.render_onekey_menu(cx);
         let integration_notice = self.render_integration_notice(cx);
         let remote_completion_notice = self.render_remote_completion_notice(cx);
 
@@ -7559,6 +7832,20 @@ impl Render for TerminalView {
                 this.step_match(Direction::Left, cx);
             }))
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
+            .on_action(cx.listener(|this, _: &OneKeyOpen, _w, cx| this.open_onekey_picker(cx)))
+            .on_action(cx.listener(|this, _: &OneKeyFillUsername, _w, cx| {
+                this.fill_onekey(tty7_core::core::onekey::OneKeyFill::Username, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OneKeyFillPassword, _w, cx| {
+                this.fill_onekey(tty7_core::core::onekey::OneKeyFill::Password, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OneKeyFillBoth, _w, cx| {
+                this.fill_onekey(
+                    tty7_core::core::onekey::OneKeyFill::UsernameAndPassword,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &OneKeyCancel, _w, cx| this.close_onekey_picker(cx)))
             .on_action(cx.listener(|this, _: &OpenLinkUnderPointer, window, cx| {
                 this.open_menu_link(window, cx);
             }))
@@ -7589,6 +7876,7 @@ impl Render for TerminalView {
             .children(input_bar)
             .children(completion_menu)
             .children(reverse_search_menu)
+            .children(onekey_menu)
             .children(integration_notice)
             .children(remote_completion_notice)
             .context_menu(move |menu, window, cx| {
@@ -7665,7 +7953,8 @@ impl Render for TerminalView {
                     .menu(t(L10nKey::AppMenuFind), Box::new(FindInTerminal))
                     // Inside the terminal, what gets cleared goes without
                     // saying; the menu bar keeps the full "Clear Scrollback".
-                    .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback));
+                    .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback))
+                    .menu("OneKey Autofill…", Box::new(OneKeyOpen));
 
                 // `fork_label` is tty7-core's capability probe, and core has no
                 // locale table — take the answer, not its English wording.
@@ -10734,6 +11023,118 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("the prompt report never reached the view");
+    }
+
+    fn onekey_entries() -> Vec<tty7_core::core::onekey::OneKeyEntry> {
+        use tty7_core::core::onekey::{OneKeyEntry, OneKeyKind};
+        vec![
+            OneKeyEntry {
+                id: "1".into(),
+                kind: OneKeyKind::Account,
+                title: "prod".into(),
+                username: "alice".into(),
+                password: "pw1".into(),
+                host_binding: None,
+            },
+            OneKeyEntry {
+                id: "2".into(),
+                kind: OneKeyKind::SshBound,
+                title: "staging".into(),
+                username: "bob".into(),
+                password: "pw2".into(),
+                host_binding: Some("10.0.0.5".into()),
+            },
+        ]
+    }
+
+    fn seed_onekey_config(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut cfg = Config::default();
+            cfg.onekey_entries = onekey_entries();
+            cx.set_global(cfg);
+        });
+    }
+
+    fn key_down(key: &str, ch: Option<&str>) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: Modifiers::default(),
+                key: key.into(),
+                key_char: ch.map(str::to_string),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    /// A1+A2 end to end through real key events: the picker opens over a raw
+    /// PTY, paints both entries, filters, and fills the chosen password down
+    /// the wire with nothing echoed into editor state.
+    #[gpui::test]
+    fn onekey_picker_paints_entries_and_fills_password_to_raw_pty(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        alt_screen_ready(&window, cx, &mut daemon);
+        seed_onekey_config(cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.open_onekey_picker(cx);
+                let picker = view.onekey_picker.as_ref().expect("picker is open");
+                assert_eq!(picker.filtered_entries().len(), 2);
+                assert!(
+                    view.render_onekey_menu(cx).is_some(),
+                    "the picker overlay paints its entries"
+                );
+                for ch in ["s", "t", "a", "g"] {
+                    view.on_key_down(&key_down(ch, Some(ch)), window, cx);
+                }
+                assert_eq!(
+                    view.onekey_picker
+                        .as_ref()
+                        .expect("picker is open")
+                        .filtered_entries()
+                        .len(),
+                    1
+                );
+                view.on_key_down(&key_down("enter", None), window, cx);
+                view.on_key_down(&key_down("p", Some("p")), window, cx);
+                assert!(
+                    view.onekey_picker.is_none(),
+                    "a fill closes the picker"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"pw2".to_vec()),
+            "staging's password reaches the raw PTY"
+        );
+    }
+
+    /// A3 through the view: Esc at any step closes the picker and nothing
+    /// reaches the shell or the daemon.
+    #[gpui::test]
+    fn onekey_escape_cancels_without_touching_the_pty(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        prompt_ready(&window, cx, &mut daemon);
+        seed_onekey_config(cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.open_onekey_picker(cx);
+                view.on_key_down(&key_down("p", Some("p")), window, cx);
+                view.on_key_down(&key_down("escape", None), window, cx);
+                assert!(view.onekey_picker.is_none());
+                assert!(view.cmd.is_empty(), "cancelled fill edits nothing");
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "cancel sends zero bytes"
+        );
     }
 
     fn alt_screen_ready(
