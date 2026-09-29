@@ -63,7 +63,8 @@
               "remote/ssh",
               "remote/sftp",
               "remote/port-forwarding",
-              "remote/workspaces"
+              "remote/workspaces",
+              "remote/shared-root"
             ]
           },
           {

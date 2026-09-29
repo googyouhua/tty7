@@ -1,0 +1,85 @@
+---
+title: "Sharing one machine as root"
+description: "Per-user tty7 instances when everybody logs in as the same OS user."
+---
+
+Everybody logging in as the same OS user (all root, say) shares one default
+tty7 instance at `~/.config/tty7`: one server, one control socket, and every
+workspace and pane visible to every `tty7 ls`, `send`, and `capture`. The fix
+is one instance per person — no protocol change, fully reversible.
+
+## The shape
+
+Each person gets an independent config directory, server, and socket:
+
+| | Alice | Bob |
+|---|---|---|
+| Config dir | `~/.config/tty7-alice` | `~/.config/tty7-bob` |
+| Sees | only Alice's workspaces/panes | only Bob's |
+
+A pane id from one instance means nothing in the other: `capture`, `send`,
+and `wait` cannot cross the boundary, and neither can the GUI switcher.
+
+## CLI: `tty7-as`
+
+`scripts/tty7-as` maps a short name to its directory and execs `tty7` with
+`TTY7_CONFIG_DIR` set. Copy it onto PATH on the shared box, then:
+
+```bash
+tty7-as alice status        # Alice's server, not the shared default
+tty7-as alice new ~/code/api
+tty7-as alice run -- cargo test
+tty7-as alice --print-dir   # where this instance lives
+```
+
+Names are lowercase `[a-z0-9-]`; anything else is refused before anything
+starts. The instance directory is created `700` on first use. Every `tty7`
+verb works unchanged behind the wrapper — including `server start`, `server
+stop` (which now stops only *your* instance), `agents`, `wait`, and
+`worktree new`.
+
+<Warning>
+  Never run `pane close --orphans` or `server stop` without the wrapper on a
+  shared box: bare, they act on the default instance, not yours.
+</Warning>
+
+## GUI
+
+Launch (or point) the GUI at the same directory:
+
+```bash
+tty7 --config-dir ~/.config/tty7-alice
+```
+
+Remote links are per instance too: each laptop user connects their own link
+to the shared box, and only ever sees their own instance's workspaces in the
+switcher. If the GUI was already on the default instance, switch it to the
+per-user directory and the other people's workspaces disappear — that is the
+check working.
+
+## Trying it with two users
+
+```bash
+tty7-as alice server start
+tty7-as bob server start
+tty7-as alice new ~/code/api    # Alice works
+tty7-as bob ls                  # Bob sees none of Alice's workspaces
+tty7-as alice pane ls --all     # no Bob panes either
+tty7-as alice server stop       # Bob keeps running
+```
+
+`A1`–`A4` in one pass: mutually invisible listings, no cross-instance
+`capture`/`send` target to address, a clean per-user switcher, and
+independent stop/start.
+
+## Limits, read before relying on it
+
+- **Honest isolation, not hard security.** Same-UID users can still read each
+  other's files and processes if they try. This stops accidents and casual
+  snooping; it does not stop a malicious root.
+- CPU, memory, and listening ports are still shared — coordinate ports.
+- Keep the wrapper on PATH from a trusted location, and don't hand-edit
+  another person's `tty7-<name>` directory.
+- Removing the directory abandons the instance; that is also the whole
+  uninstall story. The default `~/.config/tty7` instance is untouched unless
+  you point at it.
