@@ -1309,12 +1309,75 @@ pub mod remote {
         RemoteShell::from_path(path).map(|shell| (shell, path.to_string()))
     }
 
-    pub fn bootstrap_command(shell: RemoteShell, shell_path: &str) -> String {
+    pub fn bootstrap_command(
+        shell: RemoteShell,
+        shell_path: &str,
+        term: &str,
+        cols: u16,
+        rows: u16,
+    ) -> String {
         match shell {
-            RemoteShell::Zsh => zsh_bootstrap(shell_path),
-            RemoteShell::Bash => bash_bootstrap(shell_path),
-            RemoteShell::Fish => fish_bootstrap(shell_path),
+            RemoteShell::Zsh => zsh_bootstrap(shell_path, term, cols, rows),
+            RemoteShell::Bash => bash_bootstrap(shell_path, term, cols, rows),
+            RemoteShell::Fish => fish_bootstrap(shell_path, term, cols, rows),
         }
+    }
+
+    /// The one thing a link that never delivered a pty takes with it: echo,
+    /// ONLCR, job control — and bash-preexec with them. When stdin arrived as
+    /// a plain pipe, re-arm the shell through util-linux `script`, which
+    /// allocates a pty of its own on the far end. A link that did deliver a
+    /// pty, or a box without a usable `script` (BSD's has no `-c`), keeps the
+    /// plain exec.
+    ///
+    /// The probe exercises the exact flag set the exec uses (`-qfec`), so a
+    /// `script` that would die on the real invocation never passes. `-e`
+    /// carries the shell's exit status back out, which the plain exec
+    /// preserved; busybox `script` has no `-e` and falls to the plain exec.
+    fn script_probe() -> &'static str {
+        "script -qfec true /dev/null 2>/dev/null"
+    }
+
+    /// What `script -c` runs its payload with: `$SHELL -c` — the login shell,
+    /// i.e. the same family already parsing the bootstrap — not an `/bin/sh`.
+    /// The payload is therefore written in the bootstrap's own dialect, plus
+    /// the one-time size fix the missing pty-req took with it (script's own
+    /// pty starts 0x0).
+    fn script_payload(exec_line: &str, cols: u16, rows: u16) -> String {
+        match (cols, rows) {
+            (c, r) if c > 0 && r > 0 => {
+                format!("stty rows {r} cols {c} 2>/dev/null; {exec_line}")
+            }
+            _ => exec_line.to_string(),
+        }
+    }
+
+    /// POSIX `if/else` around the exec line: straight through on a real pty,
+    /// `script`-wrapped (with TERM/COLORTERM restored — no pty-req, no TERM)
+    /// when the link delivered a pipe. Parsed by whichever shell runs the
+    /// bootstrap, so only for shells that speak this syntax.
+    ///
+    /// The disjunction is spelled out one `!`-term per `||` on purpose:
+    /// `&&`/`||` are equal-precedence in the shell, and a combined
+    /// `! command -v … && script …` probe term would silently invert the
+    /// fallback for every box without util-linux `script` — the else branch
+    /// would exec a `script` that is not there and the pane would die.
+    fn sh_launch_block(exec_line: &str, term: &str, cols: u16, rows: u16) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "if [ -t 0 ] || ! {}; then\n{}\nelse\n",
+            script_probe(),
+            exec_line
+        ));
+        out.push_str(&format!(
+            "export TERM={} COLORTERM=truecolor\n",
+            shell_quote(term)
+        ));
+        out.push_str(&format!(
+            "exec script -qfec {} /dev/null\nfi\n",
+            shell_quote(&script_payload(exec_line, cols, rows))
+        ));
+        out
     }
 
     fn fish_quote(s: &str) -> String {
@@ -1328,7 +1391,7 @@ pub mod remote {
         ));
     }
 
-    fn zsh_bootstrap(shell_path: &str) -> String {
+    fn zsh_bootstrap(shell_path: &str, term: &str, cols: u16, rows: u16) -> String {
         let mut out = String::new();
         out.push_str("__tty7_d=${TMPDIR:-/tmp}/tty7-zdotdir-$$\n");
         out.push_str("command mkdir -p \"$__tty7_d\" 2>/dev/null\n");
@@ -1346,11 +1409,16 @@ pub mod remote {
         out.push_str(&format!(
             "{guard}export ZDOTDIR=\"$__tty7_d\" TTY7_RM_DIR=\"$__tty7_d\"\n"
         ));
-        out.push_str(&format!("exec {} -l\n", shell_quote(shell_path)));
+        out.push_str(&sh_launch_block(
+            &format!("exec {} -l", shell_quote(shell_path)),
+            term,
+            cols,
+            rows,
+        ));
         out
     }
 
-    fn bash_bootstrap(shell_path: &str) -> String {
+    fn bash_bootstrap(shell_path: &str, term: &str, cols: u16, rows: u16) -> String {
         let quoted = shell_quote(shell_path);
         let mut out = String::new();
         out.push_str("__tty7_d=${TMPDIR:-/tmp}/tty7-bashrc-$$\n");
@@ -1362,18 +1430,42 @@ pub mod remote {
         );
         out.push_str("if [ -s \"$__tty7_d/bashrc\" ]; then\n");
         out.push_str("export TTY7_RM_DIR=\"$__tty7_d\"\n");
-        out.push_str(&format!("exec {quoted} --rcfile \"$__tty7_d/bashrc\" -i\n"));
+        out.push_str(&sh_launch_block(
+            &format!("exec {quoted} --rcfile \"$TTY7_RM_DIR/bashrc\" -i"),
+            term,
+            cols,
+            rows,
+        ));
         out.push_str("fi\n");
-        out.push_str(&format!("exec {quoted} -l\n"));
+        out.push_str(&sh_launch_block(
+            &format!("exec {quoted} -l"),
+            term,
+            cols,
+            rows,
+        ));
         out
     }
 
-    fn fish_bootstrap(shell_path: &str) -> String {
-        format!(
-            "exec {} -C {} -l\n",
+    fn fish_bootstrap(shell_path: &str, term: &str, cols: u16, rows: u16) -> String {
+        let plain = format!(
+            "exec {} -C {} -l",
             fish_quote(shell_path),
             fish_quote(FISH_INTEGRATION)
-        )
+        );
+        // `script -c` runs its payload with $SHELL — the login shell, which on
+        // this arm is fish itself. The payload is therefore the same fish line
+        // the else branch execs, prefixed with the one-time size fix, and
+        // fish-quoted once to sit in this fish program. (The stty prefix is
+        // valid fish 3+; fish 2.x, last released 2016, keeps the plain exec.)
+        let mut out = String::new();
+        out.push_str("if not test -t 0; and script -qfec true /dev/null >/dev/null 2>&1\n");
+        out.push_str(&format!("    set -gx TERM {}\n", fish_quote(term)));
+        out.push_str("    set -gx COLORTERM truecolor\n");
+        out.push_str(&format!(
+            "    exec script -qfec {} /dev/null\nelse\n    {plain}\nend\n",
+            fish_quote(&script_payload(&plain, cols, rows))
+        ));
+        out
     }
 
     const ZSH_CLEANUP_HOOK: &str = r#"
@@ -1438,7 +1530,7 @@ fi
 
         #[test]
         fn zsh_bootstrap_gates_zdotdir_on_every_redirector_landing() {
-            let script = bootstrap_command(RemoteShell::Zsh, "/bin/zsh");
+            let script = bootstrap_command(RemoteShell::Zsh, "/bin/zsh", "xterm-256color", 80, 24);
             for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
                 assert!(
                     script.contains(&format!("[ -s \"$__tty7_d/{name}\" ] &&")),
@@ -1452,36 +1544,48 @@ fi
         }
 
         #[test]
-        fn file_writing_bootstraps_end_in_a_bare_exec_of_the_users_shell() {
+        fn file_writing_bootstraps_exec_the_users_shell_bare_on_a_real_pty() {
             for (shell, path) in [
                 (RemoteShell::Zsh, "/bin/zsh"),
                 (RemoteShell::Bash, "/bin/bash"),
             ] {
-                let script = bootstrap_command(shell, path);
-                let last = script.trim_end().lines().last().unwrap();
-                assert_eq!(
-                    last,
-                    format!("exec '{path}' -l"),
-                    "{shell:?} bootstrap must end by exec'ing {path} bare"
+                let script = bootstrap_command(shell, path, "xterm-256color", 80, 24);
+                // The pty branch still execs the user's shell bare, exactly as
+                // before the bastion fallback existed.
+                assert!(
+                    script.contains(&format!("\nexec '{path}' -l\n")),
+                    "{shell:?} must keep the bare exec on the pty branch"
+                );
+                // And the pipe branch re-arms through script with the size fix.
+                assert!(
+                    script.contains("exec script -qfec "),
+                    "{shell:?} must fall back to script on a pipe"
+                );
+                assert!(
+                    script.contains("stty rows 24 cols 80"),
+                    "{shell:?} must carry the pane size into the fallback"
                 );
             }
         }
 
         #[test]
         fn bash_bootstrap_forces_a_non_login_shell_through_the_rcfile() {
-            let script = bootstrap_command(RemoteShell::Bash, "/bin/bash");
-            assert!(script.contains("exec '/bin/bash' --rcfile \"$__tty7_d/bashrc\" -i"));
+            let script =
+                bootstrap_command(RemoteShell::Bash, "/bin/bash", "xterm-256color", 80, 24);
+            assert!(script.contains("exec '/bin/bash' --rcfile \"$TTY7_RM_DIR/bashrc\" -i"));
+            assert!(script.contains("export TTY7_RM_DIR=\"$__tty7_d\""));
             assert!(script.contains("source /etc/profile"));
         }
 
         #[test]
-        fn fish_bootstrap_is_one_exec_carrying_the_escaped_body() {
-            let script = bootstrap_command(RemoteShell::Fish, "/usr/bin/fish");
-            assert!(script.starts_with("exec '/usr/bin/fish' -C '"));
-            assert!(script.trim_end().ends_with("' -l"));
+        fn fish_bootstrap_keeps_the_single_exec_and_wraps_it_under_script() {
+            let script =
+                bootstrap_command(RemoteShell::Fish, "/usr/bin/fish", "xterm-256color", 80, 24);
+            assert!(script.contains("exec '/usr/bin/fish' -C '"));
             assert!(!script.contains("mkdir"));
-
             assert!(script.contains(r"printf \'\\e]%s\\a\' $argv[1]"));
+            assert!(script.contains("exec script -qfec "));
+            assert!(script.contains("set -gx TERM 'xterm-256color'"));
         }
 
         #[test]
@@ -1536,7 +1640,7 @@ fi
                 (RemoteShell::Fish, "fish", "--no-execute", "/usr/bin/fish"),
             ];
             for (shell, bin, flag, path) in cases {
-                let script = bootstrap_command(shell, path);
+                let script = bootstrap_command(shell, path, "xterm-256color", 80, 24);
                 if let Some((ok, stderr)) = parse_check(bin, flag, &script) {
                     assert!(ok, "{bin} rejected its bootstrap script:\n{stderr}");
                 }
@@ -1599,6 +1703,209 @@ mod tests {
     /// bootstrap that never ran the command at all would pass every assertion
     /// below. Matching through the terminator pins the status whole.
     const FAILED_COMMAND_MARK: &str = "133;D;1\u{7}";
+
+    /// Does this box carry util-linux `script`? The bastion fallback is built
+    /// on its `-c`; BSD script (macOS) has no `-c` and must skip the test.
+    fn util_linux_script() -> bool {
+        std::process::Command::new("script")
+            .args(["-qc", "true", "/dev/null"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// A link that never delivered the pty it was asked for — a bastion that
+    /// proxies exec as a plain pipe — used to leave the shell deaf: no echo,
+    /// no ONLCR, no job control, and bash-preexec silent with them, so no C
+    /// and no D ever arrived. The bootstrap's `script` branch must re-arm the
+    /// shell on a pty of its own. Typed at through a pipe, the full prompt
+    /// cycle has to come back — and the D mark is the discriminating one,
+    /// because a pipe-borne bash without job control never emits it.
+    #[cfg(unix)]
+    #[test]
+    fn a_bootstrap_typed_at_through_a_pipe_still_runs_the_full_prompt_cycle() {
+        if !util_linux_script() {
+            eprintln!("skipping: util-linux script not available");
+            return;
+        }
+        use std::io::{Read, Write};
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::{Duration, Instant};
+
+        let script = remote::bootstrap_command(
+            remote::RemoteShell::Bash,
+            "/bin/bash",
+            "xterm-256color",
+            80,
+            24,
+        );
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn bootstrap over pipes");
+        let mut stdin = child.stdin.take().expect("stdin");
+        let mut stdout = child.stdout.take().expect("stdout");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut out = Vec::new();
+        let mut typed = false;
+        let mut seen_fail = None;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(chunk) => out.extend_from_slice(&chunk),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            let text = String::from_utf8_lossy(&out);
+            if !typed && (text.contains("133;A") || text.contains("133;B")) {
+                let _ = stdin.write_all(b"false\n");
+                let _ = stdin.flush();
+                typed = true;
+            }
+            if typed && text.contains(FAILED_COMMAND_MARK) {
+                if seen_fail.is_none() {
+                    seen_fail = Some(Instant::now());
+                }
+                if seen_fail.is_some_and(|at| at.elapsed() >= Duration::from_millis(500)) {
+                    break;
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(stdin);
+
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(
+            typed,
+            "no prompt mark ever arrived through the fallback; got:\n{text}"
+        );
+        assert!(
+            text.contains("133;C"),
+            "the submitted command was never marked; got:\n{text}"
+        );
+        assert!(
+            text.contains(FAILED_COMMAND_MARK),
+            "no D mark: the inner shell has no job control, so the script \
+             fallback did not arm; got:\n{text}"
+        );
+    }
+
+    /// The bastion fallback must never cost a shell. A box whose `script`
+    /// cannot do the job (BSD script, busybox without `-e` — a stub that
+    /// always fails here) has to keep the plain exec, pty or no pty: the
+    /// condition's `||`-chain lets `[ -t 0 ]` win before the probe is even
+    /// consulted, and a failed probe must fall to the then-branch, never into
+    /// an `exec script` that is about to die. The full prompt cycle over a
+    /// real pty, with a failing `script` first in PATH, proves the shell
+    /// survived.
+    #[cfg(unix)]
+    #[test]
+    fn a_box_whose_script_cannot_help_keeps_the_plain_exec() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::io::{Read, Write};
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::{Duration, Instant};
+
+        let stub = tempfile::tempdir().expect("stub dir");
+        let stub_script = stub.path().join("script");
+        std::fs::write(&stub_script, "#!/bin/sh\nexit 1\n").expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&stub_script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub");
+        }
+
+        let script = remote::bootstrap_command(
+            remote::RemoteShell::Bash,
+            "/bin/bash",
+            "xterm-256color",
+            80,
+            24,
+        );
+        let fake_path = format!("{}:/usr/bin:/bin", stub.path().to_string_lossy());
+
+        let pty = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("bash");
+        cmd.arg("-c");
+        cmd.arg(&script);
+        cmd.env("PATH", &fake_path);
+        let mut child = pty.slave.spawn_command(cmd).expect("spawn bootstrap");
+        let mut writer = pty.master.take_writer().expect("writer");
+        let mut reader = pty.master.try_clone_reader().expect("reader");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut out = Vec::new();
+        let mut typed = false;
+        let mut seen_fail = None;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(chunk) => out.extend_from_slice(&chunk),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            let text = String::from_utf8_lossy(&out);
+            if !typed && (text.contains("133;A") || text.contains("133;B")) {
+                let _ = writer.write_all(b"false\n");
+                let _ = writer.flush();
+                typed = true;
+            }
+            if typed && text.contains(FAILED_COMMAND_MARK) {
+                if seen_fail.is_none() {
+                    seen_fail = Some(Instant::now());
+                }
+                if seen_fail.is_some_and(|at| at.elapsed() >= Duration::from_millis(500)) {
+                    break;
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(pty.master);
+
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(
+            typed,
+            "no prompt mark: the shell died under a failing `script` stub; \
+             got:\n{text}"
+        );
+        assert!(
+            text.contains(FAILED_COMMAND_MARK),
+            "the shell survived but never ran the typed command; got:\n{text}"
+        );
+    }
 
     /// Type `keys` at a freshly spawned shell and return everything it wrote back.
     ///
