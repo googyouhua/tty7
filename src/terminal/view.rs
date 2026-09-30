@@ -3277,10 +3277,11 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Fill the chosen entry with `fill`. Routing respects the prompt editor:
-    /// username text goes through `paste()` when the inline editor owns input,
-    /// otherwise direct to the PTY; passwords bypass the editor when it is
-    /// not active so they never land in visible editor state.
+    /// Fill the chosen entry with `fill`, then submit with Enter so the user
+    /// never has to press it by hand. Content goes straight to the PTY
+    /// (bracketed-paste framed when the terminal offers it) rather than
+    /// through the local editor — a fill is a credential, not a command to
+    /// expand or record in history.
     pub fn fill_onekey(
         &mut self,
         fill: tty7_core::core::onekey::OneKeyFill,
@@ -3299,45 +3300,42 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        // `UsernameAndPassword` arrives as `user\rpass`; split so the username
-        // keeps paste semantics while the password never touches editor state
-        // when the editor is not active.
+        // `UsernameAndPassword` arrives as `user\rpass`: submit the username,
+        // then the password, then a final Enter for the whole login.
         if matches!(fill, tty7_core::core::onekey::OneKeyFill::UsernameAndPassword) {
             if let Some(pos) = bytes.iter().position(|&b| b == b'\r') {
                 let (user, pass) = bytes.split_at(pos);
                 let pass = &pass[1..];
                 if !user.is_empty() {
-                    self.paste(
-                        String::from_utf8_lossy(user).into_owned(),
-                        cx,
-                    );
-                } else {
-                    self.send_to_pty(b"\r", cx);
+                    self.send_onekey_text(&String::from_utf8_lossy(user), cx);
                 }
-                if !user.is_empty() {
-                    self.send_to_pty(b"\r", cx);
-                }
+                self.send_to_pty(b"\r", cx);
                 if !pass.is_empty() {
-                    if self.input_active() {
-                        self.paste(String::from_utf8_lossy(pass).into_owned(), cx);
-                    } else {
-                        self.send_to_pty(pass, cx);
-                    }
+                    self.send_onekey_text(&String::from_utf8_lossy(pass), cx);
                 }
+                self.send_to_pty(b"\r", cx);
                 self.onekey_picker = None;
                 cx.notify();
                 return;
             }
         }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        if matches!(fill, tty7_core::core::onekey::OneKeyFill::Username) || self.input_active()
-        {
-            self.paste(text, cx);
-        } else {
-            self.send_to_pty(&bytes, cx);
-        }
+        self.send_onekey_text(&String::from_utf8_lossy(&bytes), cx);
+        self.send_to_pty(b"\r", cx);
         self.onekey_picker = None;
         cx.notify();
+    }
+
+    /// Send credential text to the PTY framed as a bracketed paste when the
+    /// terminal offers it, so it lands literally instead of running through
+    /// the shell's line-editor bindings.
+    fn send_onekey_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let bracketed = self
+            .terminal
+            .term
+            .lock()
+            .mode()
+            .contains(TermMode::BRACKETED_PASTE);
+        self.send_to_pty(&paste_bytes(text, bracketed), cx);
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
@@ -7468,16 +7466,19 @@ impl TerminalView {
         let theme = cx.theme();
         let lh = self.line_height;
         let header_hint = match picker.stage() {
-            super::onekey::Stage::PickEntry => format!(
-                "OneKey: {} — type to filter, ↑↓ move, Enter select, Esc cancel",
-                picker.filter_text()
-            ),
+            super::onekey::Stage::PickEntry => match picker.filter_text().is_empty() {
+                true => "OneKey autofill — type to filter · ↑↓ to move · Enter to select · Esc to cancel".to_string(),
+                false => format!(
+                    "OneKey — “{}” · ↑↓ to move · Enter to select · Esc to cancel",
+                    picker.filter_text()
+                ),
+            },
             super::onekey::Stage::PickFill => {
                 let title = picker
                     .chosen_entry()
                     .map(|e| e.title.as_str())
                     .unwrap_or("");
-                format!("OneKey: {title} — u username · p password · b both · ⌫ back · Esc cancel")
+                format!("OneKey “{title}” — u username · p password · b both · fills and submits · ⌫ back · Esc cancel")
             }
         };
         let row = |i: usize| {
@@ -7579,7 +7580,7 @@ impl TerminalView {
                         .items_center()
                         .px_2()
                         .text_color(theme.muted_foreground)
-                        .child("Manage entries in Settings → Terminal → OneKey")
+                        .child("Add or edit entries in Settings → Terminal → OneKey")
                         .into_any_element(),
                 ),
         )
@@ -11110,6 +11111,11 @@ mod gpui_tests {
             next_input_until_timeout(&mut daemon),
             Some(b"pw2".to_vec()),
             "staging's password reaches the raw PTY"
+        );
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\r".to_vec()),
+            "the fill auto-submits with Enter"
         );
     }
 

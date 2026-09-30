@@ -47,7 +47,7 @@ Source: https://kingtoolbox.github.io/2024/01/20/onekey_autofill/ (user-supplied
 - D6 Management UI: Settings `OneKey` section + picker-inline edit (Q1 Settings section).
 - D7 Shortcut: `Ctrl-Shift-I` opens picker (user-typed; palette name `OneKey: Autofill…`).
 - D8 At-rest protection: plaintext in config.json with security warning (Q3).
-- D9 Sequence: username, `Enter`, password, no final auto-submit (Q4).
+- D9 Sequence: username, Enter, password, final Enter auto-submit (changed per user request on 2026-09-30; was Enter-no-submit).
 
 # Open questions
 

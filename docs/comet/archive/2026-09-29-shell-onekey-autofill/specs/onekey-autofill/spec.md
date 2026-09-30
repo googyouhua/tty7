@@ -44,7 +44,7 @@ No automatic prompt detection. No background scanning of PTY output.
     fill uses the same path when editor active, else direct `send_to_pty`.
   - Never bypass `accepts_input` guards; never call `terminal.write` raw.
 - `Username+Password` sequence: types username, presses `Enter`, types password,
-  no final auto-submit (per Q4).
+  then submits the login with a final `Enter` (auto-submit per user request).
 - Picker masks password values (never renders secret plaintext); title/username
   visible for selection.
 

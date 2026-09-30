@@ -1117,15 +1117,6 @@ impl Tty7App {
             _ => format!("OneKey autofill ({count} entries)"),
         };
         let mut rows: Vec<AnyElement> = Vec::new();
-        rows.push(
-            self.settings_row(
-                "Security warning",
-                tty7_core::core::onekey::ONEKEY_SECURITY_WARNING,
-                div().into_any_element(),
-                cx,
-            )
-            .into_any_element(),
-        );
         // Add/edit form when open; entry rows with Edit/Delete otherwise.
         if let Some(form) = self
             .active_settings()
@@ -1177,7 +1168,7 @@ impl Tty7App {
             rows.push(
                 self.settings_row(
                     "Title",
-                    "1–64 characters, unique across entries.",
+                    "A short unique name for this entry, 1–64 characters.",
                     self.settings_text_input(&form.title, W, form.error.is_some(), cx)
                         .into_any_element(),
                     cx,
@@ -1187,7 +1178,7 @@ impl Tty7App {
             rows.push(
                 self.settings_row(
                     "Username",
-                    "Filled when you pick Username or the both-sequence.",
+                    "Typed and submitted with Enter when you choose Username or Username + Password.",
                     self.settings_text_input(&form.username, W, false, cx)
                         .into_any_element(),
                     cx,
@@ -1197,7 +1188,7 @@ impl Tty7App {
             rows.push(
                 self.settings_row(
                     "Password",
-                    "Masked; stored as plaintext in config.json (see warning).",
+                    "Masked here; stored as plaintext in config.json. Typed and submitted with Enter on fill.",
                     h_flex()
                         .gap(px(8.))
                         .child(self.settings_text_input(&form.password, W, false, cx))
@@ -1210,7 +1201,7 @@ impl Tty7App {
             rows.push(
                 self.settings_row(
                     "Kind",
-                    "ssh-bound entries carry an optional host hint for filtering.",
+                    "How this entry is classified: a generic account or an SSH-bound credential.",
                     kind_choice,
                     cx,
                 )
@@ -1219,7 +1210,7 @@ impl Tty7App {
             rows.push(
                 self.settings_row(
                     "Host binding",
-                    "Optional: shown and matched when filtering the picker.",
+                    "Optional host hint, matched when filtering. Usually used with ssh-bound entries.",
                     self.settings_text_input(&form.binding, W, false, cx)
                         .into_any_element(),
                     cx,
@@ -1257,8 +1248,8 @@ impl Tty7App {
             );
             rows.push(
                 self.settings_row(
-                    "Entries",
-                    "Persisted in config.json `onekey_entries` across restarts.",
+                    "Saved entries",
+                    "Usernames and passwords you can fill into any shell pane with Ctrl-Shift-I. Stored in config.json.",
                     add.into_any_element(),
                     cx,
                 )
