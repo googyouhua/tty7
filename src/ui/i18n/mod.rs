@@ -1407,6 +1407,7 @@ l10n_keys! {
     InstancePickerDefault,
     InstancePickerNewPlaceholder,
     InstancePickerEnter,
+    InstancePickerClose,
     InstancePickerInvalid,
     InstancePickerRelaunchFailed,
     SwitcherStartingServer,
