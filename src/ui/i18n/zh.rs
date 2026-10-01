@@ -1500,6 +1500,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "未找到运行中的编码 agent——请先在某个窗格中启动一个（claude、codex 等）。"
         }
         L10nKey::SwitcherThisComputer => "本机",
+        L10nKey::InstancePickerTitle => "谁在使用 tty7？",
+        L10nKey::InstancePickerHint => "用用户名隔开每个人的会话。",
+        L10nKey::InstancePickerDefault => "默认",
+        L10nKey::InstancePickerNewPlaceholder => "新用户名…",
+        L10nKey::InstancePickerEnter => "进入",
+        L10nKey::InstancePickerInvalid => "用户名仅限 [a-z0-9-]。",
         L10nKey::SwitcherStartingServer => "正在启动 tty7 server…",
         L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty7 server… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty7 server… {done}",

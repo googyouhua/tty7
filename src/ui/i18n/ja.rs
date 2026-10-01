@@ -1664,6 +1664,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "実行中のコーディングエージェントが見つかりません — 先にペインでコーディングエージェントを起動してください（claude、codex など）"
         }
         L10nKey::SwitcherThisComputer => "このコンピュータ",
+        L10nKey::InstancePickerTitle => "tty7 を使用するのは誰ですか？",
+        L10nKey::InstancePickerHint => "ユーザー名で各自のセッションを分けます。",
+        L10nKey::InstancePickerDefault => "デフォルト",
+        L10nKey::InstancePickerNewPlaceholder => "新しいユーザー名…",
+        L10nKey::InstancePickerEnter => "開く",
+        L10nKey::InstancePickerInvalid => "ユーザー名は [a-z0-9-] のみ使用できます。",
         L10nKey::SwitcherStartingServer => "tty7 のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "tty7 のサーバーをダウンロード中… {done} / {total}"

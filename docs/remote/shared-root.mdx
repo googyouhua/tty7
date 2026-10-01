@@ -37,9 +37,9 @@ verb works unchanged behind the flag — including `server start`, `server
 stop` (which now stops only *your* instance), `agents`, `wait`, and
 `worktree new`.
 
-`--as` overrides `TTY7_CONFIG_DIR`; `--config-dir` (GUI) overrides `--as`.
-The instance root itself can move with `TTY7_AS_ROOT` (default
-`$HOME/.config`).
+`--as` overrides `TTY7_CONFIG_DIR`; the instance root itself can move with
+`TTY7_AS_ROOT` (default `$HOME/.config`). (`--config-dir` is a `tty7-app` /
+`tty7-server` flag and does not exist on this CLI.)
 
 <Warning>
   Never run `pane close --orphans` or `server stop` without `--as` on a
@@ -48,17 +48,29 @@ The instance root itself can move with `TTY7_AS_ROOT` (default
 
 ## GUI
 
-Launch (or point) the GUI at the same directory:
+Point the GUI at the same directory:
 
 ```bash
 tty7-app --config-dir ~/.config/tty7-alice
 ```
 
-Remote links are per instance too: each laptop user connects their own link
-to the shared box, and only ever sees their own instance's workspaces in the
-switcher. If the GUI was already on the default instance, switch it to the
-per-user directory and the other people's workspaces disappear — that is the
-check working.
+(`--config-dir` belongs to the `tty7-app` binary; the `tty7` CLI uses
+`--as` instead.) Remote links are per instance too: each laptop user
+connects their own link to the shared box, and only ever sees their own
+instance's workspaces in the switcher. If the GUI was already on the
+default instance, switch it to the per-user directory and the other
+people's workspaces disappear — that is the check working.
+
+## Startup picker
+
+Launched with no arguments — a desktop click, say — the GUI asks who is
+using it before anything else opens. The picker lists the default
+instance plus every `tty7-<name>` already on disk, with a field for a
+new username; the path is derived (`~/.config/tty7-<username>`), never
+typed. The last choice is preselected, and the picker waits for a
+confirm — it never auto-enters. Closing it quits the launch. Starting
+with `--config-dir` (or `TTY7_CONFIG_DIR`) skips the picker; the choice
+is still remembered.
 
 ## Trying it with two users
 

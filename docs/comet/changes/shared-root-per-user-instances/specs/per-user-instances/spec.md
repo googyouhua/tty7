@@ -17,13 +17,21 @@
 - 无 wrapper 脚本：`scripts/tty7-as` 不存在。
 - GUI：`tty7-app --config-dir ~/.config/tty7-alice`（GUI 保持 `--config-dir`，不加 `--as`；注意二进制是 `tty7-app`，`tty7` CLI 没有该 flag）；远端链路按用户分别建连接，客户端配置决定 attach 到哪个实例。
 
-## 3. 文档
+## 3. GUI 启动实例选择器
 
-- `docs/remote/shared-root.mdx`：双人并行开实例、互不可见检查清单（A1–A4）、GUI 配置、停服/清理、已知约束（同 UID 下 root 可旁路、端口/CPU 共享）。
+- 触发：`tty7-app` 启动时既无 `--config-dir` 也无 `TTY7_CONFIG_DIR`，先弹实例选择器（gpui 首窗口），用户确认后再按既有流程进主窗口。无参数启动必弹（已有窗口在跑也不例外）；带路径启动优先转发给已在跑的窗口，无窗口时同样先过选择器、再在所选实例中打开该路径。
+- 列表：默认实例 + 已有 `tty7-*` 实例（扫 `${TTY7_AS_ROOT:-$HOME/.config}`）+ 手输新名（同 `--as` 名字规则）；界面只录 `username`（下拉选已有、可手输），路径自动拼，用户不碰路径。
+- 上次选择预选中；常驻等待，无倒计时、无自动进入。
+- 确认后：记住选择（见记忆），按选中实例的 config dir 继续启动（等价于带 `--config-dir` 启动）。
+- 记忆：默认目录下固定文件（如 `~/.config/tty7/.last-instance`，存名字/`default`）；记忆失效（目录被删）回退选择器；显式参数启动跳过选择器但仍更新记忆。
+
+## 4. 文档
+
+- `docs/remote/shared-root.mdx`：双人并行开实例、互不可见检查清单（A1–A5）、GUI 选择器 + `--config-dir` 配置、停服/清理、已知约束（同 UID 下 root 可旁路、端口/CPU 共享）。
 - 明确禁止：`pane close --orphans` 或 `server stop` 不带 `--as` 在共享机器上使用（裸调用作用于默认实例）。
 - CLI 参考（`docs/cli/reference.mdx` Global flags）：`--as <name>` 一行。
 
-## 4. 安全与约束
+## 5. 安全与约束
 
 - socket 语义不变：`0600`，父目录 `0700`，`umask 077`；实例目录 `700`。
 - 不改 daemon/control 线协议；`--as` 只是在 CLI 进程内把名字解析为 config dir 后走既有链路。

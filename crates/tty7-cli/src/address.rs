@@ -15,38 +15,26 @@ pub const OUTSIDE_SHELL: &str = "not inside a tty7 shell — pass an explicit %p
 
 /// Override for the root under which `--as <name>` instances live. Defaults
 /// to `$HOME/.config`, so instances are `~/.config/tty7-<name>` beside the
-/// default `~/.config/tty7`.
-pub const ENV_INSTANCE_ROOT: &str = "TTY7_AS_ROOT";
+/// default `~/.config/tty7`. Shared with the GUI picker through
+/// `tty7_core::core::instance`.
+pub const ENV_INSTANCE_ROOT: &str = tty7_core::core::instance::ENV_INSTANCE_ROOT;
 
 /// A per-user instance name for `--as`: lowercase letters, digits, hyphens.
 /// Rejects `..`, `/`, a leading `-`, and anything else that could escape the
 /// `tty7-<name>` directory shape. Used as a clap value parser, so a refusal
-/// is a usage error (exit 2) raised before anything starts.
+/// is a usage error (exit 2) raised before anything starts. The rule itself
+/// lives in `tty7_core::core::instance` so the GUI picker enforces the same
+/// shape.
 pub fn parse_instance_name(s: &str) -> Result<String, String> {
-    let ok = !s.is_empty()
-        && !s.starts_with('-')
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if ok {
-        Ok(s.to_string())
-    } else {
-        Err(format!(
-            "'{s}' is not an instance name — use [a-z0-9-], e.g. alice"
-        ))
-    }
+    tty7_core::core::instance::validate_name(s)
 }
 
 /// The config directory for `--as <name>`, resolved without touching the
 /// filesystem: `${TTY7_AS_ROOT:-$HOME/.config}/tty7-<name>`. Pure so tests
-/// can pin both inputs.
+/// can pin both inputs; the root rule is shared with
+/// `tty7_core::core::instance::root_with`.
 pub fn instance_dir(name: &str, root: Option<&str>, home: Option<&str>) -> Result<PathBuf> {
-    let root = root
-        .filter(|r| !r.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            home.filter(|h| !h.is_empty())
-                .map(|h| PathBuf::from(h).join(".config"))
-        })
+    let root = tty7_core::core::instance::root_with(root, home)
         .ok_or_else(|| anyhow!("$HOME is unset and {ENV_INSTANCE_ROOT} is not set"))?;
     Ok(root.join(format!("tty7-{name}")))
 }
@@ -55,20 +43,13 @@ pub fn instance_dir(name: &str, root: Option<&str>, home: Option<&str>) -> Resul
 /// (mode 700, leaf only) and set `TTY7_CONFIG_DIR`, which is what
 /// `tty7_core`'s endpoint derivation reads. Call before `Context::from_env`.
 pub fn apply_instance(name: &str) -> Result<()> {
-    let root = std::env::var(ENV_INSTANCE_ROOT).ok();
-    let home = std::env::var("HOME").ok();
-    let dir = instance_dir(name, root.as_deref(), home.as_deref())?;
-    std::fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    }
+    let Some(dir) = tty7_core::core::instance::dir_for(name) else {
+        return Err(anyhow!("no directory resolves for instance '{name}'"));
+    };
+    tty7_core::core::instance::ensure_dir(&dir)?;
     // SAFETY: startup, before this process spawns any thread — the same
     // pattern `tty7-updater` uses to steer its own config dir.
-    unsafe {
-        std::env::set_var(ENV_CONFIG_DIR, &dir)
-    };
+    unsafe { std::env::set_var(ENV_CONFIG_DIR, &dir) };
     Ok(())
 }
 
@@ -279,7 +260,9 @@ mod tests {
         assert_eq!(parse_instance_name("alice").unwrap(), "alice");
         assert_eq!(parse_instance_name("a-1").unwrap(), "a-1");
         // Nothing that could escape `tty7-<name>` or read as a flag.
-        for bad in ["", "Alice", "ALICE", "../x", "a/b", "-x", "a b", "a_b", "%41"] {
+        for bad in [
+            "", "Alice", "ALICE", "default", "../x", "a/b", "-x", "a b", "a_b", "%41",
+        ] {
             assert!(
                 parse_instance_name(bad).is_err(),
                 "'{bad}' must not read as an instance name"
