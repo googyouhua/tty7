@@ -14,8 +14,9 @@ use std::cell::{Cell, RefCell};
 use uuid::Uuid;
 
 use crate::core::config::{
-    BellMode, Config, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition, NotifyMode,
-    PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
+    BellMode, Config, ConfirmClose, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition,
+    NotifyMode, PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel,
+    WindowBackdrop,
 };
 use tty7_core::core::onekey::{OneKeyEntry, OneKeyKind};
 use crate::core::keychain::{
@@ -35,6 +36,7 @@ mod agents;
 mod editor;
 mod hosts;
 pub(crate) mod kit;
+pub(crate) mod mobile;
 mod pages;
 mod shell;
 mod shortcuts;
@@ -200,18 +202,20 @@ pub(crate) enum SettingsSection {
     Terminal,
     KeyboardMouse,
     Ssh,
+    Mobile,
     Agents,
     Keybindings,
     About,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 7] = [
+    pub(crate) const ALL: [SettingsSection; 8] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Terminal,
         SettingsSection::KeyboardMouse,
         SettingsSection::Ssh,
+        SettingsSection::Mobile,
         SettingsSection::Agents,
         SettingsSection::About,
     ];
@@ -230,6 +234,7 @@ impl SettingsSection {
             Self::Terminal => L10nKey::SettingsNavTerminal,
             Self::KeyboardMouse => L10nKey::SettingsNavInput,
             Self::Ssh => L10nKey::SettingsNavSsh,
+            Self::Mobile => L10nKey::SettingsNavMobile,
             Self::Agents => L10nKey::SettingsNavAgents,
             Self::Keybindings => L10nKey::SettingsNavKeybindings,
             Self::About => L10nKey::SettingsNavAbout,
@@ -243,6 +248,7 @@ impl SettingsSection {
             Self::Terminal => "icons/settings/terminal.svg",
             Self::KeyboardMouse | Self::Keybindings => "icons/settings/keyboard.svg",
             Self::Ssh => "icons/settings/ssh.svg",
+            Self::Mobile => "icons/settings/mobile.svg",
             Self::Agents => "icons/settings/integrations.svg",
             Self::About => "icons/settings/about.svg",
         }
@@ -255,6 +261,7 @@ impl SettingsSection {
             SettingsSection::Terminal => "settings:terminal",
             SettingsSection::KeyboardMouse => "settings:keyboard-mouse",
             SettingsSection::Ssh => "settings:ssh",
+            SettingsSection::Mobile => "settings:mobile",
             SettingsSection::Agents => "settings:agents",
             SettingsSection::Keybindings => "settings:keybindings",
             SettingsSection::About => "settings:about",
@@ -355,6 +362,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Appearance,
             title: SettingsDimInactivePanes,
             keywords: SettingsSearchDimInactivePanesKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
+            title: SettingsAutoHideTitlebarButtons,
+            keywords: SettingsSearchAutoHideTitlebarButtonsKeywords,
         },
         SearchEntry {
             section: Appearance,
@@ -675,6 +687,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsConfirmClose,
+            keywords: SettingsSearchConfirmCloseKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsSidebarGrouping,
             keywords: SettingsSearchSidebarGroupingKeywords,
         },
@@ -743,6 +760,16 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: SettingsInstallCliOnPath,
             keywords: SettingsSearchCommandLineToolKeywords,
         },
+        SearchEntry {
+            section: Mobile,
+            title: SettingsMobileAccess,
+            keywords: SettingsSearchMobileKeywords,
+        },
+        SearchEntry {
+            section: Mobile,
+            title: SettingsMobilePair,
+            keywords: SettingsSearchMobileKeywords,
+        },
     ]
 }
 
@@ -777,11 +804,13 @@ impl SearchEntry {
     fn config_key(&self) -> &'static str {
         match self.title {
             L10nKey::SettingsDimInactivePanes => "dim_inactive_panes",
+            L10nKey::SettingsAutoHideTitlebarButtons => "auto_hide_titlebar_buttons",
             L10nKey::SettingsCursorBlink => "cursor_blink",
             L10nKey::SettingsCursorShape => "cursor_style",
             L10nKey::SettingsPromptCursorShape => "prompt_cursor_style",
             L10nKey::SettingsScrollback => "scrollback_limit",
             L10nKey::SettingsNewTabPosition => "new_tab_position",
+            L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
@@ -812,6 +841,7 @@ impl SearchEntry {
             L10nKey::SettingsCheckUpdatesOnLaunch => "check_for_updates",
             L10nKey::SettingsAutoDownload => "auto_download_updates",
             L10nKey::SettingsUpdateChannel => "update_channel",
+            L10nKey::SettingsMobileAccess => "mobile_access",
             L10nKey::DetectUrls => "link_url",
             L10nKey::ForwardSshLoopbackLinks => "ssh_loopback_forward",
             L10nKey::SettingsVerifyHostKeys => "verify_host_keys",
@@ -859,6 +889,9 @@ impl SearchEntry {
             L10nKey::SettingsBlur => t(L10nKey::SettingsBlurDesc),
             L10nKey::SettingsBackdrop => t(L10nKey::SettingsBackdropDesc),
             L10nKey::SettingsDimInactivePanes => t(L10nKey::SettingsDimInactivePanesDesc),
+            L10nKey::SettingsAutoHideTitlebarButtons => {
+                t(L10nKey::SettingsAutoHideTitlebarButtonsDesc)
+            }
             L10nKey::SettingsFontSize => t(L10nKey::SettingsFontSizeDesc),
             L10nKey::SettingsUiFontFamily => t(L10nKey::SettingsUiFontFamilyDesc),
             L10nKey::SettingsLineHeight => t(L10nKey::SettingsLineHeightDesc),
@@ -895,6 +928,7 @@ impl SearchEntry {
             L10nKey::SettingsRestoreLastLayout => t(L10nKey::SettingsRestoreLastLayoutDesc),
             L10nKey::SettingsShowTrayIcon => t(L10nKey::SettingsShowTrayIconDesc),
             L10nKey::SettingsNewTabPosition => t(L10nKey::SettingsNewTabPositionDesc),
+            L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
@@ -935,6 +969,9 @@ impl SearchEntry {
             L10nKey::SettingsDimInactivePanes => {
                 cfg.dim_inactive_panes != defaults.dim_inactive_panes
             }
+            L10nKey::SettingsAutoHideTitlebarButtons => {
+                cfg.auto_hide_titlebar_buttons != defaults.auto_hide_titlebar_buttons
+            }
             L10nKey::SettingsCursorBlink => cfg.cursor_blink != defaults.cursor_blink,
             L10nKey::SettingsCursorShape => cfg.cursor_style != defaults.cursor_style,
             L10nKey::SettingsPromptCursorShape => {
@@ -942,6 +979,7 @@ impl SearchEntry {
             }
             L10nKey::SettingsScrollback => cfg.scrollback_limit != defaults.scrollback_limit,
             L10nKey::SettingsNewTabPosition => cfg.new_tab_position != defaults.new_tab_position,
+            L10nKey::SettingsConfirmClose => cfg.confirm_close != defaults.confirm_close,
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
@@ -962,6 +1000,7 @@ impl SearchEntry {
             L10nKey::SettingsRestoreLastLayout => cfg.restore_session != defaults.restore_session,
             L10nKey::SettingsPerPaneHistory => cfg.per_pane_history != defaults.per_pane_history,
             L10nKey::SettingsShowTrayIcon => cfg.show_tray_icon != defaults.show_tray_icon,
+            L10nKey::SettingsMobileAccess => cfg.mobile_access != defaults.mobile_access,
             L10nKey::SettingsOptionAsMeta => {
                 cfg.macos_option_as_alt != defaults.macos_option_as_alt
             }
@@ -1222,6 +1261,13 @@ pub(crate) struct SettingsState {
     /// The host whose ssh command was just copied, for the moment the button
     /// says so.
     pub(crate) ssh_copied: Option<Uuid>,
+    /// Settings → Mobile: the pairing code on screen, if one is.
+    pub(crate) mobile_pairing: Option<mobile::Pairing>,
+    /// The phone the last pairing on screen ended with, said once.
+    pub(crate) mobile_paired: Option<String>,
+    pub(crate) mobile_copied: bool,
+    /// Phone access was just switched on and no gateway is serving yet.
+    pub(crate) mobile_starting: bool,
     pub(crate) ssh_filter: Entity<InputState>,
     pub(crate) ssh_collapsed_groups: std::collections::HashSet<String>,
     /// The OneKey add/edit form (None when closed).
@@ -2820,6 +2866,17 @@ impl Tty7App {
     pub(crate) fn add_new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let profile = SshProfile::new(String::new());
         self.ssh_form_load(&profile, window, cx);
+        // A blank form is there to be typed into: land on its first field
+        // rather than leave the keystrokes with nothing to go to. (A form held
+        // back behind an unsaved-edits prompt has not opened yet, and is not
+        // this profile's.)
+        let first = self
+            .ssh_form_mut()
+            .filter(|form| form.editing == profile.id)
+            .map(|form| form.name.clone());
+        if let Some(first) = first {
+            first.update(cx, |state, cx| state.focus(window, cx));
+        }
     }
 
     fn delete_profile_confirmed(&mut self, id: Uuid, cx: &mut Context<Self>) {
@@ -3018,7 +3075,7 @@ mod tests {
             );
             assert!(SettingsSection::ALL.contains(&entry.section));
         }
-        assert_eq!(SettingsSection::ALL.len(), 7);
+        assert_eq!(SettingsSection::ALL.len(), 8);
         assert!(!SettingsSection::ALL.contains(&SettingsSection::Keybindings));
     }
 
@@ -3094,6 +3151,40 @@ mod tests {
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsNotifyThreshold]);
+    }
+
+    /// The title-bar switch is found under Appearance by its config key and by
+    /// its own name in every language, and flipping it marks that row — and
+    /// only that row — as changed, so its reset link resets the right thing.
+    #[test]
+    fn the_titlebar_buttons_switch_is_found_by_key_and_name_and_marks_only_itself() {
+        let entry = settings_search_entries()
+            .iter()
+            .find(|e| e.title == L10nKey::SettingsAutoHideTitlebarButtons)
+            .unwrap();
+        assert!(entry.section == SettingsSection::Appearance);
+        for locale in ["en", "zh-CN", "ja-JP"] {
+            crate::ui::i18n::set_locale(locale);
+            let name = t(L10nKey::SettingsAutoHideTitlebarButtons);
+            for query in ["auto_hide_titlebar_buttons", name] {
+                assert!(entry_matches(entry, query), "{locale}: {query}");
+                assert_eq!(
+                    best_matching_section(query).unwrap().profile_label(),
+                    SettingsSection::Appearance.profile_label(),
+                    "{locale}: {query}"
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+
+        let mut cfg = Config::default();
+        cfg.auto_hide_titlebar_buttons = true;
+        let changed = settings_search_entries()
+            .iter()
+            .filter(|e| e.modified(&cfg))
+            .map(|e| e.title)
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![L10nKey::SettingsAutoHideTitlebarButtons]);
     }
 
     /// A shortcut is the first thing someone searching a settings window for a
@@ -3534,6 +3625,7 @@ mod tests {
             "Tab completion",
             "Command history search",
             "Dim inactive panes",
+            "Show title bar buttons on hover",
             "Option (⌥) acts as Meta",
             "Install the tty7 command on PATH",
         ] {
@@ -3612,7 +3704,7 @@ mod tests {
             ssh_group_label(crate::core::ssh_config::IMPORTED_GROUP),
             "~/.ssh/config"
         );
-        assert_eq!(ssh_group_label(""), "In tty7");
+        assert_eq!(ssh_group_label(""), "tty7 settings");
         assert_eq!(ssh_group_label("Work"), "Work");
     }
 

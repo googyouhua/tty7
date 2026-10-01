@@ -1499,8 +1499,24 @@ impl TerminalView {
                     log::warn!("attach to pane {id} went unanswered ({e:#}); spawning fresh");
                     None
                 }
-                Err(e) => {
+                Err(e) if crate::terminal::attach_refused(&e) => {
                     log::info!("pane {id} is gone on its machine ({e:#}); spawning fresh");
+                    None
+                }
+                // The daemon never got to say either way: the link to its
+                // machine would not open, or broke before it answered. The pane
+                // is most likely still running over there, so a fresh shell in
+                // its place would orphan it — its scrollback, its agent session,
+                // whatever it was doing — and put a stranger in its tab. Fail,
+                // and let a retry reach the pane itself.
+                Err(e) if !route.is_local() => {
+                    log::info!("pane {id} could not be reached to reattach ({e:#})");
+                    return Err(e.context(format!(
+                        "could not reach pane {id}, which may still be running"
+                    )));
+                }
+                Err(e) => {
+                    log::info!("pane {id} is gone ({e:#}); spawning fresh");
                     None
                 }
             },
@@ -1566,18 +1582,18 @@ impl TerminalView {
         self.owner_workspace
     }
 
+    /// Dials `spec` through the local daemon. `remote_start_dir` is a
+    /// directory on the far host — see [`ClientMsg::SpawnNativeSsh`]'s `cwd`
+    /// — and never a local one.
+    ///
+    /// [`ClientMsg::SpawnNativeSsh`]: crate::daemon::protocol::ClientMsg::SpawnNativeSsh
     pub fn spawn_native_ssh_terminal(
         spec: Box<crate::daemon::protocol::NativeSshSpec>,
-        working_directory: Option<std::path::PathBuf>,
+        remote_start_dir: Option<std::path::PathBuf>,
     ) -> anyhow::Result<NativeSshParts> {
         let persist = Box::new(spec.without_secrets());
-        let (terminal, pane_id) = RemoteTerminal::spawn_native_ssh(
-            TermSize::new(80, 24),
-            8,
-            17,
-            working_directory,
-            spec,
-        )?;
+        let (terminal, pane_id) =
+            RemoteTerminal::spawn_native_ssh(TermSize::new(80, 24), 8, 17, remote_start_dir, spec)?;
         Ok(NativeSshParts {
             terminal,
             pane_id,
@@ -2027,7 +2043,13 @@ impl TerminalView {
     }
 
     fn accepts_input(&self, cx: &gpui::App) -> bool {
-        let Some(ws) = self.workspace().map(|w| w.workspace) else {
+        // A local pane has no `PaneWorkspace`, but the window that owns it can
+        // still have been taken over by a remote client.
+        let Some(ws) = self
+            .workspace()
+            .map(|w| w.workspace)
+            .or(self.owner_workspace)
+        else {
             return true;
         };
         crate::ui::remote_workspace::workspace_accepts_input(cx, ws)
@@ -2175,17 +2197,22 @@ impl TerminalView {
     }
 
     /// This pane sits somewhere the repo cache cannot place yet — neither a
-    /// repository nor "not one". A probe in flight looks the same, and the
-    /// throttle turns the retry away; the case this exists for is a probe that
-    /// failed, which leaves the answer open instead of recording a wrong one,
-    /// and would otherwise wait for the cwd to change or a command to finish
-    /// before anyone asked again.
-    fn git_repo_unanswered(&self, cx: &App) -> bool {
+    /// repository nor "not one" — and a retry is due. Only a failed probe
+    /// leaves a cwd that way; without this it would wait for the cwd to change
+    /// or a command to finish before anyone asked again.
+    ///
+    /// Read-only on purpose: this runs on every poll tick, and the cache is a
+    /// global whose every mutable touch redraws the window — while a probe is
+    /// in flight or throttled, the answer has to be "no" at no cost.
+    fn git_retry_due(&self, cx: &App) -> bool {
         let Some(cwd) = self.git_status_cwd.as_deref() else {
             return false;
         };
-        cx.try_global::<crate::terminal::git_status::GitStatusCache>()
-            .is_none_or(|cache| cache.known_repo_for(self.host_id, cwd).is_none())
+        let Some(cache) = cx.try_global::<crate::terminal::git_status::GitStatusCache>() else {
+            return false;
+        };
+        cache.known_repo_for(self.host_id, cwd).is_none()
+            && cache.probe_due(self.host_id, cwd, GIT_RETRY_GAP)
     }
 
     /// Plant the cwd the git-status poll would have found. For tests that
@@ -4129,7 +4156,7 @@ impl TerminalView {
             self.refresh_git_status(cwd_now, GitRefresh::Edge, cx);
         } else if tool_activity {
             self.refresh_git_status(cwd_now, GitRefresh::Opportunistic, cx);
-        } else if self.git_repo_unanswered(cx) {
+        } else if self.git_retry_due(cx) {
             self.refresh_git_status(cwd_now, GitRefresh::Retry, cx);
         }
 
@@ -9112,6 +9139,7 @@ mod tests {
             }),
             label: None,
             resize_echo: false,
+            size_lease: false,
         }
     }
 
@@ -10793,6 +10821,7 @@ mod tests {
             spec: None,
             label: None,
             resize_echo: false,
+            size_lease: false,
         };
 
         let remote = ws.target.host_id();
@@ -10810,6 +10839,7 @@ mod tests {
             spec: None,
             label: None,
             resize_echo: false,
+            size_lease: false,
         };
         assert_eq!(sibling.target.host_id(), remote);
     }
@@ -15165,6 +15195,7 @@ mod gpui_tests {
             )),
             label: None,
             resize_echo: false,
+            size_lease: false,
         }));
         id
     }
@@ -15418,6 +15449,7 @@ mod gpui_tests {
                     spec: None,
                     label: Some("hummingbot".into()),
                     resize_echo: false,
+                    size_lease: false,
                 }));
                 assert_eq!(view.title, "hummingbot", "an untitled tab shows the name");
                 view.handle_event(AlacEvent::Exit, cx);

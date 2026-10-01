@@ -47,6 +47,41 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDefinedIn => "Defined in",
         L10nKey::SettingsConnectInNewTab => "Connect in new tab",
         L10nKey::SettingsCopied => "Copied",
+        L10nKey::SettingsNavMobile => "Mobile",
+        L10nKey::SettingsMobileAccess => "Allow phone access",
+        L10nKey::SettingsMobileAccessDesc => {
+            "Phones you pair can see this machine's panes and type into them, even with every window closed. Connections are end-to-end encrypted."
+        }
+        L10nKey::SettingsMobileStatusStarting => "Starting…",
+        L10nKey::SettingsMobileStatusFailed => "Not running: {error}",
+        L10nKey::SettingsMobileStartFailed => "Phone access could not start: {error}",
+        L10nKey::SettingsMobileNoAnswer => {
+            "the tty7 server did not start it. Restart the server in Settings → About, then try again."
+        }
+        L10nKey::SettingsMobilePair => "Pair a phone",
+        L10nKey::SettingsMobileShowCode => "Show code",
+        L10nKey::SettingsMobilePairDesc => "Shows a one-time code for the tty7 app on your phone.",
+        L10nKey::SettingsMobilePairNeedsAccess => "Turn on phone access first.",
+        L10nKey::SettingsMobilePairScan => {
+            "Scan this with the tty7 app on your phone, or copy the code and paste it there."
+        }
+        L10nKey::SettingsMobilePairValid => "Expires in {time}. Works for one phone.",
+        L10nKey::SettingsMobileNewCode => "New code",
+        L10nKey::SettingsMobilePairExpired => "This code has expired. Make a new one to pair.",
+        L10nKey::SettingsMobilePairTried => {
+            "This code was tried and no longer works — it may have been mistyped, or the connection dropped. Make a new one to pair."
+        }
+        L10nKey::SettingsMobilePairReplaced => {
+            "A newer code has replaced this one. Make a new one to pair."
+        }
+        L10nKey::SettingsMobileCopyCode => "Copy code",
+        L10nKey::SettingsMobilePaired => "Paired with {name}.",
+        L10nKey::SettingsMobilePhones => "Paired phones",
+        L10nKey::SettingsMobileNoPhones => "No phones paired yet.",
+        L10nKey::SettingsMobileUnpair => "Unpair",
+        L10nKey::SettingsSearchMobileKeywords => {
+            "phone mobile iphone android ipad pair qr code remote access"
+        }
         L10nKey::SettingsCopySshCommand => "Copy ssh command",
         L10nKey::SettingsStoredInTty7 => "Stored in tty7 settings",
         L10nKey::SettingsClickAgainToRemove => "Click again to remove",
@@ -222,6 +257,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CloseTabBusyTitle => "Close this tab?",
         L10nKey::CloseBusyCommandBody => "{what} is still running. Closing ends it.",
         L10nKey::CloseBusyAgentBody => "{agent} is still working. Closing ends its turn.",
+        L10nKey::CloseIdleBody => "Its shell ends with it.",
+        L10nKey::CloseTabsTitle => "Close {count} tabs?",
+        L10nKey::CloseTabsBody => "The shells in them end too.",
         L10nKey::Keep => "Keep",
         L10nKey::SettingsNavAppearance => "Appearance",
         L10nKey::SettingsNavTerminal => "Terminal",
@@ -231,6 +269,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNavKeybindings => "Keyboard shortcuts",
         L10nKey::SettingsNavAbout => "About",
         L10nKey::SettingsHeader => "SETTINGS",
+        L10nKey::SettingsWindowTitle => "Settings",
         L10nKey::Reset => "Reset",
         L10nKey::Save => "Save",
         L10nKey::Connect => "Connect",
@@ -240,7 +279,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsThemeIntroDesc => "Each theme sets its own light or dark look.",
         L10nKey::SettingsTypography => "Typography",
         L10nKey::SettingsFontSize => "Terminal font size",
-        L10nKey::SettingsFontSizeDesc => "Terminal text size in pixels.",
+        L10nKey::SettingsFontSizeDesc => "Terminal text size in points.",
         L10nKey::SettingsUiFontSize => "Interface font size",
         L10nKey::SettingsUiFontSizeDesc => "Text size for tabs, panels and settings.",
         L10nKey::SettingsUiFontFamily => "Interface font",
@@ -298,6 +337,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDimInactivePanesDesc => {
             "Fade unfocused panes so the active one stands out."
         }
+        L10nKey::SettingsAutoHideTitlebarButtons => "Show title bar buttons on hover",
+        L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
+            "Keep the new tab and sidebar buttons out of sight until the pointer is over the title bar."
+        }
         L10nKey::SettingsOpenThemesFolder => "Open themes folder",
         L10nKey::SettingsChangeThemeImage => "Change…",
         L10nKey::SettingsChooseThemeImage => "Choose…",
@@ -331,7 +374,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsInheritedByEveryHost => "Inherited by every host",
         L10nKey::SettingsNoSavedHosts => "No saved hosts yet.",
         L10nKey::SettingsNothingMatches => "Nothing matches {query}.",
-        L10nKey::SettingsInTty7 => "In tty7",
+        L10nKey::SettingsInTty7 => "tty7 settings",
         L10nKey::SettingsImportFromSshConfig => "Import from ~/.ssh/config",
         L10nKey::SettingsExpandAllGroups => "Expand All Groups",
         L10nKey::SettingsNoHostsYet => "No hosts yet",
@@ -694,6 +737,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsTabs => "Tabs",
         L10nKey::SettingsNewTabPosition => "New tab position",
         L10nKey::SettingsNewTabPositionDesc => "Where a freshly opened tab is inserted.",
+        L10nKey::SettingsConfirmClose => "Confirm before closing",
+        L10nKey::SettingsConfirmCloseDesc => {
+            "When closing a tab or pane asks first. SSH hosts set to warn before closing are always asked about."
+        }
+        L10nKey::ConfirmCloseNever => "Never",
+        L10nKey::ConfirmCloseWhenBusy => "When busy",
+        L10nKey::ConfirmCloseAlways => "Always",
         L10nKey::SettingsTabBarPosition => "Tab bar position",
         L10nKey::SettingsTabBarPositionDesc => "A strip on top or a sidebar on the left.",
         L10nKey::SettingsSidebarGrouping => "Auto grouping",
@@ -915,6 +965,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "fade unfocused inactive split pane focus opacity highlight active dimming"
         }
+        L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
+            "auto hide autohide title bar titlebar buttons chrome hover pointer minimal clean new tab sidebar toggle"
+        }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => "pane hover activate",
         L10nKey::SettingsSearchFontFamilyKeywords => "typeface monospace typography",
         L10nKey::SettingsSearchFontLigaturesKeywords => "typography glyph fira",
@@ -945,6 +998,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "interface font family ui typeface typography chrome sidebar tab"
         }
         L10nKey::SettingsSearchNewTabPositionKeywords => "tabs order end after current",
+        L10nKey::SettingsSearchConfirmCloseKeywords => {
+            "confirm close closing tab pane ask prompt warn busy running idle always never"
+        }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "notification alert done osc desktop banner long command"
         }
@@ -1528,6 +1584,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteNoticeDisconnected => "Not connected — typing has no effect",
         L10nKey::RemoteActionRetryNow => "Retry Now",
         L10nKey::RemoteActionTakeBack => "Take Back",
+        L10nKey::PaneLeasedBy => "In use on {by}, at its screen size",
         L10nKey::RemoteActionConnect => "Connect",
         L10nKey::RemoteActionRetry => "Retry",
         L10nKey::RemoteActionRemoveEntry => "Remove entry",
@@ -1627,6 +1684,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherCopyingServer => "Copying tty7's server… {done} / {total}",
         L10nKey::SwitcherThisWindow => "This window",
         L10nKey::SwitcherOpen => "Open",
+        L10nKey::SwitcherOffline => "Offline",
         L10nKey::SwitcherDisconnect => "Disconnect",
         L10nKey::SwitcherEditHost => "Edit Host…",
         L10nKey::SwitcherSaveAsHost => "Save as SSH Host…",
@@ -1659,9 +1717,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherConnectingTo => "Connecting to {machine}…",
         L10nKey::SwitcherFormName => "Name",
         L10nKey::SwitcherFormHost => "Host",
-        L10nKey::SwitcherFormNamePlaceholder => "Optional",
+        L10nKey::SwitcherFormNamePlaceholder => "Workspace name",
         L10nKey::SwitcherFormBack => "Back",
-        L10nKey::SwitcherFormCreateHint => "Enter to create · Esc to go back",
+        L10nKey::SwitcherFormCreate => "Create",
         L10nKey::SwitcherFormPickHint => "↑↓ to choose · Enter to select · Esc to close",
         L10nKey::SshPromptPasswordFor => "Password for {user}@{host}",
         L10nKey::SshPromptPassphraseFor => "Passphrase for {key_path}",
@@ -1901,10 +1959,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppWorktreeRemovedBranchKept => {
             "Removed worktree; kept branch \"{branch}\", which has unmerged commits"
         }
-        L10nKey::AppForkStillConnecting => "Could not fork: the pane is still connecting",
         L10nKey::AppPaneNoCodingAgent => "This pane isn't running a coding agent",
         L10nKey::AppForkNoCommand => "tty7 has no fork command for {name}",
-        L10nKey::AppForkLocalOnly => "{name} sessions can only be forked from a local pane",
+        L10nKey::AppForkLocalOnly => {
+            "{name} sessions can't be forked from inside an SSH or WSL session"
+        }
         L10nKey::AppForkNoSessionId => {
             "tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Integrations"
         }
@@ -2327,6 +2386,8 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SftpReplaceBody, "other") => {
             "{names} already exist in this folder. Uploading overwrites them."
         }
+        (L10nKey::CloseTabsTitle, "one") => "Close 1 tab?",
+        (L10nKey::CloseTabsTitle, "other") => "Close {count} tabs?",
         (L10nKey::AppTabsNotRestored, "one") => "1 tab from last time could not be reopened",
         (L10nKey::AppTabsNotRestored, "other") => {
             "{count} tabs from last time could not be reopened"
