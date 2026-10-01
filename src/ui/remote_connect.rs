@@ -288,6 +288,7 @@ fn spec_from(
                 &cfg.ssh_profiles,
                 store,
                 cfg.verify_host_keys,
+                &cfg.onekey_entries,
             ))
         }
         RemoteTarget::Alias { alias } => {
@@ -311,6 +312,7 @@ fn spec_from(
                 &cfg.ssh_profiles,
                 store,
                 cfg.verify_host_keys,
+                &cfg.onekey_entries,
             ))
         }
         RemoteTarget::Wsl { .. } => Err(t(L10nKey::RemoteWslNoSsh).to_string()),
@@ -436,7 +438,7 @@ fn new_session_token() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn client_hostname() -> String {
+pub(crate) fn client_hostname() -> String {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
         // Windows publishes the name in the environment, so the usual case
@@ -1081,6 +1083,7 @@ mod tests {
             &[],
             &crate::core::keychain::InMemoryCredentialStore::new(),
             false,
+            &[],
         )
     }
 

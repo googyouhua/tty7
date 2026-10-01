@@ -7,6 +7,7 @@ use crate::terminal::view::{
     InsertNewline, InsertNewlineFallback, PasteText,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::palette;
 use crate::ui::search::CommandGroup;
 use crate::ui::settings::humanize_action;
 use crate::ui::theme::set_menus;
@@ -38,6 +39,7 @@ pub fn init(cx: &mut App) {
     // gpui runs the window's bubble phase first and returns before the global
     // one, so the two never both fire.
     cx.on_action(|_: &NewWindow, cx: &mut App| crate::ui::windows::open(cx, None));
+    palette::init(cx);
     set_menus(cx);
 }
 
@@ -734,6 +736,7 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ToggleEditorProblems", "secondary-shift-m"),
         ("OpenSshProfiles", ""),
         ("RestartSshSession", "secondary-shift-r"),
+        ("OneKeyAutofill", "ctrl-shift-i"),
         ("Quit", per_platform("secondary-q", "secondary-shift-q")),
     ]
 }
@@ -1116,6 +1119,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::CmdSshManageProfiles).to_string(),
         ),
         "RestartSshSession" => (CommandGroup::Ssh, t(L10nKey::CmdSshReconnect).to_string()),
+        "OneKeyAutofill" => (CommandGroup::Terminal, "OneKey autofill".to_string()),
         "ToggleSftp" => (CommandGroup::Ssh, t(L10nKey::CmdSshRemoteFiles).to_string()),
         "ShowSshForwards" => (
             CommandGroup::Ssh,
@@ -1861,6 +1865,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ToggleEditorProblems" => KeyBinding::new(keystroke, ToggleEditorProblems, None),
         "OpenSshProfiles" => KeyBinding::new(keystroke, OpenSshProfiles, None),
         "RestartSshSession" => KeyBinding::new(keystroke, RestartSshSession, None),
+        "OneKeyAutofill" => KeyBinding::new(keystroke, OneKeyAutofill, None),
         "Quit" => KeyBinding::new(keystroke, Quit, None),
         _ => return None,
     })

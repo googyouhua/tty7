@@ -35,6 +35,12 @@ required-features = ["updater"]
 # `github` is the right panel's GitHub tab: the same HTTPS client, pointed at
 # api.github.com.
 tty7-core = { path = "crates/tty7-core", features = ["gssapi", "remote-install", "github"] }
+# The mobile gateway, run by the local daemon while mobile access is on
+# (`core::mobile`). Lives in the GUI binary only: tty7-server is the lean static
+# binary pushed to remote machines, and must not grow iroh.
+tty7-gateway = { path = "crates/tty7-gateway" }
+# Draws the pairing code in Settings → Mobile.
+qrcode = { version = "0.14", default-features = false }
 
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
@@ -429,6 +435,12 @@ codegen-units = 1
 # 6. `enter` and `tab` map to their native key equivalents in macOS menus.
 #    Without them NSMenuItem got the literal string "enter" and took its first
 #    character, so a `secondary-enter` item (ToggleFullscreen) read as ⌘E.
+#
+# 7. A right- or center-aligned line paints into a layer that covers where its
+#    glyphs land. The layer was sized from the unaligned origin, so an opaque
+#    quad painted over the glyphs later got no higher draw order than them, and
+#    the text showed through — the Changes panel's flush-right directory drew
+#    through the hover action buttons.
 #
 # Patching by source rather than editing the `gpui`/`gpui_platform` pins above is
 # deliberate: `gpui-component` declares its own `gpui` from the upstream URL, and

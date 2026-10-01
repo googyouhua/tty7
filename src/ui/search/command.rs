@@ -175,6 +175,7 @@ pub enum CommandKind {
     QuickConnect(String),
     SaveQuickConnect(String),
     OpenSshProfiles,
+    OneKeyAutofill,
 }
 
 impl CommandKind {
@@ -298,6 +299,7 @@ impl CommandKind {
             SearchHosts => "ssh-add-connection",
             QuickOpenFile => "go-to-file",
             OpenSshProfiles => "ssh-manage-profiles",
+            OneKeyAutofill => "onekey-autofill",
             SaveSshSessionAsHost => "ssh-save-connection",
             OpenSshConnect(_)
             | SetTheme(_)
@@ -424,6 +426,7 @@ impl CommandKind {
             EditorSplitRight => "EditorSplitRight",
             RestartSshSession => "RestartSshSession",
             OpenSshProfiles => "OpenSshProfiles",
+            OneKeyAutofill => "OneKeyAutofill",
             ScmCommit => "ScmCommit",
             ScmStageAll => "ScmStageAll",
             ScmUnstageAll => "ScmUnstageAll",
@@ -764,13 +767,15 @@ impl Item {
             Item::localized(L10nKey::CmdCut, CutText),
             Item::localized(L10nKey::CmdPaste, PasteText),
             Item::localized(L10nKey::CmdSelectAll, SelectAllText),
+            Item::new("OneKey: Autofill…", OneKeyAutofill),
         ];
 
         let ssh = [
             Item::localized(L10nKey::CmdSshAddConnection, SearchHosts),
             Item::localized(L10nKey::CmdSshManageProfiles, OpenSshProfiles),
             Item::localized(L10nKey::CmdSshReconnect, RestartSshSession),
-            Item::localized(L10nKey::CmdSshRemoteFiles, ToggleSftp),
+            // The panel is an SFTP browser, and that is the word people search.
+            Item::localized(L10nKey::CmdSshRemoteFiles, ToggleSftp).with_alias("SFTP"),
             Item::localized(L10nKey::CmdSshPortForwarding, ShowSshForwards),
         ];
 

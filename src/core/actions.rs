@@ -153,6 +153,7 @@ actions!(
         ToggleEditorProblems,
         OpenSshProfiles,
         RestartSshSession,
+        OneKeyAutofill,
         SendTab,
         SendBackTab,
         SwitcherAcross,

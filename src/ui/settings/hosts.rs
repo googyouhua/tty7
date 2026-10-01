@@ -379,7 +379,7 @@ impl Tty7App {
         let dirty = editing && self.ssh_form_dirty(cx);
 
         // While editing, the row shows what the form would save.
-        let (title, address) = match (editing, p) {
+        let (title, mut address) = match (editing, p) {
             (true, _) => {
                 let form = s.ssh_form.as_ref().unwrap();
                 let name = form.name.read(cx).value().trim().to_string();
@@ -418,6 +418,42 @@ impl Tty7App {
             (false, Some(p)) => (host_title(p), host_address(p, cx)),
             (false, None) => (t(L10nKey::SettingsNewHost).to_string(), String::new()),
         };
+        // A linked OneKey entry rides on the address line; a dangling link
+        // says so out loud (A1/A4).
+        let link_note: Option<String> = match (editing, p) {
+            (true, _) => s
+                .ssh_form
+                .as_ref()
+                .and_then(|f| f.onekey_link.clone())
+                .and_then(|id| {
+                    cx.global::<Config>()
+                        .onekey_entries
+                        .iter()
+                        .find(|e| e.id == id)
+                        .map(|e| format!("OneKey: {}", e.title))
+                }),
+            (false, Some(p)) => match &p.onekey_entry_id {
+                None => None,
+                Some(id) => Some(
+                    match cx
+                        .global::<Config>()
+                        .onekey_entries
+                        .iter()
+                        .find(|e| &e.id == id)
+                    {
+                        Some(e) => format!("OneKey: {}", e.title),
+                        None => "OneKey link broken".to_string(),
+                    },
+                ),
+            },
+            (false, None) => None,
+        };
+        if let Some(note) = link_note {
+            if !address.is_empty() {
+                address.push_str("  ");
+            }
+            address.push_str(&note);
+        }
         let blank_title = editing && p.is_none() && title == t(L10nKey::SettingsNewHost);
         // A host saved under its own address is titled with that address, and
         // a second line saying it again is noise — the rule the New Tab menu
@@ -447,6 +483,12 @@ impl Tty7App {
 
         let head = div()
             .id(SharedString::from(format!("ssh-host-{}", id.as_u128())))
+            .role(gpui::Role::Button)
+            .aria_label(match address.is_empty() {
+                true => title.clone(),
+                false => format!("{title}, {address}"),
+            })
+            .aria_expanded(open)
             .h(px(40.))
             .px(px(10.))
             .flex()
@@ -545,6 +587,13 @@ impl Tty7App {
                 .find(|q| q.id == j)
                 .map(|q| host_title(q))
         });
+        let onekey = match &p.onekey_entry_id {
+            None => None,
+            Some(id) => Some(match cfg.onekey_entries.iter().find(|e| &e.id == id) {
+                Some(e) => format!("{} ({})", e.title, e.username),
+                None => "link broken (entry missing)".to_string(),
+            }),
+        };
         let fields: Vec<(&str, String)> = [
             ("HostName", Some(p.host.clone())),
             (
@@ -558,6 +607,7 @@ impl Tty7App {
             ("Port", Some(p.port.to_string())),
             ("IdentityFile", p.identity_files.first().cloned()),
             ("ProxyJump", jump),
+            ("OneKey", onekey),
             (
                 t(L10nKey::SettingsDefinedIn),
                 Some(ssh_group_label(ssh_group_key(p)).to_string()),
@@ -673,6 +723,60 @@ impl Tty7App {
             .into_any_element()
     }
 
+    /// The SSH host editor's OneKey link row (A1): a dropdown of all OneKey
+    /// entries plus "No link". The link is a live entry id, stored on save.
+    fn onekey_link_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tk = Tk::of(cx);
+        let entries: Vec<(String, String, String)> = cx
+            .global::<Config>()
+            .onekey_entries
+            .iter()
+            .map(|e| (e.id.clone(), e.title.clone(), e.username.clone()))
+            .collect();
+        let current = self
+            .active_settings()
+            .and_then(|s| s.ssh_form.as_ref())
+            .and_then(|f| f.onekey_link.clone());
+        let selected = current
+            .as_deref()
+            .and_then(|id| entries.iter().position(|(eid, _, _)| eid == id))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let labels: Vec<String> = std::iter::once("No link".to_string())
+            .chain(
+                entries
+                    .iter()
+                    .map(|(_, title, user)| format!("{title} ({user})")),
+            )
+            .collect();
+        let options: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let choice = self.settings_choice(
+            "ssh-onekey-link",
+            &options,
+            selected,
+            cx,
+            move |this, ix, _w, cx| {
+                let id = match ix {
+                    0 => None,
+                    n => entries.get(n - 1).map(|(eid, _, _)| eid.clone()),
+                };
+                this.set_ssh_onekey_link(id, cx);
+            },
+        );
+        h_flex()
+            .items_center()
+            .child(
+                div()
+                    .w(px(SSH_LABEL_W))
+                    .flex_shrink_0()
+                    .text_size(fs(12.))
+                    .text_color(tk.k45)
+                    .child("OneKey"),
+            )
+            .child(choice)
+            .into_any_element()
+    }
+
     fn render_host_editor(&self, saved: bool, cx: &mut Context<Self>) -> AnyElement {
         let tk = Tk::of(cx);
         let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
@@ -722,7 +826,8 @@ impl Tty7App {
             .child(field("User", &form.user, false))
             .child(field("Port", &form.port, errors.port.is_some()))
             .child(field("IdentityFile", &form.identity_files, false))
-            .child(field("ProxyJump", &form.jump, errors.jump.is_some()));
+            .child(field("ProxyJump", &form.jump, errors.jump.is_some()))
+            .child(self.onekey_link_row(cx));
 
         v_flex()
             .gap(px(14.))

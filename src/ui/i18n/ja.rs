@@ -49,6 +49,51 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDefinedIn => "定義元",
         L10nKey::SettingsConnectInNewTab => "新しいタブで接続",
         L10nKey::SettingsCopied => "コピーしました",
+        L10nKey::SettingsNavMobile => "モバイル",
+        L10nKey::SettingsMobileAccess => "スマートフォンからのアクセスを許可",
+        L10nKey::SettingsMobileAccessDesc => {
+            "ペアリングしたスマートフォンから、このマシンのペインを表示して入力できます。ウインドウをすべて閉じていても使えます。通信はエンドツーエンドで暗号化されます。"
+        }
+        L10nKey::SettingsMobileStatusStarting => "起動しています…",
+        L10nKey::SettingsMobileStatusFailed => "実行されていません: {error}",
+        L10nKey::SettingsMobileStartFailed => {
+            "スマートフォンからのアクセスを開始できませんでした: {error}"
+        }
+        L10nKey::SettingsMobileNoAnswer => {
+            "tty7 サーバーが起動しませんでした。設定 → 情報 でサーバーを再起動してから、もう一度お試しください。"
+        }
+        L10nKey::SettingsMobilePair => "スマートフォンをペアリング",
+        L10nKey::SettingsMobileShowCode => "コードを表示",
+        L10nKey::SettingsMobilePairDesc => {
+            "スマートフォンの tty7 アプリ用に、1 回限りのコードを表示します。"
+        }
+        L10nKey::SettingsMobilePairNeedsAccess => {
+            "先にスマートフォンからのアクセスをオンにしてください。"
+        }
+        L10nKey::SettingsMobilePairScan => {
+            "スマートフォンの tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
+        }
+        L10nKey::SettingsMobilePairValid => {
+            "あと {time} で失効します。1 台のスマートフォンに限ります。"
+        }
+        L10nKey::SettingsMobileNewCode => "新しいコード",
+        L10nKey::SettingsMobilePairExpired => {
+            "このコードは期限切れです。新しいコードを作成してペアリングしてください。"
+        }
+        L10nKey::SettingsMobilePairTried => {
+            "このコードは一度試されたため使えなくなりました（入力ミスや接続の中断など）。新しいコードを作成してペアリングしてください。"
+        }
+        L10nKey::SettingsMobilePairReplaced => {
+            "新しいコードに置き換えられました。新しいコードを作成してペアリングしてください。"
+        }
+        L10nKey::SettingsMobileCopyCode => "コードをコピー",
+        L10nKey::SettingsMobilePaired => "{name} とペアリングしました。",
+        L10nKey::SettingsMobilePhones => "ペアリング済みのスマートフォン",
+        L10nKey::SettingsMobileNoPhones => "ペアリングしたスマートフォンはまだありません。",
+        L10nKey::SettingsMobileUnpair => "ペアリングを解除",
+        L10nKey::SettingsSearchMobileKeywords => {
+            "スマホ モバイル iphone android ipad ペアリング qr コード リモート アクセス"
+        }
         L10nKey::SettingsCopySshCommand => "ssh コマンドをコピー",
         L10nKey::SettingsStoredInTty7 => "tty7 の設定に保存",
         L10nKey::SettingsClickAgainToRemove => "もう一度クリックで削除",
@@ -225,6 +270,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CloseSshConnectionBody => "接続中です。閉じると切断されます",
         L10nKey::ClosePaneBusyTitle => "このペインを閉じますか？",
         L10nKey::CloseTabBusyTitle => "このタブを閉じますか？",
+        L10nKey::CloseIdleBody => "中のシェルも終了します。",
+        L10nKey::CloseTabsTitle => "{count} 個のタブを閉じますか？",
+        L10nKey::CloseTabsBody => "中のシェルもすべて終了します。",
         L10nKey::CloseBusyCommandBody => "{what} はまだ実行中です。閉じると終了します。",
         L10nKey::CloseBusyAgentBody => {
             "{agent} はまだ作業中です。閉じるとこのターンは中断されます。"
@@ -238,6 +286,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavKeybindings => "キーボードショートカット",
         L10nKey::SettingsNavAbout => "情報",
         L10nKey::SettingsHeader => "設定",
+        L10nKey::SettingsWindowTitle => "設定",
         L10nKey::Reset => "リセット",
         L10nKey::Save => "保存",
         L10nKey::Connect => "接続",
@@ -247,7 +296,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsThemeIntroDesc => "テーマごとにライトかダークが決まります",
         L10nKey::SettingsTypography => "タイポグラフィ",
         L10nKey::SettingsFontSize => "ターミナルの文字サイズ",
-        L10nKey::SettingsFontSizeDesc => "ターミナルテキストのサイズ（ピクセル）",
+        L10nKey::SettingsFontSizeDesc => "ターミナルテキストのサイズ（ポイント）",
         L10nKey::SettingsUiFontSize => "画面の文字サイズ",
         L10nKey::SettingsUiFontSizeDesc => "タブ・パネル・設定などの文字サイズ",
         L10nKey::SettingsUiFontFamily => "画面のフォント",
@@ -307,6 +356,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FollowTheme => "テーマに従う",
         L10nKey::SettingsDimInactivePanes => "非アクティブなペインを暗くする",
         L10nKey::SettingsDimInactivePanesDesc => "フォーカス外のペインを暗くします",
+        L10nKey::SettingsAutoHideTitlebarButtons => "タイトルバーのボタンをホバー時に表示",
+        L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
+            "新規タブやサイドバーのボタンを、ポインタがタイトルバーに乗ったときだけ表示します"
+        }
         L10nKey::SettingsOpenThemesFolder => "テーマフォルダを開く",
         L10nKey::SettingsChangeThemeImage => "変更…",
         L10nKey::SettingsChooseThemeImage => "選択…",
@@ -334,7 +387,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInheritedByEveryHost => "すべてのホストに継承されます",
         L10nKey::SettingsNoSavedHosts => "保存済みホストはまだありません",
         L10nKey::SettingsNothingMatches => "「{query}」に一致する項目がありません",
-        L10nKey::SettingsInTty7 => "tty7 内",
+        L10nKey::SettingsInTty7 => "tty7 の設定",
         L10nKey::SettingsImportFromSshConfig => "~/.ssh/config からインポート",
         L10nKey::SettingsExpandAllGroups => "すべてのグループを展開",
         L10nKey::SettingsNoHostsYet => "まだホストがありません",
@@ -690,6 +743,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowTrayIconDesc => "エージェントの入力待ちを通知",
         L10nKey::SettingsTabs => "タブ",
         L10nKey::SettingsNewTabPosition => "新規タブの表示位置",
+        L10nKey::SettingsConfirmClose => "閉じる前に確認",
+        L10nKey::SettingsConfirmCloseDesc => {
+            "タブやペインを閉じる前に確認するタイミング。「閉じる前に警告」を有効にした SSH ホストは常に確認します"
+        }
+        L10nKey::ConfirmCloseNever => "確認しない",
+        L10nKey::ConfirmCloseWhenBusy => "実行中のときのみ",
+        L10nKey::ConfirmCloseAlways => "常に確認",
         L10nKey::SettingsNewTabPositionDesc => "新しく開いたタブが挿入される場所",
         L10nKey::SettingsTabBarPosition => "タブバーの位置",
         L10nKey::SettingsTabBarPositionDesc => {
@@ -926,6 +986,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "非アクティブ ペイン 暗く フォーカス 分割 fade unfocused inactive split pane focus opacity highlight active dimming"
         }
+        L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
+            "自動 隠す タイトルバー ボタン ホバー ポインタ すっきり 新規タブ サイドバー auto hide title bar buttons hover"
+        }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "ペイン ホバー アクティブ focus follows mouse pane hover activate"
         }
@@ -969,6 +1032,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchNewTabPositionKeywords => {
             "タブ 順序 末尾 現在のタブの隣 new tab position tabs order end after current"
+        }
+        L10nKey::SettingsSearchConfirmCloseKeywords => {
+            "閉じる 確認 タブ ペイン 実行中 アイドル 常に しない confirm close tab pane ask prompt busy idle always never"
         }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "通知 アラート 完了 osc デスクトップ バナー 長い コマンド notify on command finish notification alert desktop"
@@ -1582,6 +1648,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteNoticeDisconnected => "未接続です — 入力しても反映されません",
         L10nKey::RemoteActionRetryNow => "今すぐ再試行",
         L10nKey::RemoteActionTakeBack => "取り戻す",
+        L10nKey::PaneLeasedBy => "{by} で使用中（その画面サイズで表示）",
         L10nKey::RemoteActionConnect => "接続",
         L10nKey::RemoteActionRetry => "再試行",
         L10nKey::RemoteActionRemoveEntry => "エントリを削除",
@@ -1678,6 +1745,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherCopyingServer => "tty7 のサーバーをコピー中… {done} / {total}",
         L10nKey::SwitcherThisWindow => "このウィンドウ",
         L10nKey::SwitcherOpen => "開く",
+        L10nKey::SwitcherOffline => "オフライン",
         L10nKey::SwitcherDisconnect => "切断",
         L10nKey::SwitcherEditHost => "ホストを編集…",
         L10nKey::SwitcherSaveAsHost => "SSH ホストとして保存…",
@@ -1710,9 +1778,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherConnectingTo => "{machine} に接続中…",
         L10nKey::SwitcherFormName => "名前",
         L10nKey::SwitcherFormHost => "ホスト",
-        L10nKey::SwitcherFormNamePlaceholder => "任意",
+        L10nKey::SwitcherFormNamePlaceholder => "ワークスペース名",
         L10nKey::SwitcherFormBack => "戻る",
-        L10nKey::SwitcherFormCreateHint => "Enter で作成 · Esc で戻る",
+        L10nKey::SwitcherFormCreate => "作成",
         L10nKey::SwitcherFormPickHint => "↑↓ で選択 · Enter で決定 · Esc で閉じる",
         L10nKey::SshPromptPasswordFor => "{user}@{host} のパスワード",
         L10nKey::SshPromptPassphraseFor => "{key_path} のパスフレーズ",
@@ -1952,11 +2020,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppWorktreeRemovedBranchKept => {
             "ワークツリーを削除しました。ブランチ「{branch}」には未マージのコミットがあるため残しました"
         }
-        L10nKey::AppForkStillConnecting => "フォークできませんでした: ペインはまだ接続中です",
         L10nKey::AppPaneNoCodingAgent => "このペインはコーディングエージェントを実行していません",
         L10nKey::AppForkNoCommand => "tty7 には {name} 用のフォークコマンドがありません",
         L10nKey::AppForkLocalOnly => {
-            "{name} のセッションはローカルペインからしかフォークできません"
+            "SSH または WSL セッション内の {name} のセッションはフォークできません"
         }
         L10nKey::AppForkNoSessionId => {
             "tty7 はこのペインで {name} のセッション ID を確認できていません — 設定 → 連携でフックをインストールしてください"
@@ -2389,6 +2456,8 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SftpReplaceBody, "other") => {
             "{names} はこのフォルダに既に存在します。アップロードすると上書きされます。"
         }
+        (L10nKey::CloseTabsTitle, "one") => "1 個のタブを閉じますか？",
+        (L10nKey::CloseTabsTitle, "other") => "{count} 個のタブを閉じますか？",
         (L10nKey::AppTabsNotRestored, "one") => "前回のタブ 1 個を開き直せませんでした",
         (L10nKey::AppTabsNotRestored, "other") => "前回のタブ {count} 個を開き直せませんでした",
         (L10nKey::LaunchWorkspacesLeftRunning, "one") => {
