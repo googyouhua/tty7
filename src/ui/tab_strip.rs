@@ -1364,8 +1364,8 @@ impl Tty7App {
 
     /// The instance badge pinned after the workspace chip's chevron: the
     /// username this window runs on, or the default mark. Display-only; the
-    /// chip keeps its own click.
-    fn instance_badge() -> impl IntoElement {
+    /// chip keeps its own click. Theme-following, like the monogram beside it.
+    fn instance_badge(cx: &gpui::App) -> impl IntoElement {
         let dir = crate::core::config::config_dir_path();
         let memory = dir
             .as_deref()
@@ -1383,8 +1383,8 @@ impl Tty7App {
             .flex_shrink_0()
             .px(px(5.))
             .rounded(px(4.))
-            .bg(gpui::rgb(0x2E7D5B))
-            .text_color(gpui::white())
+            .bg(cx.theme().secondary)
+            .text_color(cx.theme().foreground)
             .text_size(px(10.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .child(label)
@@ -1479,7 +1479,7 @@ impl Tty7App {
                                     .size(px(11.))
                                     .flex_shrink_0(),
                             )
-                            .child(Self::instance_badge()),
+                            .child(Self::instance_badge(cx)),
                     )
                     .xsmall()
                     .w_full()
