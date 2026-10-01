@@ -1,0 +1,190 @@
+schema: comet.native.v4
+name: ssh-host-onekey-link
+language: en
+phase: archive
+status: done
+state_version: 9
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 02d7c9a3dba7b76aa4accb8b3f96159096407f92ad5a4a9378a81f4e99c54f4c
+spec_changes:
+  - capability: ssh-host-onekey-link
+    operation: create
+    source: specs/ssh-host-onekey-link/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/ssh-host-onekey-link
+  target_branch: comet/shell-onekey-autofill
+  finish: push
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "A1: SSH 新增/编辑 host 表单有 OneKey 关联下拉；选定条目保存后，host 行与详情页显示已关联的条目 title。"
+    result: passed
+    reason:
+      text: "Host editor has OneKey dropdown (onekey_link_row in
+        src/ui/settings/hosts.rs, No-link + title (user) options wired to
+        set_ssh_onekey_link; SshProfileForm.onekey_link seed/collect in
+        settings.rs); saved rows suffix 'OneKey: {title}' and details show
+        'title (user)'."
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: 连接已关联 host（password/auth-auto）时直接用条目用户名密码鉴权成功，全程不弹密码框。"
+    result: passed
+    reason:
+      text: build_spec_inner overrides effective user and spec.password from
+        linked_credential; native_ssh_spec_for_profile and
+        resolve_persisted_ssh_spec thread cfg.onekey_entries; auth.rs
+        try_password + all-password keyboard-interactive consume spec.password
+        first (prompt only on auth failure). Test
+        linked_host_uses_onekey_username_and_password passes.
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: 去 OneKey 里改该条目的密码（或改名），不碰 host，再次连接用新密码成功（live 引用）。"
+    result: passed
+    reason:
+      text: linked_credential resolves entry id live at connect time (no snapshot);
+        empty-username/empty-password edge rules keep host user / keychain
+        chain. Test link_follows_entry_edits_without_touching_the_host passes.
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "A4: 删除被关联的 OneKey 条目后，连接回退到 host 自身凭证；host 行显示链接失效提示；无崩溃。"
+    result: passed
+    reason:
+      text: Unknown id resolves to None so connect falls back to host credentials;
+        is_link_broken drives row hint 'OneKey link broken' and details 'link
+        broken (entry missing)'; no error dialog path. Tests
+        dangling_link_resolves_to_nothing_and_reports_broken and
+        dangling_link_falls_back_to_host_credentials pass.
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: 解除关联后恢复纯 host 凭证行为，与从未关联一致。"
+    result: passed
+    reason:
+      text: onekey_entry_id None (incl. 'No link' + blank-id + old-file serde default)
+        yields linked_credential None and is_link_broken false, i.e.
+        byte-identical old behavior. Test unlinked_host_ignores_entries passes.
+      truncated: false
+builder_handoff:
+  candidate_id: 2a82442c-8a44-4b49-8867-7f724fac0531
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:ef3ff9fe-16ec-4afb-86fc-a2281e946119
+  iteration: 1
+  summary:
+    text: "SSH host links OneKey username+password: SshProfile.onekey_entry_id
+      (serde default, servers.json round-trip);
+      linked_credential/linked_title/is_link_broken resolver in core onekey;
+      build_native_ssh_spec threads entries and overrides effective
+      user+password with host fallback; host editor OneKey dropdown row;
+      rows/details show linked title or broken hint. A1-A5 covered."
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+  checks:
+    - name:
+        text: cargo check (workspace)
+        truncated: false
+      result: passed
+      note:
+        text: warnings only
+        truncated: false
+    - name:
+        text: tty7-core onekey tests (13)
+        truncated: false
+      result: passed
+      note:
+        text: incl. 5 new link resolver tests
+        truncated: false
+    - name:
+        text: tty7-core ssh_profile tests (15)
+        truncated: false
+      result: passed
+      note: null
+    - name:
+        text: tty7-core config tests (60)
+        truncated: false
+      result: passed
+      note: null
+    - name:
+        text: bin ssh_connect tests (16)
+        truncated: false
+      result: passed
+      note:
+        text: incl. 3 new link override/fallback/unlink tests
+        truncated: false
+    - name:
+        text: bin settings tests (53)
+        truncated: false
+      result: passed
+      note: null
+  checks_truncated: false
+  known_limits:
+    - text: Live GUI connect against a real SSH server not exercised in unit tests;
+        override verified at spec-build level
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-09-30T14:06:14.672Z
+blockers: []
+verification:
+  candidate_id: 2a82442c-8a44-4b49-8867-7f724fac0531
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:800c0d10-ee43-48db-bd6d-3561f0176c56
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: "All 5 acceptance items verified in code plus passing suites: tty7-core
+      core::onekey (13), tty7-app ssh_connect incl. 3 link tests (16+ pass),
+      tty7-app settings (53). Read-only verification, no code modified."
+    truncated: false
+  risks: []
+  risks_truncated: false
+  completed_at: 2026-09-30T14:09:13.798Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: "All 5 acceptance items verified in code plus passing suites: tty7-core
+        core::onekey (13), tty7-app ssh_connect incl. 3 link tests (16+ pass),
+        tty7-app settings (53). Read-only verification, no code modified."
+      truncated: false
+    completed_at: 2026-09-30T14:09:13.798Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-09-30T13:51:51.689Z

@@ -466,6 +466,12 @@ pub struct Config {
     /// as their history mysteriously forgetting the other window.
     #[serde(default)]
     pub per_pane_history: bool,
+    /// WindTerm-style OneKey entries: saved usernames/passwords (SSH-bound or
+    /// generic account) filled manually into shell panes. Plaintext in
+    /// `config.json` by explicit user decision — the Settings UI must show
+    /// [`crate::core::onekey::ONEKEY_SECURITY_WARNING`].
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub onekey_entries: Vec<crate::core::onekey::OneKeyEntry>,
 
     /// This instance is the stand-in for a file that could not be read or
     /// parsed: `load` kept a copy aside and handed back defaults. Never
@@ -863,6 +869,7 @@ impl Default for Config {
             hidden_agent_sessions: BTreeSet::new(),
             restore_agent_sessions: true,
             per_pane_history: false,
+            onekey_entries: Vec::new(),
             quarantined: false,
             servers_unreadable: false,
         }
@@ -1131,6 +1138,9 @@ impl Config {
         if !SUPPORTED_GUI_LANGUAGES.contains(&self.gui_language.as_str()) {
             self.gui_language = default_gui_language();
         }
+        // OneKey: drop entries with an empty/oversize title; keep the rest so
+        // one bad row never quarantines the whole config.
+        self.onekey_entries.retain(|e| e.validate().is_ok());
     }
 
     pub fn save(&self) {

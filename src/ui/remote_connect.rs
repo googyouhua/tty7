@@ -288,6 +288,7 @@ fn spec_from(
                 &cfg.ssh_profiles,
                 store,
                 cfg.verify_host_keys,
+                &cfg.onekey_entries,
             ))
         }
         RemoteTarget::Alias { alias } => {
@@ -311,6 +312,7 @@ fn spec_from(
                 &cfg.ssh_profiles,
                 store,
                 cfg.verify_host_keys,
+                &cfg.onekey_entries,
             ))
         }
         RemoteTarget::Wsl { .. } => Err(t(L10nKey::RemoteWslNoSsh).to_string()),
@@ -1081,6 +1083,7 @@ mod tests {
             &[],
             &crate::core::keychain::InMemoryCredentialStore::new(),
             false,
+            &[],
         )
     }
 

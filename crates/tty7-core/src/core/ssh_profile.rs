@@ -25,6 +25,10 @@ pub struct SshProfile {
     pub identity_files: Vec<String>,
     pub agent_forward: bool,
     pub credential_ref: Option<CredentialRef>,
+    /// Live link to a OneKey entry's username/password (SSH panel "OneKey"
+    /// row). `None` means no link. Stored by entry id so renames never break
+    /// it; a missing id falls back to the host's own credentials.
+    pub onekey_entry_id: Option<String>,
 
     pub forwards: Vec<ForwardRule>,
 
@@ -63,6 +67,7 @@ impl Default for SshProfile {
             identity_files: Vec::new(),
             agent_forward: false,
             credential_ref: None,
+            onekey_entry_id: None,
             forwards: Vec::new(),
             keepalive_interval_s: None,
             keepalive_count_max: None,

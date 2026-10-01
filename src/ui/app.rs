@@ -3267,6 +3267,15 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.link_url = on);
     }
 
+    /// Delete one OneKey entry by id (A4). Add/edit happen in `config.json`
+    /// `onekey_entries` for this iteration; the Settings group lists entries,
+    /// shows the security warning, and offers delete per row.
+    pub(crate) fn delete_onekey_entry(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| {
+            cfg.onekey_entries.retain(|e| e.id != id);
+        });
+    }
+
     pub(crate) fn set_link_file_open(
         &mut self,
         mode: crate::core::config::LinkFileOpen,
@@ -6883,6 +6892,11 @@ impl Tty7App {
                 self.editor_split(window, cx);
             }
             RestartSshSession => self.restart_ssh_session(window, cx),
+            OneKeyAutofill => {
+                if let Some(leaf) = self.focused_leaf(window, cx) {
+                    leaf.update(cx, |view, cx| view.open_onekey_picker(cx));
+                }
+            }
             SetTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
                     self.set_preset(&id, window, cx);
@@ -7474,6 +7488,7 @@ impl Tty7App {
             mobile_starting: false,
             ssh_filter,
             ssh_collapsed_groups: std::collections::HashSet::new(),
+            onekey_form: None,
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
             agent_hooks_states: crate::ui::settings::AgentHooksView::Loading,
             agent_hooks_seq: 0,
@@ -10127,6 +10142,11 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
                     this.restart_ssh_session(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &OneKeyAutofill, window, cx| {
+                    if let Some(leaf) = this.focused_leaf(window, cx) {
+                        leaf.update(cx, |view, cx| view.open_onekey_picker(cx));
+                    }
                 }))
                 .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
                     this.start_rename(this.active, window, cx)

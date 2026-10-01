@@ -175,6 +175,7 @@ pub enum CommandKind {
     QuickConnect(String),
     SaveQuickConnect(String),
     OpenSshProfiles,
+    OneKeyAutofill,
 }
 
 impl CommandKind {
@@ -298,6 +299,7 @@ impl CommandKind {
             SearchHosts => "ssh-add-connection",
             QuickOpenFile => "go-to-file",
             OpenSshProfiles => "ssh-manage-profiles",
+            OneKeyAutofill => "onekey-autofill",
             SaveSshSessionAsHost => "ssh-save-connection",
             OpenSshConnect(_)
             | SetTheme(_)
@@ -424,6 +426,7 @@ impl CommandKind {
             EditorSplitRight => "EditorSplitRight",
             RestartSshSession => "RestartSshSession",
             OpenSshProfiles => "OpenSshProfiles",
+            OneKeyAutofill => "OneKeyAutofill",
             ScmCommit => "ScmCommit",
             ScmStageAll => "ScmStageAll",
             ScmUnstageAll => "ScmUnstageAll",
@@ -764,6 +767,7 @@ impl Item {
             Item::localized(L10nKey::CmdCut, CutText),
             Item::localized(L10nKey::CmdPaste, PasteText),
             Item::localized(L10nKey::CmdSelectAll, SelectAllText),
+            Item::new("OneKey: Autofill…", OneKeyAutofill),
         ];
 
         let ssh = [

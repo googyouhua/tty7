@@ -16,6 +16,7 @@ pub(crate) mod images;
 pub mod input;
 mod link_probe;
 mod loopback;
+pub(crate) mod onekey;
 pub mod palette;
 pub(crate) mod pane_liveness;
 pub(crate) mod parked_cursor;
