@@ -3291,10 +3291,7 @@ impl TerminalView {
     /// `Config::onekey_entries`; an empty list still opens (showing empty)
     /// so the user learns where to add entries.
     pub fn open_onekey_picker(&mut self, cx: &mut Context<Self>) {
-        let entries = cx
-            .global::<Config>()
-            .onekey_entries
-            .clone();
+        let entries = cx.global::<Config>().onekey_entries.clone();
         self.onekey_picker = Some(super::onekey::OneKeyPicker::new(entries));
         cx.notify();
     }
@@ -3317,8 +3314,9 @@ impl TerminalView {
         let bytes = match &self.onekey_picker {
             Some(p) => match p.fill(fill) {
                 super::onekey::OneKeyAction::Fill(b) => b,
-                super::onekey::OneKeyAction::Cancelled
-                | super::onekey::OneKeyAction::Pending => return,
+                super::onekey::OneKeyAction::Cancelled | super::onekey::OneKeyAction::Pending => {
+                    return;
+                }
             },
             None => return,
         };
@@ -3329,7 +3327,10 @@ impl TerminalView {
         }
         // `UsernameAndPassword` arrives as `user\rpass`: submit the username,
         // then the password, then a final Enter for the whole login.
-        if matches!(fill, tty7_core::core::onekey::OneKeyFill::UsernameAndPassword) {
+        if matches!(
+            fill,
+            tty7_core::core::onekey::OneKeyFill::UsernameAndPassword
+        ) {
             if let Some(pos) = bytes.iter().position(|&b| b == b'\r') {
                 let (user, pass) = bytes.split_at(pos);
                 let pass = &pass[1..];
@@ -5329,8 +5330,10 @@ impl TerminalView {
 
     fn handle_onekey_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
         let m = &ks.modifiers;
-        let entry_stage =
-            self.onekey_picker.as_ref().is_some_and(|p| p.stage() == super::onekey::Stage::PickEntry);
+        let entry_stage = self
+            .onekey_picker
+            .as_ref()
+            .is_some_and(|p| p.stage() == super::onekey::Stage::PickEntry);
         // Printable text filters the entry list, the way typing filters
         // reverse-search — control chords fall through to the picker below.
         if entry_stage && !m.control && !m.platform && !m.alt {
@@ -7465,10 +7468,7 @@ impl TerminalView {
     /// The manual OneKey picker overlay (A1): filtered credential entries with
     /// a header naming the filter and the keys that drive it. Passwords are
     /// never painted — rows show title, username, and kind only (A2).
-    fn render_onekey_menu(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
+    fn render_onekey_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let picker = self.onekey_picker.as_ref()?;
         let shown = picker.filtered_entries();
         let (srow, _) = self.cursor_cell()?;
@@ -7868,10 +7868,7 @@ impl Render for TerminalView {
                 this.fill_onekey(tty7_core::core::onekey::OneKeyFill::Password, cx)
             }))
             .on_action(cx.listener(|this, _: &OneKeyFillBoth, _w, cx| {
-                this.fill_onekey(
-                    tty7_core::core::onekey::OneKeyFill::UsernameAndPassword,
-                    cx,
-                )
+                this.fill_onekey(tty7_core::core::onekey::OneKeyFill::UsernameAndPassword, cx)
             }))
             .on_action(cx.listener(|this, _: &OneKeyCancel, _w, cx| this.close_onekey_picker(cx)))
             .on_action(cx.listener(|this, _: &OpenLinkUnderPointer, window, cx| {
@@ -11102,9 +11099,7 @@ mod gpui_tests {
     /// PTY, paints both entries, filters, and fills the chosen password down
     /// the wire with nothing echoed into editor state.
     #[gpui::test]
-    fn onekey_picker_paints_entries_and_fills_password_to_raw_pty(
-        cx: &mut TestAppContext,
-    ) {
+    fn onekey_picker_paints_entries_and_fills_password_to_raw_pty(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
         alt_screen_ready(&window, cx, &mut daemon);
@@ -11131,10 +11126,7 @@ mod gpui_tests {
                 );
                 view.on_key_down(&key_down("enter", None), window, cx);
                 view.on_key_down(&key_down("p", Some("p")), window, cx);
-                assert!(
-                    view.onekey_picker.is_none(),
-                    "a fill closes the picker"
-                );
+                assert!(view.onekey_picker.is_none(), "a fill closes the picker");
             })
             .unwrap();
         assert_eq!(

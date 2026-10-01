@@ -143,10 +143,7 @@ pub fn linked_title(
     if id.is_empty() {
         return None;
     }
-    entries
-        .iter()
-        .find(|e| e.id == id)
-        .map(|e| e.title.clone())
+    entries.iter().find(|e| e.id == id).map(|e| e.title.clone())
 }
 
 /// Whether the host names an entry id that no longer exists (A4).

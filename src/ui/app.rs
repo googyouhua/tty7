@@ -10143,13 +10143,11 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &RestartSshSession, window, cx| {
                     this.restart_ssh_session(window, cx)
                 }))
-                .on_action(cx.listener(
-                    |this, _: &OneKeyAutofill, window, cx| {
-                        if let Some(leaf) = this.focused_leaf(window, cx) {
-                            leaf.update(cx, |view, cx| view.open_onekey_picker(cx));
-                        }
-                    },
-                ))
+                .on_action(cx.listener(|this, _: &OneKeyAutofill, window, cx| {
+                    if let Some(leaf) = this.focused_leaf(window, cx) {
+                        leaf.update(cx, |view, cx| view.open_onekey_picker(cx));
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
                     this.start_rename(this.active, window, cx)
                 }))

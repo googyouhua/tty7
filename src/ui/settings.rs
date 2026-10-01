@@ -18,7 +18,6 @@ use crate::core::config::{
     NotifyMode, PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel,
     WindowBackdrop,
 };
-use tty7_core::core::onekey::{OneKeyEntry, OneKeyKind};
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
 };
@@ -31,6 +30,7 @@ use crate::ui::app::{
 use crate::ui::host_ops::HostId;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::presets;
+use tty7_core::core::onekey::{OneKeyEntry, OneKeyKind};
 
 mod agents;
 mod editor;
@@ -2185,7 +2185,12 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = seed_input(window, cx, editing.map(|e| e.title.as_str()).unwrap_or(""), false);
+        let title = seed_input(
+            window,
+            cx,
+            editing.map(|e| e.title.as_str()).unwrap_or(""),
+            false,
+        );
         let username = seed_input(
             window,
             cx,
@@ -2193,14 +2198,19 @@ impl Tty7App {
             false,
         );
         let password = cx.new(|cx| {
-            InputState::new(window, cx)
-                .masked(true)
-                .default_value(editing.map(|e| e.password.as_str()).unwrap_or("").to_string())
+            InputState::new(window, cx).masked(true).default_value(
+                editing
+                    .map(|e| e.password.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )
         });
         let binding = seed_input(
             window,
             cx,
-            editing.and_then(|e| e.host_binding.as_deref()).unwrap_or(""),
+            editing
+                .and_then(|e| e.host_binding.as_deref())
+                .unwrap_or(""),
             false,
         );
         let mut subs = Vec::new();
@@ -2300,19 +2310,24 @@ impl Tty7App {
                 // secret, and the server decides whether it belongs.
                 let password = form.password.read(cx).value().to_string();
                 let binding = form.binding.read(cx).value().trim().to_string();
-                (form.editing.clone(), form.kind, title, username, password, binding)
+                (
+                    form.editing.clone(),
+                    form.kind,
+                    title,
+                    username,
+                    password,
+                    binding,
+                )
             }
             None => return,
         };
         let (editing, kind, title, username, password, binding) = draft;
         let err = if title.is_empty() || title.chars().count() > 64 {
             Some("Title must be 1–64 characters.".to_string())
-        } else if cx
-            .global::<Config>()
-            .onekey_entries
-            .iter()
-            .any(|e| e.id != editing.as_deref().unwrap_or("") && e.title.trim().eq_ignore_ascii_case(title.trim()))
-        {
+        } else if cx.global::<Config>().onekey_entries.iter().any(|e| {
+            e.id != editing.as_deref().unwrap_or("")
+                && e.title.trim().eq_ignore_ascii_case(title.trim())
+        }) {
             Some("Another entry already uses this title.".to_string())
         } else {
             None

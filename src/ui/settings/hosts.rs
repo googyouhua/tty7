@@ -421,15 +421,17 @@ impl Tty7App {
         // A linked OneKey entry rides on the address line; a dangling link
         // says so out loud (A1/A4).
         let link_note: Option<String> = match (editing, p) {
-            (true, _) => s.ssh_form.as_ref().and_then(|f| f.onekey_link.clone()).and_then(
-                |id| {
+            (true, _) => s
+                .ssh_form
+                .as_ref()
+                .and_then(|f| f.onekey_link.clone())
+                .and_then(|id| {
                     cx.global::<Config>()
                         .onekey_entries
                         .iter()
                         .find(|e| e.id == id)
                         .map(|e| format!("OneKey: {}", e.title))
-                },
-            ),
+                }),
             (false, Some(p)) => match &p.onekey_entry_id {
                 None => None,
                 Some(id) => Some(

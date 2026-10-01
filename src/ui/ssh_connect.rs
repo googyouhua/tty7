@@ -854,7 +854,13 @@ mod tests {
         let full = build_native_ssh_spec(&p, &profiles, &store, true, &[]);
         assert_eq!(full.password.as_deref(), Some("hunter2"));
         assert_eq!(
-            build_native_ssh_spec(&p, &profiles, &crate::core::keychain::NoCredentials, true, &[]),
+            build_native_ssh_spec(
+                &p,
+                &profiles,
+                &crate::core::keychain::NoCredentials,
+                true,
+                &[]
+            ),
             full.without_secrets()
         );
     }

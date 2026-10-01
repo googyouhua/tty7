@@ -1134,10 +1134,7 @@ impl Tty7App {
         };
         let mut rows: Vec<AnyElement> = Vec::new();
         // Add/edit form when open; entry rows with Edit/Delete otherwise.
-        if let Some(form) = self
-            .active_settings()
-            .and_then(|s| s.onekey_form.as_ref())
-        {
+        if let Some(form) = self.active_settings().and_then(|s| s.onekey_form.as_ref()) {
             let form_title = match form.editing.is_some() {
                 true => "Edit entry",
                 false => "Add entry",
@@ -1167,16 +1164,14 @@ impl Tty7App {
             };
             let show_toggle = kit::button("onekey-show", eye_label, BtnKind::Link)
                 .icon(eye_icon)
-                .on_click(
-                    cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
-                        this.toggle_onekey_password_shown(window, cx);
-                    }),
-                );
-            let save = kit::button("onekey-save", "Save", BtnKind::Primary).on_click(
-                cx.listener(|this, _ev: &gpui::ClickEvent, _w, cx| {
+                .on_click(cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
+                    this.toggle_onekey_password_shown(window, cx);
+                }));
+            let save = kit::button("onekey-save", "Save", BtnKind::Primary).on_click(cx.listener(
+                |this, _ev: &gpui::ClickEvent, _w, cx| {
                     this.save_onekey_form(cx);
-                }),
-            );
+                },
+            ));
             let cancel = kit::button("onekey-cancel", "Cancel", BtnKind::Secondary).on_click(
                 cx.listener(|this, _ev: &gpui::ClickEvent, _w, cx| {
                     this.cancel_onekey_form(cx);
@@ -1286,17 +1281,17 @@ impl Tty7App {
                     },
                     e.username,
                 );
-                let edit =
-                    kit::button(format!("onekey-edit-{edit_id}"), "Edit", BtnKind::Link).on_click(
+                let edit = kit::button(format!("onekey-edit-{edit_id}"), "Edit", BtnKind::Link)
+                    .on_click(
                         cx.listener(move |this, _ev: &gpui::ClickEvent, window, cx| {
                             this.start_onekey_edit(&edit_id, window, cx);
                         }),
                     );
-                let delete = kit::button(row_id, "Delete", BtnKind::Danger).on_click(
-                    cx.listener(move |this, _ev: &gpui::ClickEvent, _w, cx| {
+                let delete = kit::button(row_id, "Delete", BtnKind::Danger).on_click(cx.listener(
+                    move |this, _ev: &gpui::ClickEvent, _w, cx| {
                         this.delete_onekey_entry(&id, cx);
-                    }),
-                );
+                    },
+                ));
                 rows.push(
                     self.settings_row(
                         label,
