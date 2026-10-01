@@ -1737,6 +1737,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerNewPlaceholder => "新しいユーザー名…",
         L10nKey::InstancePickerEnter => "開く",
         L10nKey::InstancePickerInvalid => "ユーザー名は [a-z0-9-] のみ使用できます。",
+        L10nKey::InstancePickerRelaunchFailed => {
+            "tty7 を起動できませんでした。もう一度お試しください。"
+        }
         L10nKey::SwitcherStartingServer => "tty7 のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "tty7 のサーバーをダウンロード中… {done} / {total}"
