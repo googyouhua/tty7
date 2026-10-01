@@ -19,6 +19,12 @@ fn main() -> std::process::ExitCode {
     // Before the first byte goes out, and before clap can print a usage error.
     stdio::end_pipelines_quietly();
     let cli = cli::Cli::parse();
+    if let Some(name) = &cli.as_user {
+        if let Err(e) = address::apply_instance(name) {
+            eprintln!("tty7: {e:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    }
     let json = cli.json;
     let quiet = cli.quiet;
     let ctx = address::Context::from_env();

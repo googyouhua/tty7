@@ -1676,6 +1676,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "No running coding agent found — start one (claude, codex, …) in a pane first."
         }
         L10nKey::SwitcherThisComputer => "This Computer",
+        L10nKey::InstancePickerTitle => "Who is using tty7?",
+        L10nKey::InstancePickerHint => "Usernames keep everyone's sessions apart.",
+        L10nKey::InstancePickerDefault => "Default",
+        L10nKey::InstancePickerNewPlaceholder => "New username…",
+        L10nKey::InstancePickerEnter => "Enter",
+        L10nKey::InstancePickerInvalid => "Usernames use [a-z0-9-].",
         L10nKey::SwitcherStartingServer => "Starting tty7's server…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "Downloading tty7's server… {done} / {total}"
