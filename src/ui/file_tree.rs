@@ -205,6 +205,11 @@ pub(crate) struct FileTreeState {
     unreadable: HashSet<DirKey>,
     stale: HashSet<DirKey>,
     repo_roots: ByHost<PathBuf, PathBuf>,
+    /// A project root's real path, where it differs from the root as spelled
+    /// (`/tmp/x` → `/private/tmp/x`, a symlinked checkout). The editor opens
+    /// files by their real path, so this is how a file finds the root it is
+    /// under — see [`Tty7App::project_spelling`].
+    root_aliases: ByHost<PathBuf, PathBuf>,
     repo_root_loads: InFlight<DirKey>,
     search: SearchState,
     /// Every file under the project, for the search's Files tab
@@ -252,6 +257,7 @@ impl FileTreeState {
             unreadable: HashSet::new(),
             stale: HashSet::new(),
             repo_roots: ByHost::default(),
+            root_aliases: ByHost::default(),
             repo_root_loads: InFlight::default(),
             search: SearchState::default(),
             quick_open: Default::default(),
@@ -683,6 +689,7 @@ impl FileTreeState {
     fn invalidate_repo_roots(&mut self) -> bool {
         let had = !self.repo_roots.is_empty() || !self.repo_root_loads.is_empty();
         self.repo_roots.clear();
+        self.root_aliases.clear();
         self.repo_root_loads.invalidate_all();
         had
     }
@@ -857,13 +864,18 @@ impl Tty7App {
             cx,
             {
                 let cwd = cwd.clone();
-                move |h| h.repo_root(&cwd).ok().flatten()
+                move |h| {
+                    let root = h.repo_root(&cwd).ok().flatten().unwrap_or(cwd);
+                    let real = h.canonicalize(&root).ok().filter(|real| *real != root);
+                    (root, real)
+                }
             },
-            move |app, root, cx| {
+            move |app, (root, real), cx| {
                 if app.file_tree.repo_root_loads.finish(&key) {
-                    app.file_tree
-                        .repo_roots
-                        .insert(id, cwd.clone(), root.unwrap_or(cwd));
+                    if let Some(real) = real {
+                        app.file_tree.root_aliases.insert(id, root.clone(), real);
+                    }
+                    app.file_tree.repo_roots.insert(id, cwd, root);
                 }
                 cx.notify();
             },
@@ -1034,7 +1046,28 @@ impl Tty7App {
     /// no row to scroll to. An empty root list is not that: it means the panel
     /// has never drawn and does not know its roots yet, and the request
     /// outlives the render that fills them in.
+    /// `path` as the tree spells it: under the project root as the tab names
+    /// it, when `path` is that root's real path spelled out. The editor keeps
+    /// files by their real path (`load_file` canonicalizes), the tree by the
+    /// pane's — on macOS every project under `/tmp` differs that way, as does
+    /// any checkout reached through a symlink. Anything else comes back as is.
+    pub(crate) fn project_spelling(&self, path: &Path, cx: &App) -> PathBuf {
+        let host = self.spawn_host(cx);
+        let roots = self.tab_code().map(|c| c.roots.as_slice()).unwrap_or(&[]);
+        if roots.iter().any(|root| path.starts_with(root)) {
+            return path.to_path_buf();
+        }
+        roots
+            .iter()
+            .find_map(|root| {
+                let real = self.file_tree.root_aliases.get(host, root)?;
+                Some(root.join(path.strip_prefix(real).ok()?))
+            })
+            .unwrap_or_else(|| path.to_path_buf())
+    }
+
     pub(crate) fn file_tree_reveal_path(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        let path = &self.project_spelling(path, cx);
         let roots = self.tab_code().map(|c| c.roots.clone()).unwrap_or_default();
         if !roots.is_empty() && !roots.iter().any(|root| path.starts_with(root)) {
             return false;
@@ -1607,20 +1640,38 @@ impl Tty7App {
     }
 
     fn file_tree_attach_to_agent(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.attach_path_to_agent(path, "", cx);
+    }
+
+    /// Types `@path` into the running agent's prompt, relative to the tree's
+    /// root when the file is under one. `suffix` goes straight after the
+    /// path — the editor adds the selected lines as `#L3-9`.
+    pub(crate) fn attach_path_to_agent(
+        &mut self,
+        path: &Path,
+        suffix: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.agent_target_leaf(cx) else {
             crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
             return;
         };
         let rel = self
-            .tab_code()
+            .path_under_tree_root(path)
+            .unwrap_or_else(|| path.to_path_buf());
+        target.update(cx, |view, cx| {
+            view.paste(format!("@{}{suffix} ", rel.display()), cx);
+        });
+    }
+
+    /// `path` relative to the first of this tab's tree roots it sits under.
+    pub(crate) fn path_under_tree_root(&self, path: &Path) -> Option<PathBuf> {
+        self.tab_code()
             .into_iter()
             .flat_map(|c| c.roots.iter())
             .find_map(|r| path.strip_prefix(r).ok())
+            .filter(|p| !p.as_os_str().is_empty())
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| path.to_path_buf());
-        target.update(cx, |view, cx| {
-            view.paste(format!("@{} ", rel.display()), cx);
-        });
     }
 }
 
@@ -1838,6 +1889,7 @@ impl Tty7App {
         let is_dir = row.entry.is_dir;
         let selected = self.tab_code().and_then(|c| c.selected.as_deref()) == Some(&*path);
         let muted = cx.theme().muted_foreground;
+        let paths_are_local = self.spawn_host(cx).is_local();
 
         // A placeholder standing in for children that are not there. Not a
         // file, so it takes none of the row machinery below — no hover, no
@@ -1956,6 +2008,14 @@ impl Tty7App {
         });
         let row_el = h_flex()
             .id(SharedString::from(format!("tree-{}", path.display())))
+            .role(gpui::Role::TreeItem)
+            .aria_label(SharedString::from(
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string()),
+            ))
+            .aria_selected(selected)
+            .when(is_dir, |r| r.aria_expanded(row.expanded))
             .items_center()
             .gap(px(TREE_GAP))
             .h(px(TREE_ROW_H))
@@ -2024,6 +2084,20 @@ impl Tty7App {
                     }
                 }),
             )
+            // A row opens on the press, not the click, so it has no click
+            // handler for assistive technology's "press" to reach. Give it
+            // the same act directly, or VoiceOver could select a file and
+            // never open it.
+            .on_a11y_action(gpui::AccessibleAction::Click, {
+                let path = path.clone();
+                let app = cx.entity().downgrade();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        this.file_tree.focus_handle.focus(window, cx);
+                        this.file_tree_activate(&path, is_dir, window, cx);
+                    });
+                }
+            })
             // The menu acts on the row it was opened on, so that row is the
             // one lit while it is up (#942) — selected without being opened,
             // the way Explorer and every editor's tree do it.
@@ -2039,11 +2113,26 @@ impl Tty7App {
                     }
                 }),
             )
-            .on_drag(ExternalPaths(vec![path.clone()].into()), {
+            // A local tree's rows are this machine's files, as good as ones
+            // dragged in from Finder, and every drop target takes them that
+            // way. A remote tree's rows name files on the far machine: they
+            // travel as their own type, so no target that reads, uploads or
+            // pins local paths can mistake one for a file here.
+            .map(|d| {
                 let name = row.entry.name.clone();
-                move |_, _, _, cx| {
+                let ghost = move |cx: &mut App| {
                     let name = name.clone();
                     cx.new(|_| DragGhost { name })
+                };
+                match paths_are_local {
+                    true => d.on_drag(
+                        ExternalPaths(vec![path.clone()].into()),
+                        move |_, _, _, cx| ghost(cx),
+                    ),
+                    false => d
+                        .on_drag(RemotePathDrag { path: path.clone() }, move |_, _, _, cx| {
+                            ghost(cx)
+                        }),
                 }
             })
             // The other direction: files dropped on this row are copied in.
@@ -2064,7 +2153,6 @@ impl Tty7App {
                 let path = path.clone();
                 let is_root = row.is_root;
                 let show_hidden = self.file_tree.show_hidden;
-                let paths_are_local = self.spawn_host(cx).is_local();
                 move |menu, _window, cx| {
                     Self::tree_row_context_menu(
                         menu,
@@ -2314,6 +2402,13 @@ fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> Pop
 
 struct DragGhost {
     name: String,
+}
+
+/// A row dragged out of a remote Files tree: a path on that remote, which
+/// nothing on this machine can open. See the row's `on_drag`.
+#[derive(Clone)]
+pub(crate) struct RemotePathDrag {
+    pub path: PathBuf,
 }
 
 impl gpui::Render for DragGhost {

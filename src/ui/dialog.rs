@@ -44,10 +44,11 @@ pub(crate) const FIELD_H: f32 = 28.;
 const LABEL_GAP: f32 = 6.;
 const FIELD_GAP: f32 = 14.;
 
-/// A button: the field's height, a pixel less rounded so a button beside a
-/// field reads as a different kind of thing.
+/// A button: the field's height and the field's corner — the v5 confirm
+/// card's 28px pill-less rectangle, on every card alike.
 pub(crate) const BUTTON_H: f32 = 28.;
-const BUTTON_RADIUS: f32 = 6.;
+const BUTTON_RADIUS: f32 = 7.;
+const BUTTON_PAD: f32 = 14.;
 
 /// A key named in a hint: an 18px cap on the faint fill.
 pub(crate) const KEYCAP: f32 = 18.;
@@ -60,8 +61,19 @@ pub(crate) fn popover_rungs(cx: &App) -> Surface {
 
 /// The card itself, opaque and occluding. Callers add the header, body and
 /// footer as children, in that order.
-pub(crate) fn card(width: f32, cx: &App) -> Div {
+///
+/// `title` is what a screen reader announces the card as — a dialog, named
+/// by the question it asks.
+pub(crate) fn card(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    width: f32,
+    cx: &App,
+) -> Stateful<Div> {
     v_flex()
+        .id(id)
+        .role(gpui::Role::Dialog)
+        .aria_label(title)
         .occlude()
         .w(px(width))
         .map(|panel| crate::ui::theme::floating_surface(panel, cx))
@@ -158,6 +170,36 @@ pub(crate) fn labelled(name: impl IntoElement, input: Input, cx: &App) -> Div {
         .child(field(input, cx))
 }
 
+/// A label over a control that is not a text field.
+pub(crate) fn labelled_control(name: impl IntoElement, control: impl IntoElement, cx: &App) -> Div {
+    v_flex()
+        .gap(px(LABEL_GAP))
+        .child(label(name, cx))
+        .child(control)
+}
+
+/// A dropdown's closed face, in the same well as a text field, so a form of
+/// fields and choices still reads as one column.
+pub(crate) fn select_well(
+    id: impl Into<gpui::ElementId>,
+    value: impl Into<gpui::SharedString>,
+    cx: &App,
+) -> gpui::Stateful<Div> {
+    let tk = crate::ui::settings::kit::Tk::of(cx);
+    h_flex()
+        .id(id)
+        .h(px(FIELD_H))
+        .pl(px(10.))
+        .pr(px(9.))
+        .gap(px(8.))
+        .items_center()
+        .rounded(crate::ui::rounding::ROW_RADIUS)
+        .bg(well_fill(cx))
+        .cursor_pointer()
+        .child(div().flex_1().min_w_0().truncate().child(value.into()))
+        .child(crate::ui::settings::kit::chevron_down(&tk))
+}
+
 /// A block of read-only detail — a host and its key — set on the field's
 /// fill, so it reads as a value to check rather than a line of prose.
 pub(crate) fn well(cx: &App) -> Div {
@@ -207,8 +249,9 @@ pub(crate) enum Tone {
     /// already spent on focus and on the rail; a dialog of blue buttons made
     /// every sheet look like a call to action.
     Primary,
-    /// Everything else: no fill at rest, the surface's hover rung under the
-    /// pointer.
+    /// Everything else: the well's faint fill at rest, one rung up under the
+    /// pointer. A bare word with no shape read as a link, not as the second
+    /// answer to the question.
     Secondary,
     /// The action a card warns about. Red, and only on the one site that has
     /// earned it — overriding a changed host key.
@@ -218,9 +261,9 @@ pub(crate) enum Tone {
 /// A dialog button. The click handler is attached only while `enabled`: a
 /// disabled button has to be inert, not merely grey.
 ///
-/// Disabled, a filled tone sinks to the faint fill with secondary ink — the
+/// Disabled, every tone sinks to the faint fill with secondary ink — the
 /// same fall the Commit button takes — so it never advertises an action that
-/// cannot run, and a secondary one just loses its ink.
+/// cannot run.
 pub(crate) fn button(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
@@ -233,7 +276,6 @@ pub(crate) fn button(
     let theme = cx.theme();
     let surface: Hsla = gpui::rgb(rungs.base).into();
     let (fill, hover, ink): (Option<Hsla>, Option<Hsla>, Hsla) = match (tone, enabled) {
-        (Tone::Secondary, false) => (None, None, theme.muted_foreground),
         // The surface's own next rung, like a well: `muted` is a step off the
         // window, and on a dark popover it was the card's own colour.
         (_, false) => (
@@ -253,7 +295,11 @@ pub(crate) fn button(
                 theme.danger_foreground,
             )
         }
-        (Tone::Secondary, true) => (None, Some(gpui::rgb(rungs.hover).into()), theme.foreground),
+        (Tone::Secondary, true) => (
+            Some(gpui::rgb(rungs.hover).into()),
+            Some(gpui::rgb(rungs.selected).into()),
+            theme.foreground,
+        ),
     };
     h_flex()
         .id(id)
@@ -261,7 +307,7 @@ pub(crate) fn button(
         .items_center()
         .justify_center()
         .h(px(BUTTON_H))
-        .px(px(12.))
+        .px(px(BUTTON_PAD))
         .rounded(px(BUTTON_RADIUS))
         .text_size(rems(TAB_TEXT))
         .when(tone != Tone::Secondary, |b| {

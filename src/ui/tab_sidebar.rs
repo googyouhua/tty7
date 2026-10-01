@@ -24,8 +24,8 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 use crate::ui::tab_strip::{
-    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_label, elide_path_keep_tail,
-    elide_tail_clusters, measure_text,
+    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_end_clusters, elide_label,
+    elide_path_keep_tail, measure_text,
 };
 
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
@@ -36,14 +36,14 @@ const ROW_GAP: f32 = 1.;
 
 /// What marks a kept group, and what the header button that keeps one reads.
 ///
-/// A character rather than an icon: at a header's size a drawn pin is a
-/// smudge, and the mark only has to say "kept" beside the name, the way a
-/// bullet does. With no line between kept and derived groups it is also the
-/// only thing that tells the two apart, so every kept group carries it.
-const PIN_MARK: &str = "\u{25C6}";
+/// A pin, drawn: it names what was done to the group, where the `◆` it
+/// replaced only said "different". With no line between kept and derived
+/// groups it is also the only thing that tells the two apart, so every kept
+/// group carries it.
+const PIN_MARK: &str = "icons/pin.svg";
 
-/// The mark's size: small enough to sit under the header text's x-height.
-const PIN_MARK_SIZE: f32 = 8.;
+/// The mark's size: the header's 11px text, like a row's branch icon.
+const PIN_MARK_SIZE: f32 = 11.;
 
 /// A single-line tab row: one line of `text_sm` and a little air.
 const ROW_HEIGHT: f32 = 30.;
@@ -68,7 +68,6 @@ const HEAD_CONTROL_HEIGHT: f32 = 28.;
 const HEAD_CONTROL_RADIUS: f32 = 7.;
 
 /// What sits between a group's branch and its diff counts.
-const META_SEP: &str = " · ";
 const META_SEP_TRIMMED: &str = "·";
 
 /// Tabular numerals, so a column of diff counts lines up digit for digit.
@@ -375,9 +374,17 @@ impl Tty7App {
         let rem = window.rem_size().as_f32();
         // Measure with the same interface scale used to paint the header.
         let header_size = rem * META_REM;
+        // The git lines and the group header paint with `tabular()` figures,
+        // which set a `1` as wide as an `8`; measuring them proportionally
+        // came out a few pixels short on counts like `+1565 −124`, and the
+        // front-elided branch then lost its tail to CSS truncation as well.
+        let meta_font = gpui::Font {
+            features: tabular(),
+            ..font.clone()
+        };
         let header_font = gpui::Font {
             weight: FontWeight::MEDIUM,
-            ..font.clone()
+            ..meta_font.clone()
         };
         // On the rail the diff counts are metadata like the branch beside
         // them, so they take its caption ink; the hover card, which is where
@@ -678,13 +685,12 @@ impl Tty7App {
                         .text_size(px(meta_size))
                         .text_color(cx.theme().muted_foreground)
                         .font_features(tabular());
-                    let counts_w = counts_width(&window.text_system(), &font, meta_size, &g);
-                    // Branch: cut from the front, so `…session-auth` keeps
-                    // the part that tells two branches off one prefix apart.
+                    let counts_w = counts_width(&window.text_system(), &meta_font, meta_size, &g);
+                    // Branch: cut from the end, the way any other label is.
                     let branch_avail = (label_avail - counts_w).max(0.);
-                    let shown = elide_tail_clusters(
+                    let shown = elide_end_clusters(
                         &window.text_system(),
-                        &font,
+                        &meta_font,
                         meta_size,
                         &g.branch,
                         branch_avail,
@@ -975,6 +981,11 @@ impl Tty7App {
 
                 let row = h_flex()
                     .id(("tab-row", i))
+                    // What a screen reader announces and presses: the full
+                    // title, not the elided one drawn.
+                    .role(gpui::Role::Tab)
+                    .aria_label(SharedString::from(title_text.to_string()))
+                    .aria_selected(is_active)
                     .group(SharedString::from(format!("tab-row-{i}")))
                     .cursor_pointer()
                     .on_drag(DragTab, {
@@ -1096,23 +1107,26 @@ impl Tty7App {
                         let mut fade_from = backing;
                         fade_from.a = 0.;
                         row.child(
+                            // The row's full height, not the button's: on a
+                            // two-line row the diff count sits under the
+                            // button's band, and a band-high backing left the
+                            // bottom of "+2" showing beneath the ×.
                             h_flex()
                                 .absolute()
-                                .top(px((row_h - crate::ui::tab_strip::MIN_TARGET) / 2.))
+                                .top_0()
+                                .bottom_0()
                                 .right(px(6.))
                                 .opacity(0.)
                                 .group_hover(SharedString::from(format!("tab-row-{i}")), |s| {
                                     s.opacity(1.)
                                 })
-                                .child(div().w(px(10.)).h(px(crate::ui::tab_strip::MIN_TARGET)).bg(
-                                    linear_gradient(
-                                        90.,
-                                        linear_color_stop(fade_from, 0.),
-                                        linear_color_stop(backing, 1.),
-                                    ),
-                                ))
+                                .child(div().w(px(10.)).h_full().bg(linear_gradient(
+                                    90.,
+                                    linear_color_stop(fade_from, 0.),
+                                    linear_color_stop(backing, 1.),
+                                )))
                                 .child(
-                                    div().bg(backing).child(
+                                    div().h_full().flex().items_center().bg(backing).child(
                                         crate::ui::tab_strip::hit_target(
                                             Button::new(("sidebar-close", i))
                                                 .icon(IconName::Close)
@@ -1236,24 +1250,23 @@ impl Tty7App {
                 }
                 let count_label = row_count.to_string();
                 if folded {
-                    avail -=
-                        measure_text(&ts, &font, header_size, &count_label) + row_metrics::META_GAP;
+                    avail -= measure_text(&ts, &meta_font, header_size, &count_label)
+                        + row_metrics::META_GAP;
                 }
                 let avail = avail.max(HEADER_NAME_FLOOR);
                 // What the shared branch would take if nothing were in its
-                // way: the icon, the gap after it, the branch itself, the
-                // counts, and the two gaps the spacer between the name and
-                // the branch sits in.
-                // What the shared branch would take if nothing were in its
-                // way: the branch itself, the ` · ` before its counts, the
+                // way: the branch itself, the `·` before its counts, the
                 // counts, and the gaps the spacer between the name and the
                 // branch sits in.
-                let sep_w = measure_text(&ts, &font, header_size, META_SEP);
+                // Drawn as a bare `·` with a gap on either side; the gap before
+                // it is the one `counts_width` already reserves.
+                let sep_w = measure_text(&ts, &meta_font, header_size, META_SEP_TRIMMED)
+                    + row_metrics::META_GAP;
                 let git_want = shared_git.as_ref().map(|shared| {
-                    let counts = counts_width(&ts, &font, header_size, &shared.status);
+                    let counts = counts_width(&ts, &meta_font, header_size, &shared.status);
                     let sep = if counts > 0. { sep_w } else { 0. };
                     2. * row_metrics::META_GAP
-                        + measure_text(&ts, &font, header_size, &shared.status.branch)
+                        + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
                         + sep
                         + counts
                 });
@@ -1331,9 +1344,7 @@ impl Tty7App {
                     .when_some(pinned_id, |header, id| {
                         let mark = div()
                             .flex_shrink_0()
-                            .text_size(px(PIN_MARK_SIZE))
-                            .line_height(px(PIN_MARK_SIZE))
-                            .child(PIN_MARK);
+                            .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)));
                         header.child(match pinned_folder.is_some() {
                             false => mark.into_any_element(),
                             true => mark
@@ -1400,15 +1411,14 @@ impl Tty7App {
                             click,
                             rows,
                         } = shared;
-                        let counts_w = counts_width(&ts, &font, header_size, &status);
+                        let counts_w = counts_width(&ts, &meta_font, header_size, &status);
                         let sep = if counts_w > 0. { sep_w } else { 0. };
                         let branch_avail =
                             (avail - name_w - 2. * row_metrics::META_GAP - sep - counts_w).max(0.);
-                        // Cut from the front, like a row's: the tail is what
-                        // tells two branches off the same prefix apart.
-                        let branch = elide_tail_clusters(
+                        // Cut from the end, like a row's.
+                        let branch = elide_end_clusters(
                             &ts,
-                            &font,
+                            &meta_font,
                             header_size,
                             &status.branch,
                             branch_avail,
@@ -1641,6 +1651,37 @@ impl Tty7App {
             list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
         }
 
+        // The room under the last row. Right-clicking a row opens that tab's
+        // menu, so the list's own — new tab, new group — lives here rather
+        // than on the list, where it would open over every row's as well.
+        // It keeps a row's height when the list scrolls, so there is always
+        // somewhere to click.
+        list = list.child(
+            div()
+                .id("tab-sidebar-empty")
+                .flex_1()
+                .min_h(px(ROW_HEIGHT))
+                .context_menu({
+                    let app = cx.entity().downgrade();
+                    move |menu, _window, _cx| {
+                        let new_tab = app.clone();
+                        let new_group = app.clone();
+                        menu.min_w(px(200.))
+                            .item(PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(
+                                move |_, window, cx| {
+                                    let _ = new_tab.update(cx, |this, cx| this.new_tab(window, cx));
+                                },
+                            ))
+                            .item(PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click(
+                                move |_, window, cx| {
+                                    let _ = new_group
+                                        .update(cx, |this, cx| this.new_empty_group(window, cx));
+                                },
+                            ))
+                    }
+                }),
+        );
+
         if !any_rows && !query.is_empty() {
             list = list.child(
                 div()
@@ -1655,7 +1696,14 @@ impl Tty7App {
             );
         }
 
-        // Keep navigation discoverable without requiring a hover over the rail.
+        // On screen at rest unless the Appearance switch says otherwise; then
+        // these two tiles wait for the pointer to reach the rail. The mark
+        // stays either way — it names the window rather than doing anything.
+        let auto_hide_chrome = cx.global::<Config>().auto_hide_titlebar_buttons;
+        let chrome_shown = crate::ui::app::titlebar_chrome_shown(
+            auto_hide_chrome,
+            self.sidebar_chrome_hover.get(),
+        );
         let controls = h_flex()
             .flex_shrink_0()
             .h(px(TITLE_BAR_HEIGHT))
@@ -1675,9 +1723,7 @@ impl Tty7App {
                 .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
             })
             .child(
-                div()
-                    .occlude()
-                    .flex_shrink_0()
+                crate::ui::app::resting_chrome(div().occlude().flex_shrink_0(), chrome_shown)
                     .child(self.new_tab_button_sized(
                         "sidebar-add",
                         crate::ui::tab_strip::RAIL_TILE,
@@ -1685,23 +1731,25 @@ impl Tty7App {
                     )),
             )
             .child(
-                div().occlude().flex_shrink_0().child(
-                    crate::ui::tab_strip::chrome_tile_sized(
-                        Button::new("sidebar-collapse")
-                            .icon(Icon::empty().path("icons/panel-left.svg")),
-                        crate::ui::tab_strip::RAIL_TILE,
-                        crate::ui::tab_strip::RAIL_TILE_GLYPH,
-                        false,
-                        cx,
-                    )
-                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-                    .tooltip_element(crate::ui::tab_strip::chord_tooltip(
-                        t(L10nKey::TabTooltipHideSidebar),
-                        "ToggleLeftPanel",
-                        cx,
-                    ))
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
-                ),
+                crate::ui::app::resting_chrome(div().occlude().flex_shrink_0(), chrome_shown)
+                    .child(
+                        crate::ui::tab_strip::chrome_tile_sized(
+                            Button::new("sidebar-collapse")
+                                .icon(Icon::empty().path("icons/panel-left.svg")),
+                            crate::ui::tab_strip::RAIL_TILE,
+                            crate::ui::tab_strip::RAIL_TILE_GLYPH,
+                            false,
+                            cx,
+                        )
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                        .accessible_label(t(L10nKey::TabTooltipHideSidebar))
+                        .tooltip_element(crate::ui::tab_strip::chord_tooltip(
+                            t(L10nKey::TabTooltipHideSidebar),
+                            "ToggleLeftPanel",
+                            cx,
+                        ))
+                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
+                    ),
             );
         // The tile inside asks for `w_full`, and a percentage is only a width
         // while some box above it has a real one. This row used to have none of
@@ -1870,6 +1918,12 @@ impl Tty7App {
                     )),
             )
             .child(handle)
+            .when(auto_hide_chrome, |rail| {
+                rail.child(crate::ui::app::hover_sheet(
+                    "sidebar-chrome-hover",
+                    &self.sidebar_chrome_hover,
+                ))
+            })
     }
 
     /// The boundary between the kept groups and the derived ones, recording
@@ -1918,10 +1972,15 @@ impl Tty7App {
             .relative()
             .w_full()
             .px_2()
-            // Less than when it was a drawn rule: the next header's own top
-            // margin already opens the gap between the two kinds of group.
-            .pt(px(4.))
-            .pb(px(2.))
+            .map(|d| match zone {
+                true => d.pt(px(4.)).pb(px(2.)),
+                // The rule takes up the gap between two groups instead of
+                // adding one of its own: as a child of the list it would
+                // otherwise sit between two `GROUP_GAP`s, and kept groups
+                // stood more than twice as far from the rest as groups stand
+                // from each other.
+                false => d.h(px(GROUP_GAP)).my(px(-GROUP_GAP)).justify_center(),
+            })
             .child(
                 canvas(move |b, _window, _cx| bounds.set(Some(b)), |_, _, _, _| {})
                     .absolute()
@@ -1976,17 +2035,7 @@ impl Tty7App {
                     "sidebar-group-pin",
                     // The mark the group will carry once kept, the size of
                     // the icon beside it so the two buttons line up.
-                    div()
-                        .size(px(12.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(PIN_MARK_SIZE))
-                        // Its own line box: the header's is several times the
-                        // mark's size and would drop it below the "+" beside it.
-                        .line_height(px(PIN_MARK_SIZE))
-                        .child(PIN_MARK)
-                        .into_any_element(),
+                    Icon::empty().path(PIN_MARK).xsmall().into_any_element(),
                     L10nKey::SidebarPinGroup,
                 )
                 .on_mouse_down(
@@ -2866,6 +2915,15 @@ pub(crate) struct SpawnPlace {
 }
 
 impl SpawnPlace {
+    /// Seed the auto group with SSH host `host`, for a tab dialling a machine
+    /// whose pane has not reported its remote context yet.
+    pub(crate) fn on_host(mut self, host: Option<String>) -> Self {
+        if let Some(auto) = auto_key(host.as_deref(), None) {
+            self.auto = Some(auto);
+        }
+        self
+    }
+
     /// Put `tab` where this says.
     pub(crate) fn seat(&self, tab: &Tab) {
         if let Some(id) = self.group {
@@ -3385,6 +3443,24 @@ mod fold_tests {
                 Some(Some(AutoKey::Repo(PathBuf::from("/w/probed")))),
                 "and the cwd seeds the auto group from the warm cache"
             );
+        });
+    }
+
+    /// ⌘T from an SSH tab dials the same host, and the new tab is filed
+    /// under that host before its pane has reported where it is — not in
+    /// Ungrouped, which is where the local shell it used to open landed.
+    #[gpui::test]
+    fn a_tab_dialling_a_host_is_filed_under_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update(&mut vcx, |app, cx| {
+            let place = app.spawn_group(None, cx).on_host(Some("hermes_ali".into()));
+            assert_eq!(
+                place.auto,
+                Some(Some(AutoKey::SshHost("hermes_ali".into())))
+            );
+            let place = app.spawn_group(None, cx).on_host(None);
+            assert_eq!(place.auto, None, "no host, no opinion");
         });
     }
 

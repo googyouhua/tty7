@@ -31,10 +31,11 @@ pub enum CLIAgent {
     CodeBuddy,
     Empryo,
     PrimeAgent,
+    QoderCLICn,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 25] = [
+    pub const ALL: [CLIAgent; 26] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -56,6 +57,7 @@ impl CLIAgent {
         CLIAgent::OhMyPi,
         CLIAgent::Kimi,
         CLIAgent::QoderCLI,
+        CLIAgent::QoderCLICn,
         CLIAgent::Crush,
         CLIAgent::CodeBuddy,
         CLIAgent::Empryo,
@@ -102,6 +104,12 @@ impl CLIAgent {
             // launch is the cost: it wears the CLI's avatar for as long as the
             // launcher takes to exit.
             CLIAgent::QoderCLI => &["qoder", "qodercli"],
+            // The mainland-China build of Qoder: the same vendor as the global
+            // one, a separate install that keeps its state in `~/.qoder-cn`.
+            // It ships the same dispatcher-plus-CLI pair under `-cn` names, so
+            // `qoder-cn` is detected too. A bare `qoder` still belongs to the
+            // global build.
+            CLIAgent::QoderCLICn => &["qodercn", "qoderclicn", "qoder-cn"],
             // Charm's terminal agent. One binary, and the name on `PATH` is
             // the one it starts as.
             CLIAgent::Crush => &["crush"],
@@ -142,6 +150,7 @@ impl CLIAgent {
             CLIAgent::CodeBuddy => "codebuddy",
             CLIAgent::Empryo => "empryo",
             CLIAgent::PrimeAgent => "prime-agent",
+            CLIAgent::QoderCLICn => "qoderclicn",
         }
     }
 
@@ -177,6 +186,7 @@ impl CLIAgent {
             CLIAgent::CodeBuddy => "CodeBuddy",
             CLIAgent::Empryo => "Empryo",
             CLIAgent::PrimeAgent => "Prime Agent",
+            CLIAgent::QoderCLICn => "Qoder CN CLI",
         }
     }
 
@@ -209,6 +219,7 @@ impl CLIAgent {
             CLIAgent::Copilot => Some(format!("copilot{flags} --resume {session_id}")),
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id}")),
             CLIAgent::QoderCLI => Some(format!("qodercli{flags} --resume {session_id}")),
+            CLIAgent::QoderCLICn => Some(format!("qodercn{flags} --resume {session_id}")),
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --resume {session_id}")),
             CLIAgent::Kimi => Some(format!("kimi{flags} --session {session_id}")),
@@ -231,7 +242,9 @@ impl CLIAgent {
             CLIAgent::Qwen => &["--no-chat-recording"],
             // Print mode still emits a session id in hooks when persistence
             // is disabled, but there is no saved conversation to reopen.
-            CLIAgent::QoderCLI | CLIAgent::CodeBuddy => &["--no-session-persistence"],
+            CLIAgent::QoderCLI | CLIAgent::CodeBuddy | CLIAgent::QoderCLICn => {
+                &["--no-session-persistence"]
+            }
             _ => &[],
         };
         argv.iter().any(|t| ephemeral.contains(&t.as_str()))
@@ -251,6 +264,11 @@ impl CLIAgent {
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id} --fork-session")),
             CLIAgent::QoderCLI => Some(format!(
                 "qodercli{flags} --resume {session_id} --fork-session"
+            )),
+            // qoder-cn is the same CLI against a different config directory, so
+            // it takes the same switches.
+            CLIAgent::QoderCLICn => Some(format!(
+                "qodercn{flags} --resume {session_id} --fork-session"
             )),
             CLIAgent::CodeBuddy => Some(format!(
                 "codebuddy{flags} --resume {session_id} --fork-session"
@@ -286,9 +304,51 @@ impl CLIAgent {
             | CLIAgent::Qwen
             | CLIAgent::Goose
             | CLIAgent::QoderCLI
+            | CLIAgent::QoderCLICn
             | CLIAgent::CodeBuddy => Some("Fork Session"),
             _ => None,
         }
+    }
+
+    /// A fresh start under `session_id`, for when [`Self::resume_command`]
+    /// finds nothing: Claude saves no conversation for a session that never
+    /// took a turn (or ran with transcript saving off), and resuming one
+    /// fails at once. `None` for agents that cannot name a new session.
+    pub fn start_command(self, session_id: &str, launch_argv: Option<&[String]>) -> Option<String> {
+        if self != CLIAgent::Claude || uuid::Uuid::parse_str(session_id).is_err() {
+            return None;
+        }
+        let flags = self.session_command_flags(session_id, launch_argv)?;
+        Some(format!("claude{flags} --session-id {session_id}"))
+    }
+
+    /// The line a restored pane types to bring its agent back: the resume,
+    /// falling back to [`Self::start_command`] with `||` when the pane's shell
+    /// has that operator. `shell_program` is that shell, `None` when it is not
+    /// known — then, as in a shell without `||`, the resume goes alone, since
+    /// one that cannot parse the line would not run the resume either.
+    ///
+    /// `||` fires on any failed exit, not only "no conversation found". The
+    /// other ways a resume fails fast (a flag this version rejects, no login)
+    /// fail the fresh start the same way; one that exits non-zero after the
+    /// user took turns follows with a start under an id that now has a
+    /// conversation, which Claude turns down as already in use. Telling the
+    /// cases apart would mean reading Claude's stderr, which a typed line
+    /// cannot do portably.
+    pub fn restore_command(
+        self,
+        session_id: &str,
+        launch_argv: Option<&[String]>,
+        shell_program: Option<&str>,
+    ) -> Option<String> {
+        let resume = self.resume_command(session_id, launch_argv)?;
+        let fresh = shell_program
+            .filter(|shell| crate::core::shell_quote::runs_or_list(shell))
+            .and_then(|_| self.start_command(session_id, launch_argv));
+        Some(match fresh {
+            Some(fresh) => format!("{resume} || {fresh}"),
+            None => resume,
+        })
     }
 
     fn session_command_flags(
@@ -492,7 +552,7 @@ impl CLIAgent {
             // appends, and `--fork-session` is the flag the fork variant
             // appends itself. `--worktree` would create or switch trees again;
             // Qoder's `-w` means `--cwd` and must survive.
-            CLIAgent::QoderCLI => &[
+            CLIAgent::QoderCLI | CLIAgent::QoderCLICn => &[
                 "--resume",
                 "-r",
                 "--continue",
@@ -570,6 +630,8 @@ impl CLIAgent {
             // black, which Codex and Grok already have covered.
             CLIAgent::Kimi => 0x027AFF,
             CLIAgent::QoderCLI => 0xFFFFFF,
+            // qoder-cn ships the same mark on the same black field.
+            CLIAgent::QoderCLICn => 0xFFFFFF,
             // The blue-violet field Charm ships the Crush heart on.
             CLIAgent::Crush => 0x6B50FF,
             CLIAgent::Empryo => 0xE8663D,
@@ -594,7 +656,7 @@ impl CLIAgent {
     pub fn icon_rgb(self) -> u32 {
         match self {
             CLIAgent::TraeCode => 0x32F08C,
-            CLIAgent::QoderCLI => 0x000000,
+            CLIAgent::QoderCLI | CLIAgent::QoderCLICn => 0x000000,
             _ => 0xFFFFFF,
         }
     }
@@ -617,6 +679,7 @@ impl CLIAgent {
             CLIAgent::Qwen => "icons/agents/qwen.svg",
             CLIAgent::Kimi => "icons/agents/kimi.svg",
             CLIAgent::QoderCLI => "icons/agents/qodercli.svg",
+            CLIAgent::QoderCLICn => "icons/agents/qoderclicn.svg",
             CLIAgent::Crush => "icons/agents/crush.svg",
             CLIAgent::CodeBuddy => "icons/agents/codebuddy.svg",
             CLIAgent::Aider
@@ -653,6 +716,18 @@ impl CLIAgent {
             .map(|(_, line)| line.trim())
             .filter(|line| !line.is_empty())
             .map_or_else(|| self.binary().to_string(), str::to_string)
+    }
+
+    /// The arguments that start an interactive session whose first message is
+    /// `prompt`. `None` for an agent whose positional prompt means a one-shot,
+    /// non-interactive run, or whose form is not known — the caller then
+    /// starts the agent bare rather than guess.
+    pub fn prompt_args(self, prompt: &str) -> Option<Vec<String>> {
+        match self {
+            CLIAgent::Claude | CLIAgent::Codex => Some(vec![prompt.to_string()]),
+            CLIAgent::Gemini => Some(vec!["-i".to_string(), prompt.to_string()]),
+            _ => None,
+        }
     }
 
     /// `argv` as a command line worth launching this agent with again: its
@@ -949,6 +1024,13 @@ pub struct AgentSessionState {
     /// later one that finished while nobody was watching (#870).
     #[serde(default)]
     pub turns: u64,
+    /// The status was concluded by tty7, not reported by the agent: a turn
+    /// the user interrupted ([`Self::assume_interrupted`]) or one that went
+    /// quiet for too long ([`Self::assume_stale`]). Cleared by the next real
+    /// event, and a tool finishing after it proves the guess wrong and puts
+    /// the turn back on [`AgentStatus::Working`].
+    #[serde(default)]
+    pub inferred: bool,
 }
 
 impl AgentStatus {
@@ -967,8 +1049,44 @@ impl AgentSessionState {
         AgentStatus::Idle
     }
 
+    /// Whether a turn is in flight: the only statuses a user interrupt or a
+    /// lost `Stop` can leave behind.
+    pub fn mid_turn(&self) -> bool {
+        matches!(self.status, AgentStatus::Working | AgentStatus::Waiting)
+    }
+
+    /// End the turn the user just interrupted.
+    ///
+    /// Most agents fire no hook when <kbd>Esc</kbd> or <kbd>Ctrl+C</kbd>
+    /// cancels a turn — Claude's `Stop` explicitly skips user interrupts — so
+    /// without this the pane stays on working until the next prompt, and a
+    /// close asks about a turn that is long over. The caller has already
+    /// waited for a real event to say otherwise.
+    pub fn assume_interrupted(&mut self) {
+        if !self.mid_turn() {
+            return;
+        }
+        self.turns = self.turns.wrapping_add(1);
+        self.status = AgentStatus::Done;
+        self.message = None;
+        self.inferred = true;
+    }
+
+    /// Give up on a turn that has gone silent for longer than any real one
+    /// stays quiet. Idle rather than Done: nothing says it finished, only
+    /// that nothing says it is still going.
+    pub fn assume_stale(&mut self) {
+        if self.status != AgentStatus::Working {
+            return;
+        }
+        self.status = AgentStatus::Idle;
+        self.message = None;
+        self.inferred = true;
+    }
+
     pub fn apply_event(&mut self, ev: &AgentEvent) {
         self.rich = true;
+        let guessed = std::mem::take(&mut self.inferred);
         if let Some(id) = &ev.session_id {
             self.session_id = Some(id.clone());
         }
@@ -996,7 +1114,7 @@ impl AgentSessionState {
             }
             AgentEventKind::ToolComplete => {
                 self.activity = self.activity.wrapping_add(1);
-                if self.status == AgentStatus::Waiting {
+                if self.status == AgentStatus::Waiting || guessed {
                     self.status = AgentStatus::Working;
                     self.message = None;
                 }
@@ -1086,6 +1204,43 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn claude_starts_fresh_under_the_same_id_with_its_flags() {
+        const ID: &str = "0b5c3a5e-6d0e-4c1f-9a4b-2f7f1d9e8c11";
+        let launched = argv(&["claude", "--model", "opus", "--session-id", ID]);
+        assert_eq!(
+            CLIAgent::Claude
+                .start_command(ID, Some(&launched))
+                .as_deref(),
+            Some(format!("claude --model opus --session-id {ID}").as_str())
+        );
+        assert_eq!(CLIAgent::Claude.start_command("not-a-uuid", None), None);
+        assert_eq!(CLIAgent::Codex.start_command(ID, None), None);
+    }
+
+    #[test]
+    fn a_restore_falls_back_to_a_fresh_start_only_where_the_shell_has_or() {
+        const ID: &str = "0b5c3a5e-6d0e-4c1f-9a4b-2f7f1d9e8c11";
+        let launched = argv(&["claude", "--model", "opus"]);
+        let resume = CLIAgent::Claude
+            .resume_command(ID, Some(&launched))
+            .unwrap();
+        let restore = |shell| CLIAgent::Claude.restore_command(ID, Some(&launched), shell);
+        let chained = format!("{resume} || claude --model opus --session-id {ID}");
+        assert_eq!(restore(Some("/bin/zsh")).as_deref(), Some(chained.as_str()));
+        assert_eq!(restore(Some("pwsh.exe")).as_deref(), Some(chained.as_str()));
+        // Windows PowerShell 5.1 and nu reject the whole line over `||`, and a
+        // shell nobody could name might be either.
+        assert_eq!(restore(Some("powershell.exe")), Some(resume.clone()));
+        assert_eq!(restore(Some("nu")), Some(resume.clone()));
+        assert_eq!(restore(None), Some(resume));
+        // Agents with no way to name a new session keep the bare resume.
+        assert_eq!(
+            CLIAgent::Codex.restore_command(ID, None, Some("bash")),
+            CLIAgent::Codex.resume_command(ID, None)
+        );
+    }
+
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
     }
@@ -1165,6 +1320,35 @@ mod tests {
                 "on {launcher}"
             );
         }
+    }
+
+    /// The China build installs the same dispatcher-plus-CLI pair under `-cn`
+    /// names, so a bare `qoder` has to stay with the global one.
+    #[test]
+    fn qoder_cn_is_detected_through_either_of_its_binaries() {
+        for launcher in [
+            "qodercn",
+            "qoderclicn",
+            "qoder-cn",
+            "/c/Users/me/.qoder-cn/entry/qodercn.cmd",
+        ] {
+            assert_eq!(
+                CLIAgent::detect_from_argv(&argv(&[launcher])),
+                Some(CLIAgent::QoderCLICn),
+                "on {launcher}"
+            );
+        }
+        for other in ["qoder", "qodercli"] {
+            assert_eq!(
+                CLIAgent::detect_from_argv(&argv(&[other])),
+                Some(CLIAgent::QoderCLI),
+                "the global build keeps {other}"
+            );
+        }
+        assert_eq!(
+            CLIAgent::from_slug("qoderclicn"),
+            Some(CLIAgent::QoderCLICn)
+        );
     }
 
     /// All three of CodeBuddy's npm bins are node scripts pointing at one file,
@@ -1595,6 +1779,95 @@ mod tests {
 
         s.apply_event(&ev(AgentEventKind::SessionEnd));
         assert_eq!(s.activity, 4);
+    }
+
+    #[test]
+    fn an_assumed_interrupt_ends_the_turn_until_the_agent_says_otherwise() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+        };
+
+        let mut s = AgentSessionState::default();
+        s.assume_interrupted();
+        assert_eq!(s.status, AgentStatus::Idle, "no turn, nothing to interrupt");
+        assert!(!s.inferred);
+
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        s.assume_interrupted();
+        assert_eq!(
+            s.status,
+            AgentStatus::Done,
+            "a rejected prompt ends the turn"
+        );
+        assert_eq!(s.turns, 1);
+        assert!(s.inferred);
+
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        assert_eq!(
+            s.status,
+            AgentStatus::Working,
+            "a tool finishing after the key proves the turn was still going"
+        );
+        assert!(!s.inferred);
+
+        s.apply_event(&ev(AgentEventKind::Stop));
+        assert_eq!(s.turns, 2);
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        assert_eq!(
+            s.status,
+            AgentStatus::Done,
+            "a real Stop is not a guess and stays put"
+        );
+
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.assume_interrupted();
+        s.apply_event(&ev(AgentEventKind::Notification));
+        assert!(!s.inferred, "any real event retires the guess");
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        assert_eq!(s.status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn a_stale_turn_goes_idle_and_comes_back_on_the_next_tool() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+        };
+
+        let mut s = AgentSessionState::default();
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        s.assume_stale();
+        assert_eq!(
+            s.status,
+            AgentStatus::Waiting,
+            "a prompt nobody answered is not stale"
+        );
+
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        s.assume_stale();
+        assert_eq!(s.status, AgentStatus::Idle);
+        assert_eq!(s.turns, 0, "going quiet is not finishing");
+        assert!(s.inferred);
+
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        assert_eq!(s.status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn a_session_state_from_an_older_daemon_is_not_inferred() {
+        let s: AgentSessionState = serde_json::from_str(r#"{"status":"done"}"#).unwrap();
+        assert!(!s.inferred);
     }
 
     #[test]

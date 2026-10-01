@@ -26,6 +26,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
     let bytes: &'static [u8] = match path {
         "icons/terminal.svg" => include_bytes!("../../assets/icons/terminal.svg"),
         "icons/git-branch.svg" => include_bytes!("../../assets/icons/git-branch.svg"),
+        "icons/pin.svg" => include_bytes!("../../assets/icons/pin.svg"),
         // Deliberately not `refresh.svg`: the panel header already carries a
         // refresh tile, and the same glyph meaning two different things one row
         // apart reads as a bug.
@@ -64,6 +65,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
             include_bytes!("../../assets/icons/settings/chevron-right.svg")
         }
         "icons/settings/close.svg" => include_bytes!("../../assets/icons/settings/close.svg"),
+        "icons/settings/mobile.svg" => include_bytes!("../../assets/icons/settings/mobile.svg"),
         "icons/settings/general.svg" => include_bytes!("../../assets/icons/settings/general.svg"),
         "icons/settings/integrations.svg" => {
             include_bytes!("../../assets/icons/settings/integrations.svg")
@@ -96,6 +98,10 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/qwen.svg" => include_bytes!("../../assets/icons/agents/qwen.svg"),
         "icons/agents/kimi.svg" => include_bytes!("../../assets/icons/agents/kimi.svg"),
         "icons/agents/qodercli.svg" => include_bytes!("../../assets/icons/agents/qodercli.svg"),
+        // The China build ships the same mark.
+        "icons/agents/qoderclicn.svg" => {
+            include_bytes!("../../assets/icons/agents/qoderclicn.svg")
+        }
         "icons/agents/crush.svg" => include_bytes!("../../assets/icons/agents/crush.svg"),
         "icons/agents/codebuddy.svg" => {
             include_bytes!("../../assets/icons/agents/codebuddy.svg")
@@ -112,6 +118,19 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/github/pr-closed.svg" => include_bytes!("../../assets/icons/github/pr-closed.svg"),
         "icons/github/pr-merged.svg" => include_bytes!("../../assets/icons/github/pr-merged.svg"),
         "icons/github/pr-draft.svg" => include_bytes!("../../assets/icons/github/pr-draft.svg"),
+        // …and its checks': passed, failed, running, skipped.
+        "icons/github/check-passed.svg" => {
+            include_bytes!("../../assets/icons/github/check-passed.svg")
+        }
+        "icons/github/check-failed.svg" => {
+            include_bytes!("../../assets/icons/github/check-failed.svg")
+        }
+        "icons/github/check-pending.svg" => {
+            include_bytes!("../../assets/icons/github/check-pending.svg")
+        }
+        "icons/github/check-skipped.svg" => {
+            include_bytes!("../../assets/icons/github/check-skipped.svg")
+        }
         _ => return None,
     };
     Some(bytes)
