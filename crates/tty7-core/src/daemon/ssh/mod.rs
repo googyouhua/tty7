@@ -380,7 +380,10 @@ impl SshManager {
         // would show on screen, land in history, and go to whatever answers
         // first — a jump host's menu as readily as a shell.
         let bootstrap = match spec.shell_integration {
-            true => self.remote_bootstrap(&conn, remote_start_dir).await,
+            true => {
+                self.remote_bootstrap(&conn, remote_start_dir, &spec.term, size.cols, size.rows)
+                    .await
+            }
             false => None,
         };
         match bootstrap {
@@ -600,10 +603,15 @@ impl SshManager {
     /// The bootstrap for a new session on `conn`, starting in `start_dir` on
     /// the far host. What is cached per connection is the probed shell only:
     /// the start directory belongs to the pane being dialled, not the host.
+    /// `term`/`cols`/`rows` size the `script` pty fallback (which starts at
+    /// 0x0) for bastions that proxy the exec channel without a pty.
     async fn remote_bootstrap(
         &self,
         conn: &Arc<SshConnection>,
         start_dir: Option<&str>,
+        term: &str,
+        cols: u16,
+        rows: u16,
     ) -> Option<String> {
         let key = conn.key().clone();
         let cached = { self.probes.lock().unwrap().get(&key).cloned() };
@@ -626,7 +634,9 @@ impl SshManager {
                 probed
             }
         };
-        probed.map(|(shell, path)| remote::bootstrap_command(shell, &path, start_dir))
+        probed.map(|(shell, path)| {
+            remote::bootstrap_command(shell, &path, start_dir, term, cols, rows)
+        })
     }
 
     fn open_connection<'a>(
@@ -878,7 +888,11 @@ mod tests {
         let mgr = manager();
         mgr.runtime.block_on(async {
             let sshd = FakeSshd::connect(Exec::Hangs, Some(0)).await;
-            assert!(mgr.remote_bootstrap(&sshd.conn, None).await.is_none());
+            assert!(
+                mgr.remote_bootstrap(&sshd.conn, None, "xterm-256color", 80, 24)
+                    .await
+                    .is_none()
+            );
             assert!(
                 sshd.conn.is_saturated(),
                 "a refused session marks the link full"
@@ -895,7 +909,11 @@ mod tests {
         let mgr = manager();
         mgr.runtime.block_on(async {
             let sshd = FakeSshd::connect(Exec::Exits, None).await;
-            assert!(mgr.remote_bootstrap(&sshd.conn, None).await.is_none());
+            assert!(
+                mgr.remote_bootstrap(&sshd.conn, None, "xterm-256color", 80, 24)
+                    .await
+                    .is_none()
+            );
             assert!(sshd.conn.is_alive());
             assert!(mgr.probes.lock().unwrap().contains_key(sshd.conn.key()));
             sshd.wait_for_closed(1).await;
