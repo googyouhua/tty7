@@ -1668,7 +1668,8 @@ pub fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
 ///   the terminals downstream of a CLI consumer replaying the same ring, which
 ///   do know them.
 /// - `1004` is focus reporting — the other mode that makes the terminal write
-///   into the pty unprompted, on every window activation.
+///   into the pty unprompted, on every window activation. `2031` is the same
+///   for a theme change.
 /// - `2004` is bracketed paste: a paste into a shell that does not know the
 ///   protocol arrives with `ESC[200~` typed around it.
 /// - `1` is DECCKM, which sends the arrow keys as `ESC O A` instead of `ESC[A`.
@@ -1680,7 +1681,7 @@ pub fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
 /// to it; and `2026` (synchronised update), which the client's processor closes
 /// out itself the moment a replayed frame ends inside one.
 pub const INPUT_MODE_RESETS: &[u8] = b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\
-\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b[=0;1u";
+\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l\x1b[?2031l\x1b[?2004l\x1b[?1l\x1b[=0;1u";
 
 /// Push the restored screen into the client's scrollback and put the cursor
 /// back at the top-left, so the incoming shell starts on a blank viewport.
@@ -3780,14 +3781,16 @@ struct OscSniffer {
     /// Whether the title the pane is showing still belongs to something that
     /// is running — see [`crate::core::osc::TitleLifetime`] (#889).
     title_life: crate::core::osc::TitleLifetime,
+    notes: crate::core::osc::Notifications,
 }
 
 impl OscSniffer {
     fn new() -> Self {
         Self {
-            tok: OscTokenizer::new(&[b"0", b"2", b"7", b"133", b"9", b"777"]),
+            tok: OscTokenizer::new(&[b"0", b"2", b"7", b"133", b"9", b"99", b"777"]),
             shell: ShellState::default(),
             title_life: crate::core::osc::TitleLifetime::default(),
+            notes: crate::core::osc::Notifications::default(),
         }
     }
 
@@ -3795,6 +3798,7 @@ impl OscSniffer {
         let mut signals = SniffSignals::default();
         let shell = &mut self.shell;
         let title_life = &mut self.title_life;
+        let notes = &mut self.notes;
         self.tok.feed(bytes, |payload| {
             // In stream order, so that a shell which re-titles itself right
             // after the `D` mark gets the last word over the retirement.
@@ -3816,7 +3820,7 @@ impl OscSniffer {
                 }
             } else if let Some(event) = crate::core::cli_agent::parse_agent_event(payload) {
                 signals.agent_events.push(event);
-            } else if let Some((title, body)) = crate::core::osc::parse_notification(payload) {
+            } else if let Some((title, body)) = notes.parse(payload) {
                 if title.as_deref() != Some(crate::core::cli_agent::AGENT_EVENT_SENTINEL) {
                     signals.notification = Some(body);
                 }
@@ -6000,6 +6004,27 @@ mod tests {
         assert!(
             st.agent_session.is_none(),
             "switching the foreground agent drops the previous session"
+        );
+    }
+
+    #[test]
+    fn a_kitty_notification_marks_a_hookless_agent_waiting() {
+        use crate::core::cli_agent::{AgentStatus, CLIAgent};
+
+        let mut st = test_state(true);
+        st.agent = Some(CLIAgent::Claude);
+        let mut sniffer = OscSniffer::new();
+        apply_signals(
+            &mut st,
+            sniffer.feed(
+                b"\x1b]99;i=7:d=0:p=title;Claude Code\x07\x1b]99;i=7:p=body;Claude needs your permission\x07\x1b]99;i=7:d=1:a=focus;\x07",
+            ),
+        );
+        let sess = st.agent_session.clone().unwrap();
+        assert_eq!(sess.status, AgentStatus::Waiting);
+        assert_eq!(
+            sess.message.as_deref(),
+            Some("Claude needs your permission")
         );
     }
 

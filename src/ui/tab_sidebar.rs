@@ -516,6 +516,10 @@ impl Tty7App {
             .get(self.workspace)
             .is_some_and(|w| w.is_remote());
 
+        // A reveal whose row is not drawn this frame (folded away, or the tab
+        // gone) is dropped, so it cannot fire when the row turns up later.
+        let reveal = self.sidebar_reveal.get();
+        let mut reveal_drawn = false;
         for (n, (group_slot, group_ix)) in blocks.into_iter().enumerate() {
             if n == first_unpinned && show_divider {
                 list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
@@ -594,6 +598,7 @@ impl Tty7App {
             for (slot, i) in visible.into_iter().enumerate() {
                 let badge_pos = badge_pos[i];
                 let tab = &self.tabs[i];
+                reveal_drawn |= reveal == Some(tab.tree_id.get());
                 let is_active = i == active;
                 let ssh_dot = self.tab_ssh_dot(tab, cx);
                 let asleep = tab.is_asleep();
@@ -1039,12 +1044,36 @@ impl Tty7App {
                                 // reads the slots of one group, a pane dropped
                                 // on the sidebar reads every row there is.
                                 let by_tab = self.sidebar_slots.clone();
-                                move |bounds, _window, _cx| {
+                                let reveal = self.sidebar_reveal.clone();
+                                let scroll = self.sidebar_scroll.clone();
+                                let id = tab.tree_id.get();
+                                // The header sits directly above a group's
+                                // first row, one gap away.
+                                let lead = match slot == 0 && section.name.is_some() {
+                                    true => px(HEADER_HEIGHT + ROW_GAP),
+                                    false => px(0.),
+                                };
+                                move |bounds, window, _cx| {
                                     if let Some(s) = slots.borrow_mut().get_mut(slot) {
                                         *s = bounds;
                                     }
                                     if let Some(s) = by_tab.borrow_mut().get_mut(i) {
                                         *s = bounds;
+                                    }
+                                    if reveal.get() == Some(id) {
+                                        reveal.set(None);
+                                        let view = scroll.bounds();
+                                        let shift = reveal_shift(
+                                            (bounds.top(), bounds.bottom()),
+                                            lead,
+                                            (view.top(), view.bottom()),
+                                        );
+                                        if shift != px(0.) {
+                                            let mut offset = scroll.offset();
+                                            offset.y += shift;
+                                            scroll.set_offset(offset);
+                                            window.refresh();
+                                        }
                                     }
                                 }
                             },
@@ -1646,6 +1675,9 @@ impl Tty7App {
                 }
                 _ => block.into_any_element(),
             });
+        }
+        if !reveal_drawn {
+            self.sidebar_reveal.set(None);
         }
         if show_divider && !divider_drawn {
             list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
@@ -2258,6 +2290,16 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Put tab `index` in group `key`. An auto group's members are decided by
+    /// their cwds, so a tab goes into one by pinning the group, as its
+    /// header's pin does — the tab joins in the same edit.
+    pub(crate) fn move_tab_to(&mut self, index: usize, key: GroupKey, cx: &mut Context<Self>) {
+        match key {
+            GroupKey::Pinned(id) => self.set_tab_group(index, Some(id), cx),
+            GroupKey::Auto(auto) => self.pin_auto_group_with(auto, Some(index), cx),
+        }
+    }
+
     /// A name no pinned group is using yet, for a group about to be made.
     ///
     /// The placeholder only has to be unique — the rename box opens on it
@@ -2320,21 +2362,45 @@ impl Tty7App {
     /// The fold comes along: a group that was shut stays shut, rather than
     /// springing open in its new place.
     pub(crate) fn pin_auto_group(&mut self, key: AutoKey, cx: &mut Context<Self>) {
+        self.pin_auto_group_with(key, None, cx);
+    }
+
+    /// [`pin_auto_group`](Self::pin_auto_group), taking tab `also` into the
+    /// new group in the same edit.
+    fn pin_auto_group_with(&mut self, key: AutoKey, also: Option<usize>, cx: &mut Context<Self>) {
         let mut group = match &key {
             AutoKey::Repo(root) => PinnedGroup::folder(root),
             AutoKey::SshHost(host) => PinnedGroup::label(host.clone()),
         };
         group.collapsed = self.sidebar_groups.auto_collapsed.contains(&key);
-        let id = group.id;
+        // A repo whose folder is already kept — a tab dragged out of that
+        // group while still in the repo is drawn under the repo again — joins
+        // the kept group rather than making a second: two groups keeping one
+        // folder split its tabs between them by nothing but list order.
+        let kept = group.folder.as_deref().and_then(|folder| {
+            self.sidebar_groups
+                .pinned
+                .iter()
+                .find(|g| g.folder.as_deref() == Some(folder))
+                .map(|g| g.id)
+        });
+        let id = kept.unwrap_or(group.id);
         let wanted = Some(GroupKey::Auto(key.clone()));
-        for (tab, place) in self.tabs.iter().zip(self.sidebar_group_keys(cx)) {
-            if place == wanted {
+        for (i, (tab, place)) in self
+            .tabs
+            .iter()
+            .zip(self.sidebar_group_keys(cx))
+            .enumerate()
+        {
+            if place == wanted || also == Some(i) {
                 tab.group.set(Some(id));
             }
         }
         self.edit_groups(cx, |groups| {
             groups.auto_collapsed.retain(|k| *k != key);
-            groups.pinned.push(group);
+            if kept.is_none() {
+                groups.pinned.push(group);
+            }
         });
     }
 
@@ -2965,6 +3031,23 @@ impl Section {
     }
 }
 
+/// How far to move the sidebar's scroll offset so a newly active row shows.
+/// A row with any part in view stays put — clicking a row must not move the
+/// list under the pointer; one out of view comes in at the nearest edge.
+/// `lead` is what sits on top of the row and belongs with it — its group's
+/// header, for the first row — so a row coming in from above brings the
+/// name of the group it is in, not just itself.
+fn reveal_shift(row: (Pixels, Pixels), lead: Pixels, view: (Pixels, Pixels)) -> Pixels {
+    let ((top, bottom), (view_top, view_bottom)) = (row, view);
+    if bottom <= view_top {
+        view_top - (top - lead)
+    } else if top >= view_bottom {
+        view_bottom - bottom
+    } else {
+        px(0.)
+    }
+}
+
 /// The sidebar's sections, top to bottom: every pinned group in the user's
 /// order — an empty one too, since a kept group stays until it is deleted —
 /// then the auto groups in the order their first tab appears, then
@@ -3026,6 +3109,35 @@ fn sidebar_sections(keys: &[Option<GroupKey>], groups: &WorkspaceGroups) -> Vec<
         });
     }
     sections
+}
+
+/// A row of the tab menu's "Move to Group".
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MoveTarget {
+    pub key: GroupKey,
+    pub name: String,
+    pub checked: bool,
+}
+
+/// Every group the sidebar draws, in its order — pinned and auto alike —
+/// with the one tab `index` is in checked.
+pub(crate) fn move_targets(
+    keys: &[Option<GroupKey>],
+    groups: &WorkspaceGroups,
+    index: usize,
+) -> Vec<MoveTarget> {
+    let here = keys.get(index).cloned().flatten();
+    sidebar_sections(keys, groups)
+        .into_iter()
+        .filter_map(|s| {
+            let key = s.key?;
+            Some(MoveTarget {
+                checked: here.as_ref() == Some(&key),
+                name: s.name.expect("a section with a key has a header"),
+                key,
+            })
+        })
+        .collect()
 }
 
 fn reordered_rows(
@@ -3811,6 +3923,85 @@ mod fold_tests {
         });
     }
 
+    /// Moving a tab into an auto group pins that group, in one edit: the
+    /// group's own tabs and the moved one end up in a single folder group.
+    #[gpui::test]
+    fn moving_a_tab_into_an_auto_group_pins_it_with_the_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        let r = AutoKey::Repo(PathBuf::from("/w/r"));
+        app.update(&mut vcx, |app, cx| {
+            for i in 0..2 {
+                *app.tabs[i].auto_group.borrow_mut() = Some(r.clone());
+            }
+            *app.tabs[2].auto_group.borrow_mut() = Some(AutoKey::Repo(PathBuf::from("/w/s")));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| {
+            app.move_tab_to(2, GroupKey::Auto(r.clone()), cx)
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| {
+            let [group] = app.sidebar_groups.pinned.as_slice() else {
+                panic!("exactly one pinned group: {:?}", app.sidebar_groups.pinned);
+            };
+            assert_eq!(group.folder.as_deref(), Some("/w/r"));
+            for i in 0..3 {
+                assert_eq!(app.tabs[i].group.get(), Some(group.id), "tab {i}");
+            }
+            let keys = app.sidebar_group_keys(cx);
+            assert!(
+                !keys.contains(&Some(GroupKey::Auto(r.clone()))),
+                "r is no longer an auto group"
+            );
+        });
+    }
+
+    /// A tab dragged out of a folder group while still in the repo is drawn
+    /// under the repo's auto group, beside the folder group keeping the same
+    /// directory. Moving a tab into that auto group joins the kept group
+    /// rather than pinning the folder a second time.
+    #[gpui::test]
+    fn moving_into_an_auto_group_whose_folder_is_kept_joins_the_kept_group(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        let r = AutoKey::Repo(PathBuf::from("/w/r"));
+        let kept = PinnedGroup::folder(Path::new("/w/r"));
+        let id = kept.id;
+        app.update(&mut vcx, |app, cx| {
+            app.sidebar_groups.pinned.push(kept);
+            app.tabs[0].group.set(Some(id));
+            for i in 0..2 {
+                *app.tabs[i].auto_group.borrow_mut() = Some(r.clone());
+            }
+            *app.tabs[2].auto_group.borrow_mut() = Some(AutoKey::Repo(PathBuf::from("/w/s")));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        app.update(&mut vcx, |app, cx| {
+            assert!(
+                app.sidebar_group_keys(cx)
+                    .contains(&Some(GroupKey::Auto(r.clone()))),
+                "tab 1 is drawn under the repo's auto group"
+            );
+            app.move_tab_to(2, GroupKey::Auto(r.clone()), cx)
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, _| {
+            let [group] = app.sidebar_groups.pinned.as_slice() else {
+                panic!("still one pinned group: {:?}", app.sidebar_groups.pinned);
+            };
+            assert_eq!(group.id, id);
+            for i in 0..3 {
+                assert_eq!(app.tabs[i].group.get(), Some(id), "tab {i}");
+            }
+        });
+    }
+
     /// A pinned group with no tabs is still drawn — it is kept until it is
     /// deleted — while an auto group with none simply is not there.
     #[gpui::test]
@@ -4200,6 +4391,30 @@ mod fold_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reveal_shift_moves_only_rows_out_of_view() {
+        let view = (px(100.), px(400.));
+        // On screen, or cut by an edge: a click there scrolls nothing.
+        assert_eq!(reveal_shift((px(200.), px(230.)), px(0.), view), px(0.));
+        assert_eq!(reveal_shift((px(90.), px(120.)), px(0.), view), px(0.));
+        assert_eq!(reveal_shift((px(390.), px(420.)), px(0.), view), px(0.));
+        // Above: its top lands on the top edge.
+        assert_eq!(reveal_shift((px(10.), px(40.)), px(0.), view), px(90.));
+        // Below: its bottom lands on the bottom edge.
+        assert_eq!(reveal_shift((px(500.), px(530.)), px(0.), view), px(-130.));
+    }
+
+    #[test]
+    fn a_first_row_revealed_from_above_brings_its_header() {
+        let view = (px(100.), px(400.));
+        // The header's top, not the row's, lands on the top edge.
+        assert_eq!(reveal_shift((px(10.), px(40.)), px(23.), view), px(113.));
+        // A header half under the top edge, row on screen: still nothing.
+        assert_eq!(reveal_shift((px(110.), px(140.)), px(23.), view), px(0.));
+        // Below: the header is already above the row, only the bottom counts.
+        assert_eq!(reveal_shift((px(500.), px(530.)), px(23.), view), px(-130.));
+    }
+
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
     }
@@ -4316,6 +4531,43 @@ mod tests {
                 (Some("Ungrouped".into()), vec![3]),
             ]
         );
+    }
+
+    /// "Move to Group" offers every group the sidebar draws — auto groups
+    /// too, not just the pinned ones — in sidebar order.
+    #[test]
+    fn move_targets_list_every_sidebar_group_in_order() {
+        let mut groups = none();
+        let work = PinnedGroup::label("work");
+        groups.pinned = vec![work.clone()];
+        let keys = vec![
+            Some(g("/w/r")),
+            Some(GroupKey::Pinned(work.id)),
+            Some(host("u@h")),
+            None,
+        ];
+        let shape = |index| -> Vec<(GroupKey, String, bool)> {
+            move_targets(&keys, &groups, index)
+                .into_iter()
+                .map(|m| (m.key, m.name, m.checked))
+                .collect()
+        };
+        assert_eq!(
+            shape(0),
+            vec![
+                (GroupKey::Pinned(work.id), "work".into(), false),
+                (g("/w/r"), "r".into(), true),
+                (host("u@h"), "u@h".into(), false),
+            ]
+        );
+        let checked = |index| -> Vec<bool> { shape(index).into_iter().map(|m| m.2).collect() };
+        assert_eq!(checked(1), vec![true, false, false]);
+        assert_eq!(
+            checked(3),
+            vec![false, false, false],
+            "an ungrouped tab is in none"
+        );
+        assert!(move_targets(&[None], &none(), 0).is_empty());
     }
 
     /// With pinned groups and nothing auto-grouped below them, the rest is
