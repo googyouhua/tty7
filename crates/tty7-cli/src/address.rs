@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use std::path::PathBuf;
 use tty7_core::core::session::WorkspaceId;
 
 pub const ENV_PANE: &str = "TTY7_PANE";
@@ -11,6 +12,46 @@ pub const ENV_WS: &str = "TTY7_WS";
 pub const ENV_CONFIG_DIR: &str = "TTY7_CONFIG_DIR";
 
 pub const OUTSIDE_SHELL: &str = "not inside a tty7 shell — pass an explicit %pane/@tab/workspace";
+
+/// Override for the root under which `--as <name>` instances live. Defaults
+/// to `$HOME/.config`, so instances are `~/.config/tty7-<name>` beside the
+/// default `~/.config/tty7`. Shared with the GUI picker through
+/// `tty7_core::core::instance`.
+pub const ENV_INSTANCE_ROOT: &str = tty7_core::core::instance::ENV_INSTANCE_ROOT;
+
+/// A per-user instance name for `--as`: lowercase letters, digits, hyphens.
+/// Rejects `..`, `/`, a leading `-`, and anything else that could escape the
+/// `tty7-<name>` directory shape. Used as a clap value parser, so a refusal
+/// is a usage error (exit 2) raised before anything starts. The rule itself
+/// lives in `tty7_core::core::instance` so the GUI picker enforces the same
+/// shape.
+pub fn parse_instance_name(s: &str) -> Result<String, String> {
+    tty7_core::core::instance::validate_name(s)
+}
+
+/// The config directory for `--as <name>`, resolved without touching the
+/// filesystem: `${TTY7_AS_ROOT:-$HOME/.config}/tty7-<name>`. Pure so tests
+/// can pin both inputs; the root rule is shared with
+/// `tty7_core::core::instance::root_with`.
+pub fn instance_dir(name: &str, root: Option<&str>, home: Option<&str>) -> Result<PathBuf> {
+    let root = tty7_core::core::instance::root_with(root, home)
+        .ok_or_else(|| anyhow!("$HOME is unset and {ENV_INSTANCE_ROOT} is not set"))?;
+    Ok(root.join(format!("tty7-{name}")))
+}
+
+/// Point this process at `--as <name>`'s instance: create its directory
+/// (mode 700, leaf only) and set `TTY7_CONFIG_DIR`, which is what
+/// `tty7_core`'s endpoint derivation reads. Call before `Context::from_env`.
+pub fn apply_instance(name: &str) -> Result<()> {
+    let Some(dir) = tty7_core::core::instance::dir_for(name) else {
+        return Err(anyhow!("no directory resolves for instance '{name}'"));
+    };
+    tty7_core::core::instance::ensure_dir(&dir)?;
+    // SAFETY: startup, before this process spawns any thread — the same
+    // pattern `tty7-updater` uses to steer its own config dir.
+    unsafe { std::env::set_var(ENV_CONFIG_DIR, &dir) };
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Context {
@@ -212,6 +253,40 @@ mod tests {
         }
         // Past u64 is no pane either, however digit-shaped.
         assert!(parse_pane("99999999999999999999999").is_err());
+    }
+
+    #[test]
+    fn instance_names_take_a_narrow_shape() {
+        assert_eq!(parse_instance_name("alice").unwrap(), "alice");
+        assert_eq!(parse_instance_name("a-1").unwrap(), "a-1");
+        // Nothing that could escape `tty7-<name>` or read as a flag.
+        for bad in [
+            "", "Alice", "ALICE", "default", "../x", "a/b", "-x", "a b", "a_b", "%41",
+        ] {
+            assert!(
+                parse_instance_name(bad).is_err(),
+                "'{bad}' must not read as an instance name"
+            );
+        }
+    }
+
+    #[test]
+    fn instance_dirs_hang_beside_the_default_one() {
+        assert_eq!(
+            instance_dir("alice", Some("/r"), Some("/home/u")).unwrap(),
+            PathBuf::from("/r/tty7-alice")
+        );
+        // An explicit root wins over $HOME; an empty one falls back to it.
+        assert_eq!(
+            instance_dir("alice", Some(""), Some("/home/u")).unwrap(),
+            PathBuf::from("/home/u/.config/tty7-alice")
+        );
+        assert_eq!(
+            instance_dir("alice", None, Some("/home/u")).unwrap(),
+            PathBuf::from("/home/u/.config/tty7-alice")
+        );
+        assert!(instance_dir("alice", None, None).is_err());
+        assert!(instance_dir("alice", Some(""), Some("")).is_err());
     }
 
     #[test]

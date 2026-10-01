@@ -13,7 +13,7 @@ use crate::ui::assets::Assets;
 use crate::ui::keymap;
 use gpui::*;
 
-fn register_bundled_fonts(cx: &mut App) {
+pub(crate) fn register_bundled_fonts(cx: &mut App) {
     use std::borrow::Cow;
     let fonts = vec![
         Cow::Borrowed(include_bytes!("../assets/fonts/hack/Hack-Regular.ttf").as_slice()),
@@ -244,6 +244,29 @@ fn apply_config_dir_arg(args: &[std::ffi::OsString]) {
     if let Some(path) = config_dir_from(args.iter().cloned()) {
         crate::core::config::set_config_dir(path);
     }
+}
+
+/// Whether the launch names its config directory outright: a `--config-dir`
+/// flag or a non-empty `TTY7_CONFIG_DIR`.
+fn has_explicit_config(args: &[std::ffi::OsString]) -> bool {
+    config_dir_from(args.iter().cloned()).is_some()
+        || std::env::var_os("TTY7_CONFIG_DIR").is_some_and(|v| !v.is_empty())
+}
+
+/// Whether a bare GUI launch should ask who is using tty7 first: no
+/// explicit config, and nothing else to do — maintenance verbs keep the old
+/// behavior. A path launch still forwards to a running window when there is
+/// one; with none running it falls through to the picker and opens in the
+/// chosen instance.
+fn wants_instance_picker(args: &[std::ffi::OsString]) -> bool {
+    let has = |flag: &str| args.iter().any(|arg| arg == std::ffi::OsStr::new(flag));
+    if has_explicit_config(args) {
+        return false;
+    }
+    if has("--daemon") || has("--stop-daemon") {
+        return false;
+    }
+    explorer_menu_action_from(args).is_none()
 }
 
 fn open_path_from(
@@ -621,7 +644,20 @@ fn main() {
     let daemon = args
         .iter()
         .any(|arg| arg == std::ffi::OsStr::new("--daemon"));
-    let role = if daemon { "daemon" } else { "gui" };
+    let mobile_helper = args
+        .iter()
+        .any(|arg| arg == std::ffi::OsStr::new(tty7_core::daemon::mobile::GATEWAY_FLAG));
+    let role = match (daemon, mobile_helper) {
+        (true, _) => "daemon",
+        (false, true) => "mobile",
+        (false, false) => "gui",
+    };
+    // Explicit config also feeds the picker's preselect for the next bare
+    // launch. Daemons (and the mobile gateway, a daemon's child) never touch
+    // the memory: one belongs to its instance.
+    if !daemon && !mobile_helper && has_explicit_config(&args) {
+        crate::ui::instance_picker::remember_current();
+    }
     crate::core::crash::install(role);
     crate::core::logfile::install(role);
 
@@ -646,6 +682,17 @@ fn main() {
         if let Err(error) = result {
             log::error!("the Explorer context-menu update failed: {error}");
             std::process::exit(1);
+        }
+        return;
+    }
+
+    // The daemon's mobile gateway, run by the daemon as its child: see
+    // `tty7_core::daemon::mobile`.
+    if mobile_helper {
+        let served = tty7_gateway::state::State::open_default()
+            .and_then(tty7_gateway::service::serve_until_stdin_closes);
+        if let Err(e) = served {
+            log::warn!("mobile gateway: {e:#}");
         }
         return;
     }
@@ -687,9 +734,26 @@ fn main() {
         return;
     }
 
-    let open_path = open_path_from(args.into_iter());
+    let open_path = open_path_from(args.iter().cloned());
+    // A launch that only hands a path to the running window exits here and
+    // never reaches the picker. Cold — no window registered — it falls
+    // through to the picker below and opens in the chosen instance.
     if forward_open_path(open_path.as_deref()) {
         return;
+    }
+    // Bare or cold-path launch with no explicit instance asks who is using
+    // tty7. A bare launch that reaches a running window exits in the forward
+    // above, so the picker only ever appears with no window registered.
+    if wants_instance_picker(&args) {
+        match crate::ui::instance_picker::run_picker(&args) {
+            Some(selection) => {
+                if let Err(e) = crate::ui::instance_picker::apply_selection(&selection) {
+                    eprintln!("tty7: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+            None => return,
+        }
     }
 
     // After the forward: a launch that only hands a path to the running

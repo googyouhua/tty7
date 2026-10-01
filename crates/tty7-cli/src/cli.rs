@@ -37,6 +37,16 @@ pub struct Cli {
     pub quiet: bool,
 
     #[arg(
+        long = "as",
+        global = true,
+        value_name = "NAME",
+        value_parser = crate::address::parse_instance_name,
+        help = "Run against the per-user instance NAME (config dir tty7-NAME), \
+                for several people sharing one OS user"
+    )]
+    pub as_user: Option<String>,
+
+    #[arg(
         value_name = "PATH",
         help = "Launch or activate the GUI, opening a new tab at PATH if given"
     )]

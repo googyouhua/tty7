@@ -20,11 +20,13 @@ pub mod host_ops;
 #[allow(dead_code)]
 pub mod host_registry;
 pub mod i18n;
+pub mod instance_picker;
 pub mod keymap;
 pub mod local_link;
 pub mod lsp;
 pub mod machine_mirror;
 pub mod notice;
+pub(crate) mod palette;
 pub mod pane;
 pub mod pane_drag;
 pub mod panel_github;

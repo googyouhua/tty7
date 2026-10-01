@@ -40,6 +40,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/folder-open.svg" => include_bytes!("../../assets/icons/folder-open.svg"),
         "icons/info.svg" => include_bytes!("../../assets/icons/info.svg"),
         "icons/eye.svg" => include_bytes!("../../assets/icons/eye.svg"),
+        "icons/eye-off.svg" => include_bytes!("../../assets/icons/eye-off.svg"),
         "icons/search.svg" => include_bytes!("../../assets/icons/search.svg"),
         "icons/github.svg" => include_bytes!("../../assets/icons/github.svg"),
         "icons/copy.svg" => include_bytes!("../../assets/icons/copy.svg"),
@@ -65,6 +66,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
             include_bytes!("../../assets/icons/settings/chevron-right.svg")
         }
         "icons/settings/close.svg" => include_bytes!("../../assets/icons/settings/close.svg"),
+        "icons/settings/mobile.svg" => include_bytes!("../../assets/icons/settings/mobile.svg"),
         "icons/settings/general.svg" => include_bytes!("../../assets/icons/settings/general.svg"),
         "icons/settings/integrations.svg" => {
             include_bytes!("../../assets/icons/settings/integrations.svg")
