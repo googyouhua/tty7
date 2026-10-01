@@ -1,0 +1,189 @@
+schema: comet.native.v4
+name: picker-close-button
+language: en
+phase: archive
+status: done
+state_version: 11
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 43cfced5d0727b5c6b03c9f62443e7cd251c5e2cb742545faba748346185147f
+spec_changes:
+  - capability: picker-close-button
+    operation: create
+    source: specs/picker-close-button/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/picker-close-button
+  target_branch: main
+  finish: push
+loop:
+  stage: done
+  goal_cycle: 2
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: A1：裸启动（无显式 config）弹出 picker，可见“关闭”按钮；点击关闭后进程正常结束（exit 0，安静退出），不进入主 UI，不弹错。
+    result: passed
+    reason:
+      text: Close ghost button wired to cancel()->finish(None)->main return; quiet
+        exit, no error/daemon touch (code-path verified)
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: A2：Esc 与窗口 X 与关闭按钮同效：均退出本次启动，不写记忆、不拉新进程。
+    result: passed
+    reason:
+      text: Esc, window-X, Close all converge on finish(None); no memory write, no
+        relaunch for None
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: A3：确认路径不受影响：输入合法用户名确认后进入 `tty7-<name>` 实例主 UI（Windows 需含既有 detached
+      重起语义，否则确认后无法进主 UI——见 Constraints）。
+    result: passed
+    reason:
+      text: confirm/relaunch_with/main dispatch untouched; diff only button row + i18n
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: A4：Linux/macOS 回归：显式 `--config-dir` 跳过 picker；已有单测通过。
+    result: passed
+    reason:
+      text: picker gate untouched; Close key in en/zh/ja; fmt clean; picker 4 +
+        instance 5 unit tests pass
+      truncated: false
+builder_handoff:
+  candidate_id: e1a7c9a2-19a9-434a-b886-289183859452
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:d6f2022b-83b5-4ee9-808b-84ab3209a615
+  iteration: 1
+  summary:
+    text: picker close button done
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+  checks:
+    - name:
+        text: fmt
+        truncated: false
+      result: passed
+      note: null
+  checks_truncated: false
+  known_limits: []
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-01T07:40:21.039Z
+blockers: []
+verification:
+  candidate_id: e1a7c9a2-19a9-434a-b886-289183859452
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:b9c0dc89-680b-42cf-85fb-a6297dbcda7e
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: fmt
+      name:
+        text: cargo fmt --check
+        truncated: false
+      argv_display:
+        - text: fmt
+          truncated: false
+        - text: --check
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 3304
+    - id: picker-unit
+      name:
+        text: cargo test --bin tty7-app instance_picker
+        truncated: false
+      argv_display:
+        - text: test
+          truncated: false
+        - text: --bin
+          truncated: false
+        - text: tty7-app
+          truncated: false
+        - text: instance_picker
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 18941
+    - id: instance-unit
+      name:
+        text: cargo test -p tty7-core core::instance
+        truncated: false
+      argv_display:
+        - text: test
+          truncated: false
+        - text: -p
+          truncated: false
+        - text: "[REDACTED]"
+          truncated: false
+        - text: core::instance
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 1458
+  summary:
+    text: Close-button increment matches spec; quiet-exit on all dismiss paths;
+      confirm/relaunch paths untouched.
+    truncated: false
+  risks:
+    - text: live GUI pixel-click needs human目检
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-01T07:42:55.290Z
+history:
+  - goal_cycle: 1
+    iteration: 0
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native Shape artifacts changed
+      truncated: false
+    completed_at: 2026-10-01T07:28:37.101Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: Close-button increment matches spec; quiet-exit on all dismiss paths;
+        confirm/relaunch paths untouched.
+      truncated: false
+    completed_at: 2026-10-01T07:42:55.290Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-01T06:57:16.292Z
