@@ -976,6 +976,14 @@ impl Tty7App {
             if let Some(snapshot) = self.host_snapshots.get(&id) {
                 group.merge(&snapshot.rows, now);
             }
+            // Unclaimed remote workspaces: the mirror is live (layout deltas
+            // land here), while the snapshot above is only replaced on a
+            // fresh connect — so a workspace the CLI made after connecting
+            // would otherwise never appear. `merge` dedups against rows the
+            // store already has a view on, the same way snapshot rows do.
+            if let Some(machine) = crate::ui::machine_mirror::MachineMirrors::machine(cx, id) {
+                group.merge(&crate::ui::remote_connect::rows_from_machine(machine), now);
+            }
         }
         groups
     }
@@ -4079,6 +4087,63 @@ mod gpui_tests {
                 listed.contains(&kept_ws),
                 "its machine's other workspaces are still on offer"
             );
+        });
+    }
+
+    /// A workspace the CLI made on a connected remote machine must reach the
+    /// switcher without a reconnect: the listing snapshot is only replaced on
+    /// a fresh connect, while the machine mirror follows layout deltas live.
+    #[gpui::test]
+    fn a_cli_made_remote_workspace_reaches_the_switcher_without_reconnect(cx: &mut TestAppContext) {
+        use crate::core::session::{RemoteTarget, WorkspaceId};
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+
+        let target = RemoteTarget::Alias {
+            alias: "build-box".into(),
+        };
+        let machine_ws = WorkspaceId::new();
+        let tree = tty7_core::core::machine::Workspace {
+            id: machine_ws,
+            name: Some("cli-made".into()),
+            ..tty7_core::core::machine::Workspace::default()
+        };
+
+        // The machine group exists (an empty listing snapshot), but nothing
+        // has adopted the workspace yet: no store view, no snapshot row.
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: Vec::new(),
+                },
+            );
+        });
+        cx.update(|cx| {
+            crate::ui::machine_mirror::MachineMirrors::install(
+                cx,
+                target.host_id(),
+                tty7_core::core::machine::Machine {
+                    workspaces: vec![tree],
+                    panes: Vec::new(),
+                },
+            );
+        });
+
+        app.update(cx, |app, cx| {
+            let group = app
+                .switcher_groups(cx)
+                .into_iter()
+                .find(|g| g.target.as_ref() == Some(&target))
+                .expect("the machine stays grouped by its snapshot");
+            let row = group
+                .rows
+                .iter()
+                .find(|r| r.remote_id == Some(machine_ws))
+                .expect("the CLI-made workspace is on offer without a reconnect");
+            assert_eq!(row.name, "cli-made");
+            assert!(row.adopt.is_some(), "it opens through the adopt flow");
         });
     }
 
