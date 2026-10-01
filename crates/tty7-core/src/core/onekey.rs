@@ -103,6 +103,62 @@ impl OneKeyEntry {
 /// Security warning text shared by Settings and docs (brief A5, spec §6).
 pub const ONEKEY_SECURITY_WARNING: &str = "OneKey secrets are stored as plaintext in config.json. Use OneKey autofill only in a SECURE environment: anyone who can read the file can recover them, and listing or sending an entry exposes its secret. A fake login screen can steal filled credentials.";
 
+/// A live-resolved SSH host ↔ OneKey link: the credential overrides a
+/// connection built for `profile` should apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedCredential {
+    /// Entry username when non-empty; `None` keeps the host's own user.
+    pub user: Option<String>,
+    /// Entry password when non-empty; `None` keeps the keychain/prompt chain.
+    pub password: Option<String>,
+}
+
+/// Resolve `profile.onekey_entry_id` against `entries` (D2 live reference).
+/// Returns `None` when unlinked, the id is blank/unknown (dangling → caller
+/// falls back to host credentials), or the entry carries nothing usable.
+pub fn linked_credential(
+    profile: &crate::core::ssh_profile::SshProfile,
+    entries: &[OneKeyEntry],
+) -> Option<LinkedCredential> {
+    let id = profile.onekey_entry_id.as_deref()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let entry = entries.iter().find(|e| e.id == id)?;
+    let user = (!entry.username.trim().is_empty()).then(|| entry.username.clone());
+    let password = (!entry.password.is_empty()).then(|| entry.password.clone());
+    match (&user, &password) {
+        (None, None) => None,
+        _ => Some(LinkedCredential { user, password }),
+    }
+}
+
+/// Display title for a host's link: `Some(title)` when linked, `None` when
+/// unlinked *or* dangling (callers use [`is_link_broken`] to tell those apart).
+pub fn linked_title(
+    profile: &crate::core::ssh_profile::SshProfile,
+    entries: &[OneKeyEntry],
+) -> Option<String> {
+    let id = profile.onekey_entry_id.as_deref()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    entries
+        .iter()
+        .find(|e| e.id == id)
+        .map(|e| e.title.clone())
+}
+
+/// Whether the host names an entry id that no longer exists (A4).
+pub fn is_link_broken(
+    profile: &crate::core::ssh_profile::SshProfile,
+    entries: &[OneKeyEntry],
+) -> bool {
+    match profile.onekey_entry_id.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => !entries.iter().any(|e| e.id == id),
+        _ => false,
+    }
+}
 pub fn titles_unique(entries: &[OneKeyEntry]) -> bool {
     let mut seen = std::collections::HashSet::new();
     for e in entries {
@@ -192,5 +248,65 @@ mod tests {
         assert!(!dump.contains("s3cret"), "password must be redacted");
         assert!(dump.contains("<redacted>"));
         assert!(dump.contains("alice"));
+    }
+
+    fn linked_profile(id: &str) -> crate::core::ssh_profile::SshProfile {
+        let mut p = crate::core::ssh_profile::SshProfile::new("web");
+        p.host = "10.0.0.5".to_string();
+        p.user = "deploy".to_string();
+        p.onekey_entry_id = Some(id.to_string());
+        p
+    }
+
+    #[test]
+    fn link_resolves_live_username_and_password() {
+        let cred = linked_credential(&linked_profile("1"), &[entry()]).unwrap();
+        assert_eq!(cred.user.as_deref(), Some("alice"));
+        assert_eq!(cred.password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn link_follows_entry_edits_without_touching_the_host() {
+        let mut e = entry();
+        e.password = "rotated".to_string();
+        e.title = "renamed".to_string();
+        let cred = linked_credential(&linked_profile("1"), &[e]).unwrap();
+        assert_eq!(cred.password.as_deref(), Some("rotated"));
+        assert_eq!(
+            linked_title(&linked_profile("1"), &[entry()]),
+            Some("prod".to_string())
+        );
+    }
+
+    #[test]
+    fn dangling_link_resolves_to_nothing_and_reports_broken() {
+        let p = linked_profile("gone");
+        assert_eq!(linked_credential(&p, &[entry()]), None);
+        assert_eq!(linked_title(&p, &[entry()]), None);
+        assert!(is_link_broken(&p, &[entry()]));
+    }
+
+    #[test]
+    fn unlinked_host_is_neither_resolved_nor_broken() {
+        let mut p = linked_profile("1");
+        p.onekey_entry_id = None;
+        assert_eq!(linked_credential(&p, &[entry()]), None);
+        assert!(!is_link_broken(&p, &[entry()]));
+        p.onekey_entry_id = Some("  ".to_string());
+        assert_eq!(linked_credential(&p, &[entry()]), None);
+        assert!(!is_link_broken(&p, &[entry()]));
+    }
+
+    #[test]
+    fn empty_username_keeps_host_user_empty_password_keeps_chain() {
+        let mut e = entry();
+        e.username = "  ".to_string();
+        e.password = String::new();
+        assert_eq!(linked_credential(&linked_profile("1"), &[e]), None);
+        let mut e = entry();
+        e.username = String::new();
+        let cred = linked_credential(&linked_profile("1"), &[e]).unwrap();
+        assert_eq!(cred.user, None);
+        assert_eq!(cred.password.as_deref(), Some("s3cret"));
     }
 }

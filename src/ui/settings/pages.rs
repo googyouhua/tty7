@@ -1145,15 +1145,17 @@ impl Tty7App {
                     );
                 },
             );
-            let show_label = match form.show_password {
-                true => "Hide",
-                false => "Show",
+            let (eye_icon, eye_label) = match form.show_password {
+                true => ("icons/eye-off.svg", "Hide"),
+                false => ("icons/eye.svg", "Show"),
             };
-            let show_toggle = kit::button("onekey-show", show_label, BtnKind::Link).on_click(
-                cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
-                    this.toggle_onekey_password_shown(window, cx);
-                }),
-            );
+            let show_toggle = kit::button("onekey-show", eye_label, BtnKind::Link)
+                .icon(eye_icon)
+                .on_click(
+                    cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
+                        this.toggle_onekey_password_shown(window, cx);
+                    }),
+                );
             let save = kit::button("onekey-save", "Save", BtnKind::Primary).on_click(
                 cx.listener(|this, _ev: &gpui::ClickEvent, _w, cx| {
                     this.save_onekey_form(cx);

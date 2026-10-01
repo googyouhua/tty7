@@ -25,6 +25,7 @@ impl Tty7App {
             &cfg.ssh_profiles,
             &OsCredentialStore,
             cfg.verify_host_keys,
+            &cfg.onekey_entries,
         )
     }
 
@@ -343,6 +344,7 @@ pub(crate) fn resolve_persisted_ssh_spec(
             &cfg.ssh_profiles,
             &OsCredentialStore,
             cfg.verify_host_keys,
+            &cfg.onekey_entries,
         )),
         None => spec,
     }
@@ -353,6 +355,7 @@ pub(crate) fn build_native_ssh_spec(
     profiles: &[SshProfile],
     store: &dyn CredentialStore,
     global_verify_host_keys: bool,
+    onekey: &[tty7_core::core::onekey::OneKeyEntry],
 ) -> NativeSshSpec {
     let mut visited = HashSet::new();
     visited.insert(profile.id);
@@ -361,6 +364,7 @@ pub(crate) fn build_native_ssh_spec(
         profiles,
         store,
         global_verify_host_keys,
+        onekey,
         &mut visited,
     )
 }
@@ -370,15 +374,31 @@ fn build_spec_inner(
     profiles: &[SshProfile],
     store: &dyn CredentialStore,
     global_verify_host_keys: bool,
+    onekey: &[tty7_core::core::onekey::OneKeyEntry],
     visited: &mut HashSet<Uuid>,
 ) -> NativeSshSpec {
     let identity_files = profile.expanded_identity_files();
 
+    // SSH host ↔ OneKey live link (A2/A3): a resolved entry overrides the
+    // effective user and supplies the password exactly where `spec.password`
+    // goes. Dangling ids resolve to nothing and fall through to the host's
+    // own credentials (A4).
+    let linked = tty7_core::core::onekey::linked_credential(profile, onekey);
+    let effective_user = linked
+        .as_ref()
+        .and_then(|l| l.user.clone())
+        .unwrap_or_else(|| profile.user.clone());
+
     let password = if matches!(profile.auth, AuthMode::Auto | AuthMode::Password) {
-        store
-            .password_for(&profile.user, &profile.host, profile.port)
-            .ok()
-            .flatten()
+        linked
+            .as_ref()
+            .and_then(|l| l.password.clone())
+            .or_else(|| {
+                store
+                    .password_for(&effective_user, &profile.host, profile.port)
+                    .ok()
+                    .flatten()
+            })
     } else {
         None
     };
@@ -422,6 +442,7 @@ fn build_spec_inner(
                 profiles,
                 store,
                 global_verify_host_keys,
+                onekey,
                 visited,
             ))
         });
@@ -429,7 +450,7 @@ fn build_spec_inner(
     NativeSshSpec {
         host: profile.host.clone(),
         port: profile.port,
-        user: profile.user.clone(),
+        user: effective_user,
         auth_mode: map_auth_mode(profile.auth),
         identity_files,
         agent_forward: profile.agent_forward,
@@ -657,7 +678,7 @@ pub(crate) fn native_spec_from_transient_profile(
     global_verify_host_keys: bool,
     resolve_alias: &AliasResolver<'_>,
 ) -> NativeSshSpec {
-    let mut spec = build_native_ssh_spec(profile, &[], store, global_verify_host_keys);
+    let mut spec = build_native_ssh_spec(profile, &[], store, global_verify_host_keys, &[]);
     if let Some(raw) = proxy_jump {
         let mut visited = HashSet::new();
         visited.insert(profile.name.clone());
@@ -702,7 +723,7 @@ fn build_jump_from_hops(
         Some((profile, own_jump)) => (profile, if earlier.is_empty() { own_jump } else { None }),
         None => (transient_profile_from_target(last)?, None),
     };
-    let mut spec = build_native_ssh_spec(&profile, &[], store, verify);
+    let mut spec = build_native_ssh_spec(&profile, &[], store, verify, &[]);
     spec.jump = if !earlier.is_empty() {
         build_jump_from_hops(earlier, store, verify, resolve_alias, visited)
     } else if let Some(own_jump) = own_jump {
@@ -745,16 +766,74 @@ mod tests {
         let mut p = profile("web", "10.0.0.5", "deploy");
 
         p.auth = AuthMode::Auto;
-        let spec = build_native_ssh_spec(&p, &[], &store, true);
+        let spec = build_native_ssh_spec(&p, &[], &store, true, &[]);
         assert_eq!(spec.password.as_deref(), Some("hunter2"));
 
         p.auth = AuthMode::Password;
-        let spec = build_native_ssh_spec(&p, &[], &store, true);
+        let spec = build_native_ssh_spec(&p, &[], &store, true, &[]);
         assert_eq!(spec.password.as_deref(), Some("hunter2"));
 
         p.auth = AuthMode::PublicKey;
-        let spec = build_native_ssh_spec(&p, &[], &store, true);
+        let spec = build_native_ssh_spec(&p, &[], &store, true, &[]);
         assert_eq!(spec.password, None);
+    }
+
+    fn onekey_entry() -> tty7_core::core::onekey::OneKeyEntry {
+        tty7_core::core::onekey::OneKeyEntry {
+            id: "ok-1".into(),
+            kind: tty7_core::core::onekey::OneKeyKind::SshBound,
+            title: "prod".into(),
+            username: "alice".into(),
+            password: "linked-pw".into(),
+            host_binding: None,
+        }
+    }
+
+    /// A2: a linked host authenticates with the entry's username/password and
+    /// never touches the keychain account.
+    #[test]
+    fn linked_host_uses_onekey_username_and_password() {
+        let store = InMemoryCredentialStore::new();
+        store
+            .set_password("deploy", "10.0.0.5", 22, "keychain-pw")
+            .unwrap();
+        let mut p = profile("web", "10.0.0.5", "deploy");
+        p.auth = AuthMode::Password;
+        p.onekey_entry_id = Some("ok-1".into());
+        let entries = [onekey_entry()];
+        let spec = build_native_ssh_spec(&p, &[], &store, true, &entries);
+        assert_eq!(spec.user, "alice");
+        assert_eq!(spec.password.as_deref(), Some("linked-pw"));
+    }
+
+    /// A4: a dangling link falls back to the host's own credentials.
+    #[test]
+    fn dangling_link_falls_back_to_host_credentials() {
+        let store = InMemoryCredentialStore::new();
+        store
+            .set_password("deploy", "10.0.0.5", 22, "keychain-pw")
+            .unwrap();
+        let mut p = profile("web", "10.0.0.5", "deploy");
+        p.auth = AuthMode::Password;
+        p.onekey_entry_id = Some("gone".into());
+        let spec = build_native_ssh_spec(&p, &[], &store, true, &[onekey_entry()]);
+        assert_eq!(spec.user, "deploy");
+        assert_eq!(spec.password.as_deref(), Some("keychain-pw"));
+    }
+
+    /// A5: unlinking restores pure host behavior.
+    #[test]
+    fn unlinked_host_ignores_entries() {
+        let store = InMemoryCredentialStore::new();
+        store
+            .set_password("deploy", "10.0.0.5", 22, "keychain-pw")
+            .unwrap();
+        let mut p = profile("web", "10.0.0.5", "deploy");
+        p.auth = AuthMode::Password;
+        p.onekey_entry_id = None;
+        let spec = build_native_ssh_spec(&p, &[], &store, true, &[onekey_entry()]);
+        assert_eq!(spec.user, "deploy");
+        assert_eq!(spec.password.as_deref(), Some("keychain-pw"));
     }
 
     /// A pane's route is built on the UI thread with the keychain left out of
@@ -772,10 +851,10 @@ mod tests {
         p.jump_host = Some(jump.id);
         let profiles = [p.clone(), jump];
 
-        let full = build_native_ssh_spec(&p, &profiles, &store, true);
+        let full = build_native_ssh_spec(&p, &profiles, &store, true, &[]);
         assert_eq!(full.password.as_deref(), Some("hunter2"));
         assert_eq!(
-            build_native_ssh_spec(&p, &profiles, &crate::core::keychain::NoCredentials, true),
+            build_native_ssh_spec(&p, &profiles, &crate::core::keychain::NoCredentials, true, &[]),
             full.without_secrets()
         );
     }
@@ -789,15 +868,15 @@ mod tests {
         let store = InMemoryCredentialStore::new();
 
         let named = profile("prod-web", "10.0.0.5", "deploy");
-        let spec = build_native_ssh_spec(&named, &[], &store, true);
+        let spec = build_native_ssh_spec(&named, &[], &store, true, &[]);
         assert_eq!(spec.display_name.as_deref(), Some("prod-web"));
 
         let mut nameless = profile("", "10.0.0.5", "deploy");
-        let spec = build_native_ssh_spec(&nameless, &[], &store, true);
+        let spec = build_native_ssh_spec(&nameless, &[], &store, true, &[]);
         assert_eq!(spec.display_name.as_deref(), Some("deploy@10.0.0.5"));
 
         nameless.port = 2222;
-        let spec = build_native_ssh_spec(&nameless, &[], &store, true);
+        let spec = build_native_ssh_spec(&nameless, &[], &store, true, &[]);
         assert_eq!(spec.display_name.as_deref(), Some("deploy@10.0.0.5:2222"));
     }
 
@@ -836,7 +915,7 @@ mod tests {
             ..ForwardRule::default()
         });
 
-        let spec = build_native_ssh_spec(&p, &[], &store, true);
+        let spec = build_native_ssh_spec(&p, &[], &store, true, &[]);
         let back = profile_from_live_spec(&spec);
 
         assert_eq!(back.host, p.host);
@@ -899,7 +978,7 @@ mod tests {
             key.to_string_lossy().to_string(),
         ] {
             p.identity_files = vec![spelling.clone()];
-            let spec = build_native_ssh_spec(&p, &[], &store, true);
+            let spec = build_native_ssh_spec(&p, &[], &store, true, &[]);
             let listed = spec
                 .identity_files
                 .first()
@@ -919,7 +998,7 @@ mod tests {
         // secret either.
         p.auth = AuthMode::Password;
         assert!(
-            build_native_ssh_spec(&p, &[], &store, true)
+            build_native_ssh_spec(&p, &[], &store, true, &[])
                 .key_passphrases
                 .is_none()
         );
@@ -933,7 +1012,7 @@ mod tests {
 
         let profiles = vec![bastion.clone(), web.clone()];
         let store = InMemoryCredentialStore::new();
-        let spec = build_native_ssh_spec(&web, &profiles, &store, true);
+        let spec = build_native_ssh_spec(&web, &profiles, &store, true, &[]);
 
         let jump = spec.jump.expect("jump host should resolve");
         assert_eq!(jump.host, "bastion.example.com");
@@ -950,7 +1029,7 @@ mod tests {
         let profiles = vec![a.clone(), b.clone()];
         let store = InMemoryCredentialStore::new();
 
-        let spec = build_native_ssh_spec(&a, &profiles, &store, true);
+        let spec = build_native_ssh_spec(&a, &profiles, &store, true, &[]);
         let jump = spec.jump.expect("first hop resolves");
         assert_eq!(jump.host, "b.example.com");
         assert!(jump.jump.is_none(), "cycle back to `a` is cut");
@@ -962,11 +1041,11 @@ mod tests {
         let mut p = profile("web", "h", "u");
 
         p.verify_host_keys = None;
-        assert!(!build_native_ssh_spec(&p, &[], &store, false).verify_host_keys);
-        assert!(build_native_ssh_spec(&p, &[], &store, true).verify_host_keys);
+        assert!(!build_native_ssh_spec(&p, &[], &store, false, &[]).verify_host_keys);
+        assert!(build_native_ssh_spec(&p, &[], &store, true, &[]).verify_host_keys);
 
         p.verify_host_keys = Some(false);
-        assert!(!build_native_ssh_spec(&p, &[], &store, true).verify_host_keys);
+        assert!(!build_native_ssh_spec(&p, &[], &store, true, &[]).verify_host_keys);
     }
 
     #[test]
@@ -1045,12 +1124,12 @@ mod tests {
         p.socks_proxy = Some(HostPort::new("socks", 1080));
         p.http_proxy = Some(HostPort::new("http", 8080));
         assert!(matches!(
-            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            build_native_ssh_spec(&p, &[], &store, true, &[]).proxy,
             SshProxy::Socks { .. }
         ));
         p.proxy_command = Some("nc %h %p".into());
         assert!(matches!(
-            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            build_native_ssh_spec(&p, &[], &store, true, &[]).proxy,
             SshProxy::Command(_)
         ));
     }
@@ -1063,12 +1142,12 @@ mod tests {
         let mut p = profile("web", "h", "u");
         p.socks_proxy = Some(HostPort::new("socks", 0));
         assert!(matches!(
-            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            build_native_ssh_spec(&p, &[], &store, true, &[]).proxy,
             SshProxy::None
         ));
         p.http_proxy = Some(HostPort::new("http", 8080));
         assert!(matches!(
-            build_native_ssh_spec(&p, &[], &store, true).proxy,
+            build_native_ssh_spec(&p, &[], &store, true, &[]).proxy,
             SshProxy::Http { .. }
         ));
     }

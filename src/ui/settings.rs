@@ -1329,6 +1329,9 @@ pub(crate) struct SshProfileForm {
     editing: Uuid,
     carry_group: Option<String>,
     carry_credential_ref: Option<CredentialRef>,
+    /// Live OneKey link (entry id, `None` = no link). A plain value rather
+    /// than an input entity: the editor row is a dropdown, not a text box.
+    onekey_link: Option<String>,
 
     name: Entity<InputState>,
     host: Entity<InputState>,
@@ -1651,6 +1654,7 @@ pub(crate) struct SshFormDraft {
     identity_files: String,
     agent_forward: bool,
     credential_ref: Option<CredentialRef>,
+    onekey_entry_id: Option<String>,
     forwards: Vec<ForwardRule>,
     keepalive_interval: String,
     keepalive_count: String,
@@ -1749,6 +1753,7 @@ fn validate_ssh_draft(draft: SshFormDraft, profiles: &[SshProfile]) -> (SshProfi
         identity_files: split_lines(&draft.identity_files),
         agent_forward: draft.agent_forward,
         credential_ref: draft.credential_ref,
+        onekey_entry_id: draft.onekey_entry_id,
         forwards: draft.forwards,
         keepalive_interval_s: draft.keepalive_interval.trim().parse().ok(),
         keepalive_count_max: draft.keepalive_count.trim().parse().ok(),
@@ -2222,29 +2227,18 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // `masked` is builder-only, so showing rebuilds the field around the
-        // value it holds — the secret itself never leaves the form.
-        let (value, show) = match self.onekey_form_mut() {
-            Some(form) => (form.password.read(cx).value().to_string(), !form.show_password),
-            None => return,
+        // Flip visibility in place through the input's own setter: rebuilding
+        // the field around its value dropped what was on screen.
+        let Some((input, show)) = self
+            .active_settings()
+            .and_then(|s| s.onekey_form.as_ref())
+            .map(|f| (f.password.clone(), !f.show_password))
+        else {
+            return;
         };
-        let field = cx.new(|cx| {
-            let state = InputState::new(window, cx).default_value(value);
-            match show {
-                true => state,
-                false => state.masked(true),
-            }
-        });
-        let sub = cx.subscribe_in(&field, window, |this, _i, ev: &InputEvent, _w, cx| {
-            if matches!(ev, InputEvent::Change) {
-                let _ = this.onekey_form_mut();
-                cx.notify();
-            }
-        });
+        input.update(cx, |i, cx| i.set_masked(!show, window, cx));
         if let Some(form) = self.onekey_form_mut() {
-            form.password = field;
             form.show_password = show;
-            form._subs.push(sub);
         }
         cx.notify();
     }
@@ -2475,6 +2469,7 @@ impl Tty7App {
             editing: profile.id,
             carry_group: profile.group.clone(),
             carry_credential_ref: profile.credential_ref.clone(),
+            onekey_link: profile.onekey_entry_id.clone(),
             name,
             host,
             port,
@@ -2551,6 +2546,7 @@ impl Tty7App {
             identity_files: raw(&form.identity_files).replace(',', "\n"),
             agent_forward: form.agent_forward,
             credential_ref: form.carry_credential_ref.clone(),
+            onekey_entry_id: form.onekey_link.clone(),
             forwards: form.forwards.iter().filter_map(|r| r.collect(cx)).collect(),
             keepalive_interval: val(&form.keepalive_interval),
             keepalive_count: val(&form.keepalive_count),
@@ -2641,6 +2637,16 @@ impl Tty7App {
         if let Some(s) = self.active_settings_mut() {
             s.ssh_form = None;
             s.ssh_confirm_remove = false;
+        }
+        cx.notify();
+    }
+
+    /// Set the host form's OneKey link (`None` = no link). Dirty tracking
+    /// follows automatically: the link flows through collect into the profile
+    /// that `ssh_form_dirty` compares against disk.
+    pub(crate) fn set_ssh_onekey_link(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        if let Some(form) = self.ssh_form_mut() {
+            form.onekey_link = id;
         }
         cx.notify();
     }
