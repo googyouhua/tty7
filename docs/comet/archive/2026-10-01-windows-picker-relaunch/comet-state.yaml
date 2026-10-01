@@ -1,0 +1,182 @@
+schema: comet.native.v4
+name: windows-picker-relaunch
+language: en
+phase: archive
+status: done
+state_version: 14
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: a74902dd6e08c7229b62a85b68e818ff09a88b8af89111160ec619afeb1afeb7
+spec_changes:
+  - capability: instance-picker-relaunch
+    operation: create
+    source: specs/instance-picker-relaunch/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/windows-picker-relaunch
+  target_branch: main
+  finish: keep
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 2
+  attempt: 1
+  retry_epoch: 1
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: A1：Windows 裸启动 → picker → 输入用户名确认 → 主 UI 出现，进的是 `tty7-<name>` 实例。
+    result: passed
+    reason:
+      text: 用户Windows真机：picker确认后主UI出现且进对应实例
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: A2：带路径冷启动（`tty7-app <path>`）经 picker 确认后，主 UI 打开该路径（参数透传）。
+    result: passed
+    reason:
+      text: 用户Windows真机：冷带路径经picker后主UI打开该路径
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: A3：Linux/macOS 行为不变（回归：已有无头常驻/显式/记忆证据 + 单测）。
+    result: passed
+    reason:
+      text: Linux/macOS路径不变，单测+无头回归过
+      truncated: false
+builder_handoff:
+  candidate_id: 7b72093d-d59c-4015-9678-2e9a12b387ba
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:3d7f3c7c-a2c3-486e-ab49-1fdaaf13e140
+  iteration: 2
+  summary:
+    text: 候选不变（Windows确认内重起）；A1 blocker已由用户Windows真机验证通过消除，其余证据沿用。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+  checks:
+    - name:
+        text: fmt
+        truncated: false
+      result: passed
+      note:
+        text: cargo fmt --check干净
+        truncated: false
+    - name:
+        text: linux-build
+        truncated: false
+      result: passed
+      note:
+        text: tty7-app零错误
+        truncated: false
+    - name:
+        text: windows-check
+        truncated: false
+      result: passed
+      note:
+        text: x86_64-pc-windows-gnu check过
+        truncated: false
+    - name:
+        text: gui-unit
+        truncated: false
+      result: passed
+      note:
+        text: picker+i18n 11 passed
+        truncated: false
+    - name:
+        text: headless
+        truncated: false
+      result: passed
+      note:
+        text: bare常驻零创建，显式直达
+        truncated: false
+    - name:
+        text: windows-live-A1
+        truncated: false
+      result: passed
+      note:
+        text: 用户Windows真机：picker确认后主UI出现且进对应实例
+        truncated: false
+  checks_truncated: false
+  known_limits: []
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-01T08:31:45.206Z
+blockers: []
+verification:
+  candidate_id: 7b72093d-d59c-4015-9678-2e9a12b387ba
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:043cca5b-58b6-43f0-b9d3-fc3fe9f4d9ee
+  iteration: 2
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: 三项全过，可归档
+    truncated: false
+  risks:
+    - text: A1/A2为用户目检证据，非verifier复现
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-01T08:38:24.244Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: blocked
+    unresolved_ids:
+      - A1
+    summary:
+      text: A2/A3过；A1待Windows真机一次点击验证
+      truncated: false
+    completed_at: 2026-10-01T07:07:08.904Z
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 用户Windows真机验证通过：picker确认后主UI出现且进对应实例
+      truncated: false
+    completed_at: 2026-10-01T08:31:31.284Z
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native check input changed after the candidate was built; a new Builder
+        candidate is required before checks can run again.
+      truncated: false
+    completed_at: 2026-10-01T08:31:35.438Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 三项全过，可归档
+      truncated: false
+    completed_at: 2026-10-01T08:38:24.244Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-01T06:46:09.464Z
