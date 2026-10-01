@@ -21,6 +21,7 @@ Accepted anywhere on the line, before or after the subcommand.
 | Flag | Effect |
 |---|---|
 | `-m, --machine <MACHINE>` | Route the command to a linked machine over the local server's existing link. Matches the full link key (`me@devbox:22`) or the bare host (`devbox`). Ssh links only; a down link or a jump/proxy chain is refused with a reason rather than dialled fresh. |
+| `--as <NAME>` | Run against the per-user instance `NAME` (config dir `tty7-NAME` under `${TTY7_AS_ROOT:-$HOME/.config}`), for several people sharing one OS user. Overrides `TTY7_CONFIG_DIR`. `NAME` must match `[a-z0-9-]+`, or the command is refused before anything starts. |
 | `--json` | One JSON object on stdout instead of the human table. |
 | `-q, --quiet` | No output on success. Errors still go to stderr. |
 

@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use std::path::PathBuf;
 use tty7_core::core::session::WorkspaceId;
 
 pub const ENV_PANE: &str = "TTY7_PANE";
@@ -11,6 +12,65 @@ pub const ENV_WS: &str = "TTY7_WS";
 pub const ENV_CONFIG_DIR: &str = "TTY7_CONFIG_DIR";
 
 pub const OUTSIDE_SHELL: &str = "not inside a tty7 shell — pass an explicit %pane/@tab/workspace";
+
+/// Override for the root under which `--as <name>` instances live. Defaults
+/// to `$HOME/.config`, so instances are `~/.config/tty7-<name>` beside the
+/// default `~/.config/tty7`.
+pub const ENV_INSTANCE_ROOT: &str = "TTY7_AS_ROOT";
+
+/// A per-user instance name for `--as`: lowercase letters, digits, hyphens.
+/// Rejects `..`, `/`, a leading `-`, and anything else that could escape the
+/// `tty7-<name>` directory shape. Used as a clap value parser, so a refusal
+/// is a usage error (exit 2) raised before anything starts.
+pub fn parse_instance_name(s: &str) -> Result<String, String> {
+    let ok = !s.is_empty()
+        && !s.starts_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "'{s}' is not an instance name — use [a-z0-9-], e.g. alice"
+        ))
+    }
+}
+
+/// The config directory for `--as <name>`, resolved without touching the
+/// filesystem: `${TTY7_AS_ROOT:-$HOME/.config}/tty7-<name>`. Pure so tests
+/// can pin both inputs.
+pub fn instance_dir(name: &str, root: Option<&str>, home: Option<&str>) -> Result<PathBuf> {
+    let root = root
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
+        .ok_or_else(|| anyhow!("$HOME is unset and {ENV_INSTANCE_ROOT} is not set"))?;
+    Ok(root.join(format!("tty7-{name}")))
+}
+
+/// Point this process at `--as <name>`'s instance: create its directory
+/// (mode 700, leaf only) and set `TTY7_CONFIG_DIR`, which is what
+/// `tty7_core`'s endpoint derivation reads. Call before `Context::from_env`.
+pub fn apply_instance(name: &str) -> Result<()> {
+    let root = std::env::var(ENV_INSTANCE_ROOT).ok();
+    let home = std::env::var("HOME").ok();
+    let dir = instance_dir(name, root.as_deref(), home.as_deref())?;
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // SAFETY: startup, before this process spawns any thread — the same
+    // pattern `tty7-updater` uses to steer its own config dir.
+    unsafe {
+        std::env::set_var(ENV_CONFIG_DIR, &dir)
+    };
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Context {
@@ -212,6 +272,38 @@ mod tests {
         }
         // Past u64 is no pane either, however digit-shaped.
         assert!(parse_pane("99999999999999999999999").is_err());
+    }
+
+    #[test]
+    fn instance_names_take_a_narrow_shape() {
+        assert_eq!(parse_instance_name("alice").unwrap(), "alice");
+        assert_eq!(parse_instance_name("a-1").unwrap(), "a-1");
+        // Nothing that could escape `tty7-<name>` or read as a flag.
+        for bad in ["", "Alice", "ALICE", "../x", "a/b", "-x", "a b", "a_b", "%41"] {
+            assert!(
+                parse_instance_name(bad).is_err(),
+                "'{bad}' must not read as an instance name"
+            );
+        }
+    }
+
+    #[test]
+    fn instance_dirs_hang_beside_the_default_one() {
+        assert_eq!(
+            instance_dir("alice", Some("/r"), Some("/home/u")).unwrap(),
+            PathBuf::from("/r/tty7-alice")
+        );
+        // An explicit root wins over $HOME; an empty one falls back to it.
+        assert_eq!(
+            instance_dir("alice", Some(""), Some("/home/u")).unwrap(),
+            PathBuf::from("/home/u/.config/tty7-alice")
+        );
+        assert_eq!(
+            instance_dir("alice", None, Some("/home/u")).unwrap(),
+            PathBuf::from("/home/u/.config/tty7-alice")
+        );
+        assert!(instance_dir("alice", None, None).is_err());
+        assert!(instance_dir("alice", Some(""), Some("")).is_err());
     }
 
     #[test]
