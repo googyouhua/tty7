@@ -1684,6 +1684,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::InstancePickerNewPlaceholder => "New username…",
         L10nKey::InstancePickerEnter => "Enter",
         L10nKey::InstancePickerClose => "Close",
+        L10nKey::InstanceBadgeWelcome => "Welcome {name}",
         L10nKey::InstancePickerInvalid => "Usernames use [a-z0-9-].",
         L10nKey::InstancePickerRelaunchFailed => "Could not start tty7 — try again.",
         L10nKey::SwitcherStartingServer => "Starting tty7's server…",

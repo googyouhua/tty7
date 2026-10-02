@@ -253,7 +253,7 @@ fn fits(path: &str) -> bool {
 /// links keep today's behavior byte for byte).
 ///
 /// A link carries no username of its own, so without this a GUI opened as
-/// `gyh` lands its remote links on whatever the far shell resolves — the
+/// `alice` lands its remote links on whatever the far shell resolves — the
 /// far `$TTY7_CONFIG_DIR` or its default instance — and mirrors somebody
 /// else's whole listing.
 pub fn local_reuse_instance() -> Option<String> {
@@ -551,8 +551,8 @@ mod tests {
     #[test]
     fn instance_dirs_hang_beside_the_default_under_the_remote_home() {
         assert_eq!(
-            instance_remote_dir("/home/me", "gyh"),
-            "/home/me/.config/tty7-gyh"
+            instance_remote_dir("/home/me", "alice"),
+            "/home/me/.config/tty7-alice"
         );
         assert_eq!(
             instance_remote_dir("/home/me/", "mca"),
@@ -563,13 +563,13 @@ mod tests {
     #[test]
     fn the_server_command_carries_the_instance_config_dir_quoted() {
         assert_eq!(
-            append_config_dir_arg("tty7-server --stdio", "/home/me/.config/tty7-gyh"),
-            "tty7-server --stdio --config-dir '/home/me/.config/tty7-gyh'"
+            append_config_dir_arg("tty7-server --stdio", "/home/me/.config/tty7-alice"),
+            "tty7-server --stdio --config-dir '/home/me/.config/tty7-alice'"
         );
         // Homes with spaces and quotes stay one argv word.
         assert_eq!(
-            append_config_dir_arg("'tty7-server' --stdio", "/home/a b/.config/tty7-gyh"),
-            "'tty7-server' --stdio --config-dir '/home/a b/.config/tty7-gyh'"
+            append_config_dir_arg("'tty7-server' --stdio", "/home/a b/.config/tty7-alice"),
+            "'tty7-server' --stdio --config-dir '/home/a b/.config/tty7-alice'"
         );
     }
 
@@ -582,10 +582,10 @@ mod tests {
             home: Some("/home/me".into()),
             ..RemoteEnv::default()
         };
-        let retargeted = env_for_instance(&env, "/home/me", "gyh");
+        let retargeted = env_for_instance(&env, "/home/me", "alice");
         assert_eq!(
             remote_control_socket(&retargeted).as_deref(),
-            Some("/home/me/.config/tty7-gyh/control.sock"),
+            Some("/home/me/.config/tty7-alice/control.sock"),
             "neither TTY7_CONTROL_SOCK nor TTY7_CONFIG_DIR may win over reuse"
         );
     }
@@ -598,7 +598,7 @@ mod tests {
             tmpdir: Some("/tmp".into()),
             ..RemoteEnv::default()
         };
-        let retargeted = env_for_instance(&env, &deep_home, "gyh");
+        let retargeted = env_for_instance(&env, &deep_home, "alice");
         let socket = remote_control_socket(&retargeted).expect("tmp fallback fits");
         assert!(
             socket.starts_with("/tmp/tty7-") && socket.ends_with("-control.sock"),

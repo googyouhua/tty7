@@ -1362,10 +1362,10 @@ impl Tty7App {
         }
     }
 
-    /// A bare username says nothing about what it names; the badge always
-    /// reads `user: <name>`.
-    pub(crate) fn user_prefixed(label: &str) -> String {
-        format!("user: {label}")
+    /// A bare username says nothing about what it names; the badge greets in
+    /// the running locale: `Welcome <name>` / `欢迎 <name>` / `ようこそ <name>`.
+    pub(crate) fn welcome_badge_text(label: &str) -> String {
+        t_fmt(L10nKey::InstanceBadgeWelcome, &[("name", label)])
     }
 
     /// The instance badge pinned after the workspace chip's chevron: the
@@ -1381,7 +1381,7 @@ impl Tty7App {
             InstanceBadge::Named(name) => name.into(),
             InstanceBadge::Default => t(L10nKey::InstancePickerDefault).into(),
         };
-        let label: SharedString = Self::user_prefixed(&name).into();
+        let label: SharedString = Self::welcome_badge_text(&name).into();
         let tip = dir
             .as_deref()
             .map(|d| d.display().to_string())
@@ -1393,7 +1393,7 @@ impl Tty7App {
             .rounded(px(4.))
             .bg(cx.theme().secondary)
             .text_color(cx.theme().foreground)
-            .text_size(px(12.))
+            .text_size(px(14.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .child(label)
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
@@ -3196,16 +3196,25 @@ mod tests {
     #[test]
     fn the_chip_badge_names_the_reused_username_or_the_default_mark() {
         assert_eq!(
-            Tty7App::instance_badge_kind(Some("gyh")),
-            InstanceBadge::Named("gyh".to_string())
+            Tty7App::instance_badge_kind(Some("alice")),
+            InstanceBadge::Named("alice".to_string())
         );
         assert_eq!(
             Tty7App::instance_badge_kind(Some(tty7_core::core::instance::DEFAULT_SENTINEL)),
             InstanceBadge::Default
         );
         assert_eq!(Tty7App::instance_badge_kind(None), InstanceBadge::Default);
-        assert_eq!(Tty7App::user_prefixed("gyh"), "user: gyh");
-        assert_eq!(Tty7App::user_prefixed("默认"), "user: 默认");
+    }
+
+    #[test]
+    fn the_badge_greets_in_the_running_locale() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "Welcome alice");
+        crate::ui::i18n::set_locale("zh-CN");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "欢迎 alice");
+        crate::ui::i18n::set_locale("ja-JP");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "ようこそ alice");
+        crate::ui::i18n::set_locale("en");
     }
 
     /// Where a band lands in the terminal column, for a strip that starts

@@ -447,8 +447,8 @@ impl SshManager {
                 .await??
         };
 
-        // Reuse the username this process opened with: a GUI entered as `gyh`
-        // lands its remote links on the far `tty7-gyh` instance instead of
+        // Reuse the username this process opened with: a GUI entered as `alice`
+        // lands its remote links on the far `tty7-alice` instance instead of
         // whatever the far shell resolves. The default instance and explicit
         // server commands keep today's behavior exactly.
         let reuse = server_command
