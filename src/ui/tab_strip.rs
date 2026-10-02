@@ -1362,18 +1362,26 @@ impl Tty7App {
         }
     }
 
+    /// A bare username says nothing about what it names; the badge always
+    /// reads `user: <name>`.
+    pub(crate) fn user_prefixed(label: &str) -> String {
+        format!("user: {label}")
+    }
+
     /// The instance badge pinned after the workspace chip's chevron: the
-    /// username this window runs on, or the default mark. Display-only; the
-    /// chip keeps its own click. Theme-following, like the monogram beside it.
+    /// username this window runs on (`user: <name>`), or the default mark
+    /// (`user: <default>`). Display-only; the chip keeps its own click.
+    /// Theme-following, like the monogram beside it.
     fn instance_badge(cx: &gpui::App) -> impl IntoElement {
         let dir = crate::core::config::config_dir_path();
         let memory = dir
             .as_deref()
             .and_then(tty7_core::core::instance::memory_name_for);
-        let label: SharedString = match Self::instance_badge_kind(memory.as_deref()) {
+        let name: SharedString = match Self::instance_badge_kind(memory.as_deref()) {
             InstanceBadge::Named(name) => name.into(),
             InstanceBadge::Default => t(L10nKey::InstancePickerDefault).into(),
         };
+        let label: SharedString = Self::user_prefixed(&name).into();
         let tip = dir
             .as_deref()
             .map(|d| d.display().to_string())
@@ -3196,6 +3204,8 @@ mod tests {
             InstanceBadge::Default
         );
         assert_eq!(Tty7App::instance_badge_kind(None), InstanceBadge::Default);
+        assert_eq!(Tty7App::user_prefixed("gyh"), "user: gyh");
+        assert_eq!(Tty7App::user_prefixed("默认"), "user: 默认");
     }
 
     /// Where a band lands in the terminal column, for a strip that starts
