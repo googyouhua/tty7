@@ -1340,8 +1340,64 @@ pub(crate) fn select_workspace_action(index: usize) -> Option<Box<dyn gpui::Acti
     })
 }
 
+/// Which instance the workspace chip's badge names: the reused username,
+/// or the default-instance mark.
+#[derive(Debug, PartialEq)]
+pub(crate) enum InstanceBadge {
+    Named(String),
+    Default,
+}
+
 impl Tty7App {
     pub(crate) const AVATAR_PX: f32 = 18.0;
+
+    /// Pure mapping over `memory_name_for` output, so the rule is
+    /// unit-testable without globals or a window.
+    pub(crate) fn instance_badge_kind(memory: Option<&str>) -> InstanceBadge {
+        match memory {
+            Some(name) if name != tty7_core::core::instance::DEFAULT_SENTINEL => {
+                InstanceBadge::Named(name.to_string())
+            }
+            _ => InstanceBadge::Default,
+        }
+    }
+
+    /// A bare username says nothing about what it names; the badge greets in
+    /// the running locale: `Hi <name>` / `嗨 <name>` / `やあ <name>`.
+    pub(crate) fn welcome_badge_text(label: &str) -> String {
+        t_fmt(L10nKey::InstanceBadgeWelcome, &[("name", label)])
+    }
+
+    /// The instance badge pinned after the workspace chip's chevron: the
+    /// username this window runs on (`user: <name>`), or the default mark
+    /// (`user: <default>`). Display-only; the chip keeps its own click.
+    /// Theme-following, like the monogram beside it.
+    fn instance_badge(cx: &gpui::App) -> impl IntoElement {
+        let dir = crate::core::config::config_dir_path();
+        let memory = dir
+            .as_deref()
+            .and_then(tty7_core::core::instance::memory_name_for);
+        let name: SharedString = match Self::instance_badge_kind(memory.as_deref()) {
+            InstanceBadge::Named(name) => name.into(),
+            InstanceBadge::Default => t(L10nKey::InstancePickerDefault).into(),
+        };
+        let label: SharedString = Self::welcome_badge_text(&name).into();
+        let tip = dir
+            .as_deref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| label.to_string());
+        div()
+            .id("instance-badge")
+            .flex_shrink_0()
+            .px(px(5.))
+            .rounded(px(4.))
+            .bg(cx.theme().secondary)
+            .text_color(cx.theme().foreground)
+            .text_size(px(13.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(label)
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+    }
 
     pub(crate) fn workspace_head(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         if let Some(rename) = self.workspace_rename.as_ref() {
@@ -1430,7 +1486,8 @@ impl Tty7App {
                                     .path("icons/chevrons-up-down.svg")
                                     .size(px(11.))
                                     .flex_shrink_0(),
-                            ),
+                            )
+                            .child(Self::instance_badge(cx)),
                     )
                     .xsmall()
                     .w_full()
@@ -3135,6 +3192,30 @@ mod tests {
     use gpui::TestAppContext;
     use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn the_chip_badge_names_the_reused_username_or_the_default_mark() {
+        assert_eq!(
+            Tty7App::instance_badge_kind(Some("alice")),
+            InstanceBadge::Named("alice".to_string())
+        );
+        assert_eq!(
+            Tty7App::instance_badge_kind(Some(tty7_core::core::instance::DEFAULT_SENTINEL)),
+            InstanceBadge::Default
+        );
+        assert_eq!(Tty7App::instance_badge_kind(None), InstanceBadge::Default);
+    }
+
+    #[test]
+    fn the_badge_greets_in_the_running_locale() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "Hi alice");
+        crate::ui::i18n::set_locale("zh-CN");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "嗨 alice");
+        crate::ui::i18n::set_locale("ja-JP");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "やあ alice");
+        crate::ui::i18n::set_locale("en");
+    }
 
     /// Where a band lands in the terminal column, for a strip that starts
     /// `lead` in and ends `strip_end` from the column's left edge.

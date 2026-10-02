@@ -1561,6 +1561,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerNewPlaceholder => "新用户名…",
         L10nKey::InstancePickerEnter => "进入",
         L10nKey::InstancePickerClose => "关闭",
+        L10nKey::InstanceBadgeWelcome => "嗨 {name}",
         L10nKey::InstancePickerInvalid => "用户名仅限 [a-z0-9-]。",
         L10nKey::InstancePickerRelaunchFailed => "无法启动 tty7，请重试。",
         L10nKey::SwitcherStartingServer => "正在启动 tty7 server…",

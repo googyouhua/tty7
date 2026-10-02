@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -243,7 +244,7 @@ pub struct SshConnection {
     key: ConnectionKey,
     remote_forwards: RemoteForwardTable,
     alive: AtomicBool,
-    remote_entry: tokio::sync::Mutex<Option<RemoteEntry>>,
+    remote_entry: tokio::sync::Mutex<HashMap<String, RemoteEntry>>,
     /// What this connection's server probe proved, once it has. See
     /// [`SshConnection::proved_server`].
     proved_server: Mutex<Option<ProvedServer>>,
@@ -263,7 +264,7 @@ impl SshConnection {
             key,
             remote_forwards,
             alive: AtomicBool::new(true),
-            remote_entry: tokio::sync::Mutex::new(None),
+            remote_entry: tokio::sync::Mutex::new(HashMap::new()),
             proved_server: Mutex::new(None),
             saturated_at: Mutex::new(None),
         })
@@ -349,36 +350,42 @@ impl SshConnection {
             .await
     }
 
-    pub async fn remote_entry_or_init<F, Fut>(&self, init: F) -> RemoteEntry
+    pub async fn remote_entry_or_init<F, Fut>(&self, instance: &str, init: F) -> RemoteEntry
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = RemoteEntry>,
     {
         let mut guard = self.remote_entry.lock().await;
-        if let Some(entry) = guard.as_ref() {
+        if let Some(entry) = guard.get(instance) {
             return entry.clone();
         }
         let entry = init().await;
         log::debug!(
-            "ssh {:?}: remote workspace entry is {}",
+            "ssh {:?}: remote workspace entry for instance {instance:?} is {}",
             self.key,
             entry.kind_label()
         );
-        *guard = Some(entry.clone());
+        guard.insert(instance.to_string(), entry.clone());
         entry
     }
 
-    pub async fn set_remote_entry(&self, entry: RemoteEntry) {
-        *self.remote_entry.lock().await = Some(entry);
+    pub async fn set_remote_entry(&self, instance: &str, entry: RemoteEntry) {
+        self.remote_entry
+            .lock()
+            .await
+            .insert(instance.to_string(), entry);
     }
 
-    /// Where this connection's server was proved to be, and the lock that
-    /// makes the second pane wait for the first rather than prove it again.
+    /// Where this connection's server was proved to be, per reused instance,
+    /// and the lock that makes the second pane wait for the first rather
+    /// than prove it again.
     ///
-    /// The memo lives on the connection rather than beside its key, and that
-    /// is the whole of the invalidation story for a reconnect: a dropped or
-    /// evicted link is a dropped `SshConnection`, and the one dialled in its
-    /// place starts with an empty slot. Nothing has to remember to forget.
+    /// The memo lives on the connection rather than beside its key, keyed by
+    /// instance name (`""` for the default instance and explicit-command
+    /// links), and that is the whole of the invalidation story for a
+    /// reconnect: a dropped or evicted link is a dropped `SshConnection`, and
+    /// the one dialled in its place starts with empty slots. Nothing has to
+    /// remember to forget.
     /// What does have to remember is anything that changes the server *over
     /// there* while the link stays up — see
     /// [`crate::daemon::install::forget_remote_server`].
