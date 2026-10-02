@@ -1393,7 +1393,7 @@ impl Tty7App {
             .rounded(px(4.))
             .bg(cx.theme().secondary)
             .text_color(cx.theme().foreground)
-            .text_size(px(10.))
+            .text_size(px(12.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .child(label)
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
