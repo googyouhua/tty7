@@ -1363,7 +1363,7 @@ impl Tty7App {
     }
 
     /// A bare username says nothing about what it names; the badge greets in
-    /// the running locale: `Welcome <name>` / `欢迎 <name>` / `ようこそ <name>`.
+    /// the running locale: `Hi <name>` / `嗨 <name>` / `やあ <name>`.
     pub(crate) fn welcome_badge_text(label: &str) -> String {
         t_fmt(L10nKey::InstanceBadgeWelcome, &[("name", label)])
     }
@@ -1393,7 +1393,7 @@ impl Tty7App {
             .rounded(px(4.))
             .bg(cx.theme().secondary)
             .text_color(cx.theme().foreground)
-            .text_size(px(14.))
+            .text_size(px(13.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .child(label)
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
@@ -3209,11 +3209,11 @@ mod tests {
     #[test]
     fn the_badge_greets_in_the_running_locale() {
         crate::ui::i18n::set_locale("en");
-        assert_eq!(Tty7App::welcome_badge_text("alice"), "Welcome alice");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "Hi alice");
         crate::ui::i18n::set_locale("zh-CN");
-        assert_eq!(Tty7App::welcome_badge_text("alice"), "欢迎 alice");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "嗨 alice");
         crate::ui::i18n::set_locale("ja-JP");
-        assert_eq!(Tty7App::welcome_badge_text("alice"), "ようこそ alice");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "やあ alice");
         crate::ui::i18n::set_locale("en");
     }
 
