@@ -716,6 +716,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRoleStartersDesc => "Up to three; pick one from the pane menu to send it.",
         L10nKey::SettingsRoleNameRequired => "Give the role a name.",
         L10nKey::SettingsRoleLaunchRequired => "Give the role a launch command.",
+        L10nKey::SettingsRoleFollowupMissed => "The agent never came up, so the role's instructions were skipped. Send one from the pane menu if needed.",
         L10nKey::SettingsRoleSearchKeywords => "role roles agent starter instructions launch custom",
         L10nKey::SettingsReadingAgentConfig => "Reading this machine's agent config…",
         L10nKey::SettingsStatusNotInstalled => "Not installed",

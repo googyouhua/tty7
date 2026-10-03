@@ -723,6 +723,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRoleStartersDesc => "最大3件。ペインメニューから選んで送信します。",
         L10nKey::SettingsRoleNameRequired => "ロールに名前を付けてください。",
         L10nKey::SettingsRoleLaunchRequired => "起動コマンドを入力してください。",
+        L10nKey::SettingsRoleFollowupMissed => "エージェントが起動しなかったため、ロールの指示を送信しませんでした。必要に応じてペインメニューから再送信してください。",
         L10nKey::SettingsRoleSearchKeywords => "ロール エージェント 起動 スターター 指示 カスタム",
         L10nKey::SettingsReadingAgentConfig => "このマシンのエージェント設定を読み込んでいます…",
         L10nKey::SettingsStatusNotInstalled => "未インストール",

@@ -112,7 +112,13 @@ pub(crate) fn plan_role_first_send(role: &AgentRole) -> Option<RoleFirstSend> {
         return None;
     }
     if let Some(mut argv) = role.base.prompt_args(text) {
-        let mut full = vec![role_launch_line(role)];
+        // Words, not the whole line: joining quotes each word, so the
+        // launch flags stay flags and only the prompt gets quoted.
+        let mut full: Vec<String> = role
+            .launch
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
         full.append(&mut argv);
         return Some(RoleFirstSend::PromptArg(full));
     }
@@ -128,26 +134,42 @@ pub(crate) fn plan_role_first_send(role: &AgentRole) -> Option<RoleFirstSend> {
 /// what keeps a late agent from eating the paste silently.
 const ROLE_FOLLOWUP_DELAY: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// How many times a missed followup is retried before the pane is told it
+/// never landed: one retry, so a slow agent gets a second chance and a dead
+/// pane gets told rather than retried forever.
+const ROLE_FOLLOWUP_ATTEMPTS: usize = 2;
+
 /// Paste `followup` into the agent running in `view`, after
-/// [`ROLE_FOLLOWUP_DELAY`]. A pane that is not running an agent by then
-/// gets nothing: pasting instructions into a bare shell would execute
-/// them as commands.
+/// [`ROLE_FOLLOWUP_DELAY`]. Each attempt checks the pane is actually running
+/// an agent first — pasting instructions into a bare shell would execute
+/// them as commands — and a pane that never gets there is told so, with a
+/// pointer at the starters menu that sends them by hand.
 pub(crate) fn send_role_followup_later(
     view: Entity<crate::terminal::view::TerminalView>,
     followup: String,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
 ) {
+    let missed = crate::ui::i18n::t(L10nKey::SettingsRoleFollowupMissed).to_string();
     let view = view.downgrade();
     cx.spawn_in(window, async move |_this, cx| {
-        cx.background_executor().timer(ROLE_FOLLOWUP_DELAY).await;
-        let _ = view.update_in(cx, |view, _, _| {
-            if view.agent().is_some() {
-                view.send_agent_prompt(&followup);
-            } else {
-                log::warn!("role instructions withheld: pane is not running an agent");
+        for _ in 0..ROLE_FOLLOWUP_ATTEMPTS {
+            cx.background_executor().timer(ROLE_FOLLOWUP_DELAY).await;
+            let sent = view
+                .update_in(cx, |view, _, _| {
+                    if view.agent().is_none() {
+                        return false;
+                    }
+                    view.send_agent_prompt(&followup);
+                    true
+                })
+                .unwrap_or(false);
+            if sent {
+                return;
             }
-        });
+        }
+        log::warn!("role instructions never reached a running agent");
+        crate::terminal::notify_desktop(Some("tty7"), &missed);
     })
     .detach();
 }
@@ -786,14 +808,18 @@ mod tests {
             name: "R".into(),
             base: CLIAgent::Claude,
             description: String::new(),
-            launch: "claude".into(),
+            launch: "claude --model opus".into(),
             instructions: "Be terse.".into(),
             starters: vec![],
         };
-        assert!(matches!(
-            plan_role_first_send(&role),
-            Some(RoleFirstSend::PromptArg(_))
-        ));
+        // Flags stay words of their own; only the prompt may be quoted.
+        match plan_role_first_send(&role) {
+            Some(RoleFirstSend::PromptArg(parts)) => assert_eq!(
+                parts,
+                vec!["claude", "--model", "opus", "Be terse."]
+            ),
+            _ => panic!("expected PromptArg"),
+        };
         let opencode = AgentRole {
             base: CLIAgent::OpenCode,
             launch: "opencode".into(),

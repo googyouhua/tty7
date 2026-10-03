@@ -623,6 +623,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRoleStartersDesc => "最多三条；在 pane 菜单里点一条发送。",
         L10nKey::SettingsRoleNameRequired => "给角色起个名字。",
         L10nKey::SettingsRoleLaunchRequired => "填写启动命令。",
+        L10nKey::SettingsRoleFollowupMissed => "Agent 一直没起来，本次没发角色提示词。如需请从 pane 菜单重发一条。",
         L10nKey::SettingsRoleSearchKeywords => "角色 自定义 agent 启动 开场白 提示词",
         L10nKey::SettingsReadingAgentConfig => "正在读取这台机器的 AI agent 配置…",
         L10nKey::SettingsStatusNotInstalled => "未安装",

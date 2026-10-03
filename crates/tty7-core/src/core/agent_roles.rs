@@ -35,7 +35,13 @@ pub fn slug_from_name(name: &str) -> String {
     while s.contains("--") {
         s = s.replace("--", "-");
     }
-    let s = s.trim_matches('-').to_string();
+    let mut s = s.trim_matches('-').to_string();
+    // Slugs cap at [`slug_valid`]'s 64: cut, then drop a trailing dash the
+    // cut may leave, so a minted slug always saves.
+    if s.len() > 64 {
+        s.truncate(64);
+        s = s.trim_end_matches('-').to_string();
+    }
     if s.is_empty() { "role".to_string() } else { s }
 }
 
@@ -121,6 +127,8 @@ fn load_one(dir: &Path, slug: &str) -> Option<AgentRole> {
         name: v
             .get("name")
             .and_then(|s| s.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or(file_slug)
             .to_string(),
         base,
@@ -317,6 +325,8 @@ mod tests {
     fn slug_from_name_is_stable_and_unique() {
         assert_eq!(slug_from_name("Frontend Reviewer"), "frontend-reviewer");
         assert_eq!(slug_from_name("  !!  "), "role");
+        let long = slug_from_name(&"a".repeat(100));
+        assert!(slug_valid(&long), "minted slugs always save: {long}");
     }
 
     #[test]
@@ -330,8 +340,20 @@ mod tests {
     }
 
     #[test]
-    fn save_loads_back_what_was_saved() {
+    fn blank_names_fall_back_to_slug() {
         let dir = tempfile::TempDir::new().unwrap();
+        write_role(
+            dir.path(),
+            "good",
+            r#"{"slug":"good","name":"   ","base":"claude","launch":"claude"}"#,
+        );
+        let roles = load_roles(dir.path());
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].name, "good");
+    }
+
+    #[test]
+    fn save_loads_back_what_was_saved() {        let dir = tempfile::TempDir::new().unwrap();
         let role = AgentRole {
             slug: "frontend-reviewer".to_string(),
             name: "Frontend Reviewer".to_string(),
