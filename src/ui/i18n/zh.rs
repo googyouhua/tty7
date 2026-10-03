@@ -239,6 +239,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavInput => "键盘与鼠标",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "集成",
+        L10nKey::SettingsNavAgentRoles => "Agent 角色",
         L10nKey::SettingsNavKeybindings => "快捷键",
         L10nKey::SettingsNavAbout => "关于",
         L10nKey::SettingsHeader => "设置",
@@ -600,6 +601,35 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentsIntroDesc => {
             "安装 hook 后，agent 的状态（进行中 / 等待中 / 已完成）会显示在标签栏。"
         }
+        L10nKey::SettingsRolesIntro => "自定义 agent 角色",
+        L10nKey::SettingsRolesIntroDesc => {
+            "给一份工作起个名字，把它绑到某个内置 agent 上，用自己的启动命令和开场提示词启动。"
+        }
+        L10nKey::SettingsRolesEmpty => "还没有自定义角色。",
+        L10nKey::SettingsRoleNew => "新建角色",
+        L10nKey::SettingsRoleEdit => "编辑角色",
+        L10nKey::SettingsRoleEditAction => "编辑",
+        L10nKey::SettingsRoleName => "名字",
+        L10nKey::SettingsRoleNameDesc => "显示在搜索和启动行；slug 按它生成一次。",
+        L10nKey::SettingsRoleBase => "底层 agent",
+        L10nKey::SettingsRoleBaseDesc => "检测、状态和恢复都沿用这个 agent。",
+        L10nKey::SettingsRoleLaunch => "启动命令",
+        L10nKey::SettingsRoleLaunchDesc => "输入到新 shell。留空则用底层裸命令。",
+        L10nKey::SettingsRoleModel => "模型",
+        L10nKey::SettingsRoleModelDesc => "拼在启动命令后面。留空则由启动行决定。",
+        L10nKey::SettingsRoleModelNone => "仅启动行",
+        L10nKey::SettingsRoleRefresh => "刷新",
+        L10nKey::SettingsRoleDescription => "说明",
+        L10nKey::SettingsRoleDescriptionDesc => "只显示，不会发给 agent。",
+        L10nKey::SettingsRoleInstructions => "首发提示词",
+        L10nKey::SettingsRoleInstructionsDesc => "每次全新启动时第一个发出。",
+        L10nKey::SettingsRoleStarters => "开场白",
+        L10nKey::SettingsRoleStartersDesc => "最多三条；在 pane 菜单里点一条发送。",
+        L10nKey::SettingsRoleNameRequired => "给角色起个名字。",
+        L10nKey::SettingsRoleFollowupMissed => {
+            "Agent 一直没起来，本次没发角色提示词。如需请从 pane 菜单重发一条。"
+        }
+        L10nKey::SettingsRoleSearchKeywords => "角色 自定义 agent 启动 开场白 提示词",
         L10nKey::SettingsReadingAgentConfig => "正在读取这台机器的 AI agent 配置…",
         L10nKey::SettingsStatusNotInstalled => "未安装",
         L10nKey::SettingsStatusInstalled => "已安装",
@@ -2030,6 +2060,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuCopySessionId => "复制会话 ID",
         L10nKey::AppMenuForkSession => "Fork 会话",
         L10nKey::AppMenuSaveAgentLaunchArgs => "将当前启动参数设为默认",
+        L10nKey::AppMenuOpenRoleAgent => "打开角色 agent…",
         L10nKey::AppMenuClosePaneTab => "关闭",
         L10nKey::AppMenuCloseOtherTabs => "关闭其他标签页",
         L10nKey::AppMenuCloseTabsRight => "关闭右侧标签页",

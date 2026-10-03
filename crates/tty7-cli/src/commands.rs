@@ -4131,6 +4131,7 @@ mod tests {
             agent,
             session_id: None,
             launch_argv: None,
+            role: None,
             status: None,
         });
     }

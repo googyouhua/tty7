@@ -825,6 +825,7 @@ impl Tty7App {
                 SettingsSection::Ssh => self.render_settings_ssh(cx),
                 SettingsSection::Mobile => self.render_settings_mobile(cx),
                 SettingsSection::Agents => self.render_settings_agents(cx),
+                SettingsSection::AgentRoles => self.render_settings_agent_roles(cx),
                 SettingsSection::Keybindings => self.render_settings_keybindings(cx),
                 SettingsSection::About => self.render_settings_about(cx),
             };
@@ -1418,6 +1419,7 @@ impl Tty7App {
                 SettingsSection::Agents => {
                     self.render_command_line_rows(cx);
                 }
+                SettingsSection::AgentRoles => {}
                 SettingsSection::About => {
                     self.render_settings_about(cx);
                 }

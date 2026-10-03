@@ -3837,6 +3837,7 @@ mod selection_gpui_tests {
                         agent: None,
                         agent_session_id: None,
                         agent_launch_argv: None,
+                        role: None,
                         run_on_land: None,
                         owner: None,
                         font_size: 14.0,

@@ -38,6 +38,11 @@ pub enum CommandKind {
     CopyAgentSessionId,
     NewAgentTab,
     LaunchAgent(CLIAgent),
+    LaunchRole(String),
+    SendRoleStarter {
+        slug: String,
+        index: usize,
+    },
     ResetFontSize,
     NextPane,
     PrevPane,
@@ -319,7 +324,9 @@ impl CommandKind {
             | OpenShell(_)
             | QuickConnect(_)
             | SaveQuickConnect(_)
-            | LaunchAgent(_) => return None,
+            | LaunchAgent(_)
+            | LaunchRole(_)
+            | SendRoleStarter { .. } => return None,
         })
     }
 
@@ -337,6 +344,12 @@ impl CommandKind {
             LaunchAgent(agent) => {
                 return crate::ui::keymap::effective_key(
                     crate::ui::agent_launch::launch_action_name(*agent),
+                    cx,
+                );
+            }
+            LaunchRole(slug) => {
+                return crate::ui::keymap::effective_key(
+                    &crate::ui::agent_launch::role_action_name(slug),
                     cx,
                 );
             }
@@ -473,7 +486,9 @@ impl CommandKind {
             | SaveSshSessionAsHost
             | QuickConnect(_)
             | SaveQuickConnect(_)
-            | LaunchAgent(_) => return None,
+            | LaunchAgent(_)
+            | LaunchRole(_)
+            | SendRoleStarter { .. } => return None,
         };
         crate::ui::keymap::effective_key(action, cx)
     }

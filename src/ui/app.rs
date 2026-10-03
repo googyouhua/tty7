@@ -4198,6 +4198,7 @@ impl Tty7App {
                     &spawn.agent,
                     spawn.agent_session_id.as_deref(),
                     spawn.agent_launch_argv.as_deref(),
+                    spawn.role.as_deref(),
                     view.read(cx),
                     cx,
                 )
@@ -4208,6 +4209,22 @@ impl Tty7App {
             view.read(cx).run_command_line(&cmd);
         }
         let slot = PaneSlot::Ready(view.clone());
+        // Carry the spawn's role tag onto the live view: detection only ever
+        // sees the base agent, and without this the tag would die with the
+        // pending slot at the `save_session` below and never reach a restore.
+        let role = pending.read(cx).spawn.role.clone();
+        view.update(cx, |view, _| view.set_role(role));
+        // Fresh role pane, never a restore: the role's instructions go in a
+        // few seconds after launch, once the agent is up. A restore only
+        // reattaches, so it never resends.
+        if !restored
+            && let Some(slug) = pending.read(cx).spawn.role.clone()
+            && let Some(role) = crate::ui::agent_launch::find_role(slug.trim())
+            && let Some(crate::ui::agent_launch::RoleFirstSend::TwoPhase { followup, .. }) =
+                crate::ui::agent_launch::plan_role_first_send(&role)
+        {
+            crate::ui::agent_launch::send_role_followup_later(view.clone(), followup, window, cx);
+        }
         replace_leaf_in(&mut self.tabs, slot_id, slot.clone());
         if was_focused {
             self.focus_leaf(&slot, window, cx);
@@ -6571,6 +6588,41 @@ impl Tty7App {
                 .in_section(new_terminal.clone()),
             );
         }
+        // Beside the agents', under the same section: one row per role whose
+        // launch program is on this computer's `PATH`, wearing its base
+        // agent's avatar so a tab reads the same in both places.
+        for role in self.offered_roles_here(cx) {
+            out.push(
+                Item::new(
+                    format!("Role: {}", role.name),
+                    CommandKind::LaunchRole(role.slug.clone()),
+                )
+                .with_subtitle(crate::ui::agent_launch::role_launch_line(&role))
+                .with_avatar(Avatar {
+                    agent: Some(role.base),
+                    ..Avatar::default()
+                })
+                .in_section(new_terminal.clone()),
+            );
+            // One row per conversation starter, after its role: picking it
+            // sends the prompt to the pane running that role.
+            for (index, starter) in role.starters.iter().enumerate() {
+                out.push(
+                    Item::new(
+                        format!("Role starter: {} — {}", role.name, starter.label),
+                        CommandKind::SendRoleStarter {
+                            slug: role.slug.clone(),
+                            index,
+                        },
+                    )
+                    .with_avatar(Avatar {
+                        agent: Some(role.base),
+                        ..Avatar::default()
+                    })
+                    .in_section(new_terminal.clone()),
+                );
+            }
+        }
         out
     }
 
@@ -6845,6 +6897,17 @@ impl Tty7App {
                 let at = SpawnWhere::from_modifiers(window.modifiers());
                 self.launch_agent(agent, at, window, cx)
             }
+            // A key bound to `LaunchRole:<slug>` or a `Role: …` row. Either
+            // outlives the file it was built from, so a role deleted since
+            // resolves to nothing and stays quiet apart from this warning.
+            LaunchRole(slug) => match crate::ui::agent_launch::find_role(&slug) {
+                Some(role) => {
+                    let at = SpawnWhere::from_modifiers(window.modifiers());
+                    self.launch_role(role, at, window, cx)
+                }
+                None => log::warn!("role '{slug}' is gone; not launching it"),
+            },
+            SendRoleStarter { slug, index } => self.send_role_starter(&slug, index, window, cx),
             CopyAgentSessionId => self.copy_agent_session_id(self.active, window, cx),
             RenameWorkspace => self.start_workspace_rename(window, cx),
             OpenSettings => self.toggle_settings(window, cx),
@@ -7002,6 +7065,59 @@ impl Tty7App {
             return;
         };
         target.read(cx).send_agent_prompt(prompt);
+        if let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.pane.terminals().contains(&target))
+        {
+            self.activate(i, window, cx);
+        }
+    }
+
+    /// The pane running the role `slug`, active tab first — the starter
+    /// target. A pane whose role file is gone reads as its base agent, so
+    /// it never matches here.
+    pub(crate) fn role_target_leaf(&self, slug: &str, cx: &App) -> Option<Entity<TerminalView>> {
+        let runs_role = |leaf: &Entity<TerminalView>| {
+            let leaf = leaf.read(cx);
+            leaf.agent().is_some() && leaf.role() == Some(slug)
+        };
+        if let Some(tab) = self.tabs.get(self.active)
+            && let Some(leaf) = tab.pane.terminals().into_iter().find(|l| runs_role(l))
+        {
+            return Some(leaf);
+        }
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != self.active)
+            .flat_map(|(_, t)| t.pane.terminals())
+            .find(|l| runs_role(l))
+    }
+
+    /// Send one of a role's conversation starters to the pane running that
+    /// role, then show that tab — the manual half of role prompts, beside
+    /// [`Self::deliver_agent_prompt`].
+    pub(crate) fn send_role_starter(
+        &mut self,
+        slug: &str,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(role) = crate::ui::agent_launch::find_role(slug) else {
+            log::warn!("role '{slug}' is gone; not sending its starter");
+            return;
+        };
+        let Some(starter) = role.starters.get(index) else {
+            log::warn!("role '{slug}' has no starter {index}");
+            return;
+        };
+        let Some(target) = self.role_target_leaf(slug, cx) else {
+            crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
+            return;
+        };
+        target.read(cx).send_agent_prompt(&starter.prompt);
         if let Some(i) = self
             .tabs
             .iter()
@@ -7509,6 +7625,7 @@ impl Tty7App {
             ssh_filter,
             ssh_collapsed_groups: std::collections::HashSet::new(),
             onekey_form: None,
+            role_form: None,
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
             agent_hooks_states: crate::ui::settings::AgentHooksView::Loading,
             agent_hooks_seq: 0,
@@ -10216,8 +10333,22 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, action: &LaunchAgent, window, cx| {
                     this.launch_agent(action.agent, SpawnWhere::NewTab, window, cx)
                 }))
+                .on_action(cx.listener(|this, action: &LaunchRole, window, cx| {
+                    match crate::ui::agent_launch::find_role(&action.slug) {
+                        Some(role) => this.launch_role(role, SpawnWhere::NewTab, window, cx),
+                        None => {
+                            log::warn!("role '{}' is gone; not launching it", action.slug)
+                        }
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &SaveAgentLaunchArgs, window, cx| {
                     this.save_agent_launch_args(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &OpenRoleAgent, window, cx| {
+                    this.open_search(SearchTab::Terminals, "Role:", window, cx)
+                }))
+                .on_action(cx.listener(|this, action: &SendRoleStarter, window, cx| {
+                    this.send_role_starter(&action.slug, action.index, window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
                     this.open_settings_section(SettingsSection::Keybindings, window, cx)
@@ -10351,10 +10482,31 @@ fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
     }
 }
 
+/// What a pane launched for the role `role_slug` is called: the role's name
+/// with its base agent behind it — `Frontend Reviewer (Claude Code)`. A slug
+/// whose role file is missing or deleted is not an error surface: the pane
+/// reads as its base agent, and with no agent at all as a plain shell.
+pub(crate) fn role_display(
+    role_slug: Option<&str>,
+    agent: Option<crate::core::cli_agent::CLIAgent>,
+) -> String {
+    let name = role_slug
+        .map(str::trim)
+        .filter(|slug| !slug.is_empty())
+        .and_then(|slug| crate::ui::agent_launch::find_role(slug).map(|role| role.name));
+    match (name, agent) {
+        (Some(name), Some(agent)) => format!("{name} ({})", agent.display_name()),
+        (Some(name), None) => name,
+        (None, Some(agent)) => agent.display_name().to_string(),
+        (None, None) => String::from("Shell"),
+    }
+}
+
 fn agent_resume_command(
     agent: &Option<crate::core::cli_agent::CLIAgent>,
     session_id: Option<&str>,
     launch_argv: Option<&[String]>,
+    role: Option<&str>,
     view: &TerminalView,
     cx: &App,
 ) -> Option<String> {
@@ -10369,6 +10521,16 @@ fn agent_resume_command(
         );
         return None;
     };
+    // A role pane resumes through its role while the file still exists, and
+    // through its base agent once it is gone — never an error surface. A
+    // resume only reattaches: the role's instructions are launch-time and are
+    // never resent here.
+    if let Some(slug) = role.map(str::trim).filter(|slug| !slug.is_empty())
+        && let Some(role) = crate::ui::agent_launch::find_role(slug)
+        && let Some(line) = crate::ui::agent_launch::role_resume_line(&role, session_id)
+    {
+        return Some(line);
+    }
     agent.restore_command(
         session_id,
         launch_argv,
@@ -10405,6 +10567,7 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
                 agent: spawn.agent,
                 agent_session_id: spawn.agent_session_id.clone(),
                 agent_launch_argv: spawn.agent_launch_argv.clone(),
+                role: spawn.role.clone(),
             }
         }
         Pane::Leaf(PaneSlot::Ready(view)) => {
@@ -10430,6 +10593,10 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
                 agent: view.agent(),
                 agent_session_id: view.agent_session().and_then(|s| s.session_id),
                 agent_launch_argv: view.agent_session().and_then(|s| s.launch_argv),
+                // The tag seeded from the spawn at connect time: detection
+                // only ever sees the base agent, so the live view is the one
+                // place that still knows the role.
+                role: view.role().map(str::to_string),
             }
         }
         Pane::Split {
@@ -10451,6 +10618,7 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
             agent: None,
             agent_session_id: None,
             agent_launch_argv: None,
+            role: None,
         },
     }
 }
@@ -10727,6 +10895,7 @@ fn session_to_pane(
             agent,
             agent_session_id,
             agent_launch_argv,
+            role,
         } => {
             let same_daemon =
                 leaf_shares_the_window_daemon(workspace.is_some(), ssh_spec.is_some());
@@ -10782,6 +10951,7 @@ fn session_to_pane(
                         agent,
                         agent_session_id.as_deref(),
                         agent_launch_argv.as_deref(),
+                        role.as_deref(),
                         terminal.read(cx),
                         cx,
                     ) {
@@ -10794,6 +10964,7 @@ fn session_to_pane(
                         pending.spawn.agent = *agent;
                         pending.spawn.agent_session_id = agent_session_id.clone();
                         pending.spawn.agent_launch_argv = agent_launch_argv.clone();
+                        pending.spawn.role = role.clone();
                     });
                 }
             }
@@ -10850,6 +11021,7 @@ pub(crate) fn new_terminal(
         agent: None,
         agent_session_id: None,
         agent_launch_argv: None,
+        role: None,
         run_on_land: None,
         owner,
         font_size,
@@ -11609,6 +11781,45 @@ mod tests {
     };
     use gpui::{Edges, point, px, size};
 
+    /// Pane role tags with base fallback (custom agent roles, task 3). The
+    /// module name carries `role_display` so `cargo test --bin tty7-app
+    /// role_display` runs exactly these.
+    mod role_display_tests {
+        use super::super::role_display;
+        use crate::core::cli_agent::CLIAgent;
+
+        /// A `frontend-reviewer` role on disk for the display to resolve.
+        /// `find_role` reads the real roles dir, so the test pins a scratch
+        /// config dir and plants the file — and removes it afterwards, so no
+        /// other test ever sees a role it did not ask for.
+        fn plant_frontend_reviewer() -> std::path::PathBuf {
+            crate::core::config::pin_test_config_dir();
+            let dir = crate::core::agent_roles::roles_dir().expect("pinned config dir");
+            let file = dir.join("frontend-reviewer").join("role.json");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(
+                &file,
+                r#"{"slug":"frontend-reviewer","name":"Frontend Reviewer","base":"claude","launch":"claude --model opus"}"#,
+            )
+            .unwrap();
+            dir.join("frontend-reviewer")
+        }
+
+        #[test]
+        fn deleted_role_falls_back_to_base_display() {
+            let planted = plant_frontend_reviewer();
+            assert_eq!(
+                role_display(Some("gone"), Some(CLIAgent::Claude)),
+                "Claude Code"
+            );
+            assert_eq!(
+                role_display(Some("frontend-reviewer"), Some(CLIAgent::Claude)),
+                "Frontend Reviewer (Claude Code)"
+            );
+            std::fs::remove_dir_all(&planted).ok();
+        }
+    }
+
     #[test]
     fn title_bar_buttons_rest_out_of_sight_only_when_asked_to_and_nobody_points() {
         // Off: painted whether or not the pointer is anywhere near.
@@ -12274,6 +12485,7 @@ mod tests {
                         agent: Some(CLIAgent::Claude),
                         agent_session_id: Some("sid-abc".to_string()),
                         agent_launch_argv: Some(vec!["claude".to_string()]),
+                        role: Some("frontend-reviewer".to_string()),
                         run_on_land: None,
                         owner: None,
                         font_size: 14.0,
@@ -12287,6 +12499,7 @@ mod tests {
                 agent,
                 agent_session_id,
                 agent_launch_argv,
+                role,
                 ..
             } = saved
             else {
@@ -12296,6 +12509,11 @@ mod tests {
             assert_eq!(agent, Some(CLIAgent::Claude));
             assert_eq!(agent_session_id.as_deref(), Some("sid-abc"));
             assert_eq!(agent_launch_argv, Some(vec!["claude".to_string()]));
+            assert_eq!(
+                role.as_deref(),
+                Some("frontend-reviewer"),
+                "the role tag travels with the spawn metadata"
+            );
         });
     }
 
@@ -14051,6 +14269,7 @@ mod tab_focus_memory_tests {
                     agent: None,
                     agent_session_id: None,
                     agent_launch_argv: None,
+                    role: None,
                     run_on_land: None,
                     owner: None,
                     font_size: 14.,

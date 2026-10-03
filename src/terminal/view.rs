@@ -27,8 +27,9 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
-    OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
-    SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
+    OpenLinkUnderPointer, OpenLinkWithDefaultApp, OpenRoleAgent, RevealLinkUnderPointer,
+    SaveAgentLaunchArgs, SendBackTab, SendRoleStarter, SendTab, SplitDown, SplitRight,
+    ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
@@ -449,6 +450,11 @@ pub struct TerminalView {
     agent_detection_armed: bool,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
     last_agent_session: (Option<String>, Option<Vec<String>>),
+    /// The custom role slug this pane was launched for, if any. Detection
+    /// only ever sees the base agent, so the tag is seeded from the spawn
+    /// when the view is built and travels back out on session save — a slug
+    /// whose role file is gone reads as no role (see `role_display`).
+    role: Option<String>,
     agent_turn_started: Option<std::time::Instant>,
     /// The "finished" notification for a turn that just reached `Done`,
     /// waiting out [`AGENT_DONE_SETTLE`]. Dropped — and so never sent — when
@@ -1922,6 +1928,7 @@ impl TerminalView {
             agent_detection_armed,
             last_agent_status: None,
             last_agent_session: (None, None),
+            role: None,
             agent_turn_started: None,
             pending_finish_notice: None,
             agent_was_rich: false,
@@ -2172,6 +2179,17 @@ impl TerminalView {
 
     pub fn agent(&self) -> Option<crate::core::cli_agent::CLIAgent> {
         self.terminal.foreground_agent()
+    }
+
+    /// The custom role slug this pane was launched for, if any — seeded from
+    /// the spawn, never detected. Task 4's starters menu and session save
+    /// read it from here.
+    pub fn set_role(&mut self, role: Option<String>) {
+        self.role = role;
+    }
+
+    pub fn role(&self) -> Option<&str> {
+        self.role.as_deref()
     }
 
     pub fn agent_session(&self) -> Option<crate::core::cli_agent::AgentSessionState> {
@@ -8118,6 +8136,16 @@ impl Render for TerminalView {
                     view.agent_session()
                         .is_some_and(|s| s.launch_argv.is_some())
                 });
+                // The role backing this pane's starters, if it runs one that
+                // defines any. Resolved here, beside the other probes, so no
+                // view borrow crosses the submenu calls below.
+                let starter_role = view
+                    .role()
+                    .and_then(crate::ui::agent_launch::find_role)
+                    .filter(|role| !role.starters.is_empty());
+                let starter_role_name = starter_role
+                    .as_ref()
+                    .map(|role| crate::ui::app::role_display(Some(&role.slug), view.agent()));
 
                 let menu = match (can_fork, fork_ready) {
                     (true, true) => {
@@ -8164,6 +8192,46 @@ impl Render for TerminalView {
                         )
                     }
                     None => menu,
+                };
+
+                // A way into roles from the pane itself: opens Search
+                // pre-filtered to role rows, which already apply the right
+                // offering rules for this workspace. Shown whenever at
+                // least one role exists.
+                let has_roles = crate::core::agent_roles::roles_dir()
+                    .map(|dir| !crate::core::agent_roles::load_roles(&dir).is_empty())
+                    .unwrap_or(false);
+                let menu = match has_roles {
+                    true => menu.menu(t(L10nKey::AppMenuOpenRoleAgent), Box::new(OpenRoleAgent)),
+                    false => menu,
+                };
+
+                // A pane running a role that defines conversation starters
+                // offers them here, headed with the role's own name — the
+                // first production caller of `role_display`.
+                let menu = match (starter_role, starter_role_name) {
+                    (Some(role), Some(header)) => {
+                        let focus = menu_focus.clone();
+                        menu.separator().submenu(
+                            header,
+                            window,
+                            cx,
+                            move |submenu, _window, _cx| {
+                                let mut submenu = submenu.action_context(focus.clone());
+                                for (index, starter) in role.starters.iter().enumerate() {
+                                    submenu = submenu.menu(
+                                        starter.label.clone(),
+                                        Box::new(SendRoleStarter {
+                                            slug: role.slug.clone(),
+                                            index,
+                                        }),
+                                    );
+                                }
+                                submenu
+                            },
+                        )
+                    }
+                    _ => menu,
                 };
 
                 menu.separator()

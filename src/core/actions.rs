@@ -172,3 +172,27 @@ actions!(
 pub struct LaunchAgent {
     pub agent: tty7_core::core::cli_agent::CLIAgent,
 }
+
+/// Open a new tab running one particular agent role. The keymap names one of
+/// these per role on disk (`LaunchRole:<slug>`, …); see `ui::agent_launch`.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = tty7, no_json)]
+pub struct LaunchRole {
+    pub slug: String,
+}
+
+/// Send one of a role's conversation starters to the pane running that
+/// role. Built per starter for the palette and the pane context menu;
+/// see `ui::agent_launch::plan_role_first_send` for the launch-time half.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = tty7, no_json)]
+pub struct SendRoleStarter {
+    pub slug: String,
+    pub index: usize,
+}
+
+/// Open Search Everywhere pre-filtered to role rows, so a role is one
+/// right-click away even where its quick-launch rows cannot be listed.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = tty7, no_json)]
+pub struct OpenRoleAgent;

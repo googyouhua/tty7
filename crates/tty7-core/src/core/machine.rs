@@ -447,6 +447,12 @@ pub struct AgentFacts {
     pub session_id: Option<String>,
     #[serde(default)]
     pub launch_argv: Option<Vec<String>>,
+    /// The custom role slug the pane runs under, if any — the seed's tag, so
+    /// tree-carried restores (hibernate, reopen) keep it with the session.
+    /// The daemon never learns it and always reports `None`; a slug whose
+    /// role file is gone falls back to the base agent.
+    #[serde(default)]
+    pub role: Option<String>,
     #[serde(default)]
     pub status: Option<crate::core::cli_agent::AgentStatus>,
 }

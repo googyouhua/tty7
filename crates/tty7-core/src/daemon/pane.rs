@@ -3339,6 +3339,9 @@ fn observed_facts(st: &PaneState) -> ObservedFacts {
             .as_ref()
             .and_then(|s| s.launch_argv.clone())
             .or_else(|| st.agent_argv.clone()),
+        // The daemon only ever observes the base agent running; the role tag
+        // is the window's seed metadata, kept across publishes below.
+        role: None,
         status: st.agent_session.as_ref().map(|s| s.status),
     });
     ObservedFacts {
@@ -3357,7 +3360,17 @@ fn publish_facts(pane: u64, alive: bool, after: ObservedFacts) {
         // Unlike the others this one is also cleared by a reset, so it is
         // assigned either way.
         p.osc_title = after.osc_title;
-        p.agent = after.agent;
+        let mut next = after.agent;
+        if let (Some(next), Some(previous)) = (next.as_mut(), p.agent.as_ref()) {
+            // The daemon never observes the role — only the base agent it
+            // sees running — so a publish must not wipe the tag the window's
+            // seed carried. Kept only while the same agent is in front: a
+            // switch means whoever the role described is gone.
+            if next.role.is_none() && previous.agent == next.agent {
+                next.role.clone_from(&previous.role);
+            }
+        }
+        p.agent = next;
         if after.shell.is_some() {
             p.shell = after.shell;
         }
@@ -6121,6 +6134,7 @@ mod tests {
                         agent: CLIAgent::Claude,
                         session_id: Some("sess-1".to_string()),
                         launch_argv: Some(vec!["claude".to_string()]),
+                        role: None,
                         status: None,
                     }),
                     shell: None,
