@@ -50,6 +50,41 @@ pub fn build_diff_review_prompt(diff: &str, cwd: Option<&str>) -> Option<String>
     Some(prompt)
 }
 
+pub fn build_review_attach_prompt(
+    path: &str,
+    lines: &str,
+    diff: &str,
+    comment: &str,
+    source: Option<&str>,
+) -> Option<String> {
+    let diff = diff.trim_end();
+    if diff.trim().is_empty() {
+        return None;
+    }
+    let path = path.trim();
+    let path = if path.is_empty() { "(unknown file)" } else { path };
+    let mut prompt = String::from(
+        "Please help with this code review finding. Look at the selected diff and address my comment.",
+    );
+    if let Some(s) = source.filter(|s| !s.trim().is_empty()) {
+        prompt.push_str(&format!(" Review source: `{s}`."));
+    }
+    prompt.push_str(&format!(" File: `{path}`"));
+    if !lines.trim().is_empty() {
+        prompt.push_str(&format!(" (lines {lines})"));
+    }
+    prompt.push_str(".");
+    let comment = comment.trim();
+    if !comment.is_empty() {
+        prompt.push_str("\n\nMy comment:\n");
+        prompt.push_str(&capped(comment));
+    }
+    prompt.push_str("\n\nSelected diff:\n```diff\n");
+    prompt.push_str(&capped(diff));
+    prompt.push_str("\n```");
+    Some(prompt)
+}
+
 pub fn submit_bytes(prompt: &str) -> Vec<u8> {
     let mut bytes = tty7_core::core::paste::bracket(prompt.as_bytes());
     bytes.push(b'\r');
@@ -84,6 +119,27 @@ mod tests {
         let p = build_selection_prompt(&big, None).unwrap();
         assert!(p.len() < big.len() + 500);
         assert!(p.contains("truncated by tty7"));
+    }
+
+    #[test]
+    fn review_attach_prompt_embeds_path_lines_diff_and_comment() {
+        let p = build_review_attach_prompt(
+            "src/ui/app.rs",
+            "new 120-126",
+            "@@ -120,3 +120,7 @@\n+added",
+            "please split this",
+            Some("owner/repo#12"),
+        )
+        .unwrap();
+        assert!(p.contains("src/ui/app.rs"));
+        assert!(p.contains("120-126"));
+        assert!(p.contains("+added"));
+        assert!(p.contains("please split this"));
+        assert!(p.contains("owner/repo#12"));
+        assert_eq!(
+            build_review_attach_prompt("a.rs", "1", "   \n", "c", None),
+            None
+        );
     }
 
     #[test]

@@ -658,11 +658,12 @@ pub(crate) fn chrome_tile(button: Button, selected: bool, cx: &gpui::App) -> But
 /// control, local to remote (Changes, GitHub). GitHub is last so that hiding
 /// it for a repository without a GitHub remote moves nothing. Search is not
 /// among them: the Files tab searches names and contents in one field.
-const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 4] = [
+const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 5] = [
     (RightPanelTab::Info, L10nKey::PanelInfoTitle),
     (RightPanelTab::Files, L10nKey::PanelFilesTitle),
     (RightPanelTab::Scm, L10nKey::PanelChangesTitle),
     (RightPanelTab::GitHub, L10nKey::PanelGitHubTitle),
+    (RightPanelTab::Review, L10nKey::PanelReviewTitle),
 ];
 
 fn right_panel_tab_size(window: &Window) -> f32 {
