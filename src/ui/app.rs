@@ -993,6 +993,7 @@ pub struct Tty7App {
     pub(crate) right_panel: crate::ui::right_panel::RightPanelState,
     pub(crate) scm: crate::ui::scm::ScmPanelState,
     pub(crate) github: crate::ui::github::GitHubPanelState,
+    pub(crate) review: crate::ui::review_state::ReviewState,
     pub(crate) diff_probes_inflight:
         std::collections::HashSet<(crate::ui::host_ops::HostId, std::path::PathBuf)>,
     pub(crate) diff_probes_restale:
@@ -1690,6 +1691,7 @@ impl Tty7App {
                 ..Default::default()
             },
             github: Default::default(),
+            review: Default::default(),
             diff_probes_inflight: Default::default(),
             diff_probes_restale: Default::default(),
             file_tree,
@@ -6989,7 +6991,12 @@ impl Tty7App {
             .find(runs_agent)
     }
 
-    fn deliver_agent_prompt(&mut self, prompt: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn deliver_agent_prompt(
+        &mut self,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.agent_target_leaf(cx) else {
             crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
             return;
@@ -9972,6 +9979,9 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &ShowRightPanelGitHub, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::GitHub, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ShowRightPanelReview, _window, cx| {
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Review, cx)
                 }))
                 .on_action(
                     cx.listener(|this, _: &ScmToggleGraph, _window, cx| this.scm_toggle_graph(cx)),

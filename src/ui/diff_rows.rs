@@ -244,6 +244,53 @@ impl DiffSelection {
 ",
         )
     }
+
+    /// The covered lines as the file numbers them (`L120-126`), for humans.
+    /// Prefers the side the drag started in; blank padding cells fall back to
+    /// the other side, and a selection with no numbered lines at all keeps
+    /// the hunk coordinates so the label is never empty.
+    pub(crate) fn line_label(&self, hunks: &[Hunk]) -> String {
+        let (start, end) = self.range();
+        let mut nos: Vec<u32> = Vec::new();
+        let mut push_no = |no: Option<u32>| {
+            if let Some(n) = no.filter(|n| !nos.contains(n)) {
+                nos.push(n);
+            }
+        };
+        for (h, hunk) in hunks.iter().enumerate() {
+            if h < start.hunk || h > end.hunk {
+                continue;
+            }
+            let first = if h == start.hunk { start.row } else { 0 };
+            let last = if h == end.hunk { end.row } else { usize::MAX };
+            match HunkRows::build(self.mode, &hunk.lines) {
+                HunkRows::Split(rows) => {
+                    for row in rows.iter().take(last.saturating_add(1)).skip(first) {
+                        let side = self.side.unwrap_or(Side::New);
+                        let cell = match side {
+                            Side::Old => row.left.as_ref(),
+                            Side::New => row.right.as_ref(),
+                        };
+                        let other = match side {
+                            Side::Old => row.right.as_ref(),
+                            Side::New => row.left.as_ref(),
+                        };
+                        push_no(cell.and_then(|c| c.no).or_else(|| other.and_then(|c| c.no)));
+                    }
+                }
+                HunkRows::Unified(rows) => {
+                    for row in rows.iter().take(last.saturating_add(1)).skip(first) {
+                        push_no(row.new.or(row.old));
+                    }
+                }
+            }
+        }
+        match (nos.iter().min(), nos.iter().max()) {
+            (Some(&lo), Some(&hi)) if lo == hi => format!("L{lo}"),
+            (Some(&lo), Some(&hi)) => format!("L{lo}-{hi}"),
+            _ => format!("hunk {}:{}-{}:{}", start.hunk, start.row, end.hunk, end.row),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -269,6 +316,36 @@ mod tests {
             line(LineKind::Added, None, Some(2), "B"),
             line(LineKind::Context, Some(4), Some(3), "d"),
         ]
+    }
+
+    #[test]
+    fn line_label_reports_file_line_numbers() {
+        let hunks = vec![crate::terminal::git_diff::Hunk {
+            header: "@@ -1,4 +1,3 @@".to_string(),
+            lines: hunk(),
+        }];
+        let sel = |mode, side, anchor: (usize, usize), head: (usize, usize)| DiffSelection {
+            path: "a.rs".to_string(),
+            mode,
+            side,
+            anchor: RowId {
+                hunk: anchor.0,
+                row: anchor.1,
+            },
+            head: RowId {
+                hunk: head.0,
+                row: head.1,
+            },
+        };
+        // Unified rows carry their own numbers straight through.
+        let s = sel(DiffViewMode::Unified, None, (0, 1), (0, 2));
+        assert_eq!(s.line_label(&hunks), "L2-3");
+        // Split view follows the dragged column: the old side names old lines.
+        let s = sel(DiffViewMode::Split, Some(Side::Old), (0, 1), (0, 1));
+        assert_eq!(s.line_label(&hunks), "L2");
+        // The new side of the same rows names new lines.
+        let s = sel(DiffViewMode::Split, Some(Side::New), (0, 1), (0, 1));
+        assert_eq!(s.line_label(&hunks), "L2");
     }
 
     #[test]

@@ -1366,6 +1366,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelFilesTitle => "Files",
         L10nKey::PanelSearchTitle => "Search",
         L10nKey::PanelGitHubTitle => "GitHub",
+        L10nKey::PanelReviewTitle => "Review",
         L10nKey::PanelNoSession => "No active session.",
         L10nKey::PanelNoSessionHint => {
             "Open a tab to see its shell, directory, and processes here."
@@ -1546,6 +1547,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffViewSplit => "Side by Side",
         L10nKey::DiffViewUnified => "Unified",
         L10nKey::DiffCopySelection => "Copy Selected Lines",
+        L10nKey::DiffReviewInNewAgent => "Review in new agent…",
+        L10nKey::DiffReviewAttach => "Attach to agent…",
         L10nKey::PendingConnecting => "Connecting to {machine}…",
         L10nKey::PendingUnreachable => "Could not reach {machine}",
         L10nKey::WorktreePromptNeedsName => "The worktree needs a name",
@@ -1828,6 +1831,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdRightPanelFiles => "Right Panel: Files",
         L10nKey::CmdRightPanelSearch => "Right Panel: Search",
         L10nKey::CmdRightPanelGitHub => "Right Panel: GitHub",
+        L10nKey::CmdRightPanelReview => "Right Panel: Review",
         L10nKey::CmdChangeTheme => "Change Theme…",
         L10nKey::CmdResetFontSize => "Reset Font Size",
         L10nKey::CmdEnterFullScreen => "Enter Full Screen",
@@ -2011,6 +2015,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
         L10nKey::AppNoAgentOnPath => "No coding agent was found on this machine's PATH",
+        L10nKey::ReviewAgentTimeout => "The new agent did not start in time — try again.",
         L10nKey::AppNoAgentSeenHere => {
             "No coding agent has run in this workspace yet — start one by hand once and it will be offered here"
         }

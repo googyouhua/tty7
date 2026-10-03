@@ -1276,6 +1276,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelFilesTitle => "文件",
         L10nKey::PanelSearchTitle => "搜索",
         L10nKey::PanelGitHubTitle => "GitHub",
+        L10nKey::PanelReviewTitle => "评审",
         L10nKey::PanelNoSession => "没有活动会话。",
         L10nKey::PanelNoSessionHint => "打开一个标签页以在此处查看其 shell、目录和进程。",
         L10nKey::PanelNoWorkingDirectory => "没有工作目录。",
@@ -1437,6 +1438,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffViewSplit => "并排",
         L10nKey::DiffViewUnified => "统一",
         L10nKey::DiffCopySelection => "复制选中的行",
+        L10nKey::DiffReviewInNewAgent => "在新 agent 中评审…",
+        L10nKey::DiffReviewAttach => "发给运行中的 agent…",
         L10nKey::PendingConnecting => "正在连接 {machine}…",
         L10nKey::PendingUnreachable => "无法连接到 {machine}",
         L10nKey::WorktreePromptNeedsName => "worktree 需要一个名称",
@@ -1695,6 +1698,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRightPanelFiles => "右侧面板：文件",
         L10nKey::CmdRightPanelSearch => "右侧面板：搜索",
         L10nKey::CmdRightPanelGitHub => "右侧面板：GitHub",
+        L10nKey::CmdRightPanelReview => "右侧面板：评审",
         L10nKey::CmdChangeTheme => "更改主题…",
         L10nKey::CmdResetFontSize => "重置字号",
         L10nKey::CmdEnterFullScreen => "进入全屏",
@@ -1868,6 +1872,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppNoUncommittedChanges => "{cwd} 中没有未提交的更改（或不是 git 仓库）。",
         L10nKey::AppCmdAgentLaunchTitle => "Agent：{name}",
         L10nKey::AppNoAgentOnPath => "在本机 PATH 中未找到编码 agent",
+        L10nKey::ReviewAgentTimeout => "新 agent 未能按时启动，请重试。",
         L10nKey::AppNoAgentSeenHere => {
             "此工作区还没有运行过编码 agent——手动启动一次后，这里就会列出它"
         }

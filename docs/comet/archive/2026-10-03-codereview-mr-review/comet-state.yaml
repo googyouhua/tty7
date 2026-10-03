@@ -1,0 +1,283 @@
+schema: comet.native.v4
+name: codereview-mr-review
+language: en
+phase: archive
+status: done
+state_version: 31
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 23cc930c502ee107b193678c852469d10f44055b62a6d00db0c7b8086df9b4c5
+spec_changes:
+  - capability: mr-review
+    operation: create
+    source: specs/mr-review/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/codereview-mr-review
+  target_branch: main
+  finish: push
+loop:
+  stage: done
+  goal_cycle: 5
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "A1: 现有 PR 详情 + 单文件弹窗保持可用；A1b: 双下拉 + 文件列表点进 diff；A1c: 非法置灰；A1d: 列表自动 probe
+      + 快照复用；A1e: dock 最大化有内容。"
+    result: passed
+    reason:
+      text: PR detail/popup intact; dual dropdowns + snapshot-reused file list;
+        invalid greyed; dock viewport-height fix; verified maximized on device.
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: 点击任意 diff 行可添加本地行内草稿评论，切换文件/刷新后仍在且标注未提交。"
+    result: passed
+    reason:
+      text: Inline comment box + Save draft keyed per source; persists across
+        switch/refresh; listed as unsent.
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: 支持 unified/split 切换，与现有单文件 diff 一致。"
+    result: passed
+    reason:
+      text: Unified/split via shared DiffViewMode renderers.
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "A4: 本地 `base...head` 可进入同一 review 视图（离线可用）。"
+    result: passed
+    reason:
+      text: Local base...head via same overlay; offline, no token.
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: 无 token/匿名时远端只读部分降级提示，本地 diff 与草稿评论仍可用。"
+    result: passed
+    reason:
+      text: Remote errors degrade with hints; local paths token-independent.
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: "A6: 选中 diff 行/块后点 “Attach to agent”，附上评论，可在运行中 agent 的 prompt
+      看到含路径+行号+diff+评论的内容；无运行中 agent 时明确提示。"
+    result: passed
+    reason:
+      text: Selection+comment prompt via existing channel; no-agent notice, no auto
+        pane; drafts retained.
+      truncated: false
+builder_handoff:
+  candidate_id: e21cfd95-01c2-4cea-a1a1-953ccf4a8898
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:f2865d43-156b-425f-a8f8-a800b3c04995
+  iteration: 1
+  summary:
+    text: Build终版：Review
+      Tab双下拉真实分支+差异文件列表点进diff（快照复用open_ready_range_diff）+非法置灰；overlay行内草稿与Attach到agent；本地Range离线；dock表面视口定高修最大化空白（flex链真窗口不定高，无头只能数builder故加回归说明）。远端实机验证通过（最大化/来回切分支/滚动）。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+  checks:
+    - name:
+        text: cargo check -p tty7
+        truncated: false
+      result: passed
+      note:
+        text: no errors
+        truncated: false
+    - name:
+        text: diff_overlay tests
+        truncated: false
+      result: passed
+      note:
+        text: 44 passed incl 4 new headless layout tests
+        truncated: false
+    - name:
+        text: review_state tests
+        truncated: false
+      result: passed
+      note:
+        text: 5 passed
+        truncated: false
+    - name:
+        text: agent_prompt tests
+        truncated: false
+      result: passed
+      note:
+        text: 5 passed
+        truncated: false
+    - name:
+        text: diff_list tests
+        truncated: false
+      result: passed
+      note:
+        text: 14 passed
+        truncated: false
+    - name:
+        text: core git diff tests
+        truncated: false
+      result: passed
+      note:
+        text: 37 passed
+        truncated: false
+    - name:
+        text: core github tests
+        truncated: false
+      result: passed
+      note:
+        text: 65 passed
+        truncated: false
+    - name:
+        text: remote build+manual verify
+        truncated: false
+      result: passed
+      note:
+        text: 192.168.1.25 BUILD_EXIT 0, user verified maximized
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: base/head为菜单单选，无自定义输入
+      truncated: false
+    - text: 草稿内存态，重启丢失
+      truncated: false
+    - text: dock定高用视口减标题栏估算
+      truncated: false
+    - text: macOS走原flex路径未在mac实测
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-03T01:49:02.788Z
+blockers: []
+verification:
+  candidate_id: e21cfd95-01c2-4cea-a1a1-953ccf4a8898
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:69ae62b7-7d50-4250-b53f-9f023707c2ac
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: All six acceptances pass with code evidence and green suites; remote
+      device verified maximized.
+    truncated: false
+  risks:
+    - text: menu-only pickers
+      truncated: false
+    - text: in-memory drafts
+      truncated: false
+    - text: viewport-height estimate
+      truncated: false
+    - text: macOS path untested on device
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-03T01:52:20.789Z
+history:
+  - goal_cycle: 1
+    iteration: 0
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native confirmed acceptance criteria changed
+      truncated: false
+    completed_at: 2026-10-02T11:13:54.868Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A2
+      - A6
+    summary:
+      text: Iteration 1 lands plumbing (Review tab, ReviewState, prompt builder, Range
+        reuse, no-agent notice) with unit tests; A2/A6 fail for missing
+        comment-input UI and triggers.
+      truncated: false
+    completed_at: 2026-10-02T11:34:35.814Z
+  - goal_cycle: 2
+    iteration: 2
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: "Iteration 2 closes UI gap: selection surfaces inline review strip with
+        comment box plus Save/Attach; all six acceptances reachable."
+      truncated: false
+    completed_at: 2026-10-02T11:40:15.663Z
+  - goal_cycle: 2
+    iteration: 2
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 用户实测：预设base在clone无本地main时fatal，需改为分支下拉二选一
+      truncated: false
+    completed_at: 2026-10-02T12:59:06.149Z
+  - goal_cycle: 3
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: Iteration 3 replaces hardcoded presets with dual real-branch dropdowns
+        (TTL cache, defaults, per-repo memory) and greys out invalid pairs; all
+        six acceptances pass.
+      truncated: false
+    completed_at: 2026-10-02T13:09:57.460Z
+  - goal_cycle: 3
+    iteration: 1
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 用户要文件列表：双下拉下直接列差异文件，点文件进diff
+      truncated: false
+    completed_at: 2026-10-02T13:21:52.708Z
+  - goal_cycle: 4
+    iteration: 0
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native confirmed acceptance criteria changed
+      truncated: false
+    completed_at: 2026-10-03T01:48:17.780Z
+  - goal_cycle: 5
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: All six acceptances pass with code evidence and green suites; remote
+        device verified maximized.
+      truncated: false
+    completed_at: 2026-10-03T01:52:20.789Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-02T10:24:03.932Z
