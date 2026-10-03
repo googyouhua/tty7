@@ -1,13 +1,13 @@
 ---
-generated_from_state_version: 24
+generated_from_state_version: 28
 ---
 
 # Verification
 
 ## Current result
 
-- Result: **Verification passed; your confirmation is required**
-- Verification status: **Checks completed, but your confirmation is required**
+- Result: **Archived**
+- Verification status: **Checks completed; result confirmed**
 - Goal cycle: 4
 - Iteration: 1
 - Verifier attempt: 1
@@ -38,7 +38,7 @@ These are Builder reports, not Runtime check receipts or independent verificatio
 
 ## Blockers
 
-- **user**: The generic Skill bridge cannot prove an independent Verifier execution; user confirmation is required before Archive. — next: `await-user`
+_None._
 
 ## Risks and skipped work
 
