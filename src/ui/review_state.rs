@@ -8,8 +8,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use gpui::Entity;
+use gpui_component::input::InputState;
+
 use super::scm::state::RepoKey;
-use crate::terminal::git_diff::DiffSnapshot;
+use crate::core::config::DiffViewMode;
+use crate::terminal::git_diff::{DiffSnapshot, DiffSource, FileDiff};
+use crate::ui::diff_rows::{RowId, Side};
 
 /// One unsent review note on a diff hunk.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +29,19 @@ pub struct ReviewDraft {
     /// The selected diff text the draft was written against.
     pub diff: String,
     pub comment: String,
+    /// Where it was written, for jumping back to the file.
+    pub repo: RepoKey,
+    /// The overlay source, for reopening it.
+    pub source: DiffSource,
+    /// The focused file as saved, so a supplied (`Patch`) snapshot can be
+    /// rebuilt without refetching. `None` for preview-synthesized files.
+    pub file: Option<FileDiff>,
+    /// The selection as saved, for restoring the highlight and scroll on
+    /// jump. Coordinates are only valid in `sel_mode`.
+    pub sel_mode: DiffViewMode,
+    pub sel_side: Option<Side>,
+    pub sel_anchor: RowId,
+    pub sel_head: RowId,
 }
 
 /// One attach-to-agent send.
@@ -43,6 +61,9 @@ pub struct ReviewState {
     branches: HashMap<RepoKey, BranchList>,
     selection: HashMap<RepoKey, (String, String)>,
     file_lists: HashMap<(RepoKey, String, String), FileListCache>,
+    /// The draft open in the Review tab editor, if any, with its input box.
+    editing: Option<(String, String, String)>,
+    edit_box: Option<Entity<InputState>>,
 }
 
 /// The probed `base...head` snapshot behind the file list, plus load state.
@@ -163,6 +184,56 @@ impl ReviewState {
         entry.unfolded = !entry.unfolded;
     }
 
+    pub fn draft(&self, source_tag: &str, path: &str, lines: &str) -> Option<&ReviewDraft> {
+        self.drafts.get(&(
+            source_tag.to_string(),
+            path.to_string(),
+            lines.to_string(),
+        ))
+    }
+
+    pub fn update_draft_comment(
+        &mut self,
+        source_tag: &str,
+        path: &str,
+        lines: &str,
+        comment: String,
+    ) -> bool {
+        match self.drafts.get_mut(&(
+            source_tag.to_string(),
+            path.to_string(),
+            lines.to_string(),
+        )) {
+            Some(d) => {
+                d.comment = comment;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn editing_key(&self) -> Option<(String, String, String)> {
+        self.editing.clone()
+    }
+
+    pub fn edit_box(&self) -> Option<Entity<InputState>> {
+        self.edit_box.clone()
+    }
+
+    pub fn begin_edit(
+        &mut self,
+        key: (String, String, String),
+        box_entity: Entity<InputState>,
+    ) {
+        self.editing = Some(key);
+        self.edit_box = Some(box_entity);
+    }
+
+    pub fn end_edit(&mut self) {
+        self.editing = None;
+        self.edit_box = None;
+    }
+
     pub fn file_list_entry(
         &mut self,
         repo: &RepoKey,
@@ -246,6 +317,16 @@ mod tests {
             lines: "new 1-3".to_string(),
             diff: "+x".to_string(),
             comment: "fix".to_string(),
+            repo: RepoKey {
+                host: crate::ui::host_ops::HostId::LOCAL,
+                root: std::path::PathBuf::from("/repo"),
+            },
+            source: DiffSource::Head,
+            file: None,
+            sel_mode: DiffViewMode::Split,
+            sel_side: None,
+            sel_anchor: RowId { hunk: 0, row: 0 },
+            sel_head: RowId { hunk: 0, row: 0 },
         }
     }
 
@@ -324,5 +405,18 @@ mod tests {
         assert!(!ReviewState::pair_is_valid("main", "main"));
         assert!(!ReviewState::pair_is_valid("", "feat/x"));
         assert!(!ReviewState::pair_is_valid("--output=x", "feat/x"));
+    }
+
+    #[test]
+    fn draft_comment_can_be_updated() {
+        let mut s = ReviewState::new();
+        s.upsert_draft(draft());
+        assert!(s.update_draft_comment("patch", "src/a.rs", "new 1-3", "better".to_string()));
+        assert_eq!(
+            s.draft("patch", "src/a.rs", "new 1-3").unwrap().comment,
+            "better"
+        );
+        assert!(!s.update_draft_comment("patch", "gone.rs", "new 1-3", "x".to_string()));
+        assert!(s.editing_key().is_none());
     }
 }

@@ -55,6 +55,12 @@ pub(crate) struct DiffOverlayState {
     /// Inline review comment box for the current selection. `None` until the
     /// user opens it; the text lives in the `InputState` itself.
     pub(crate) review_box: Option<gpui::Entity<InputState>>,
+    /// When the open box was requested from the right-click menu: confirming
+    /// sends to a NEW agent instead of the running one.
+    pub(crate) review_to_new: bool,
+    /// A jump (from a draft) asked to reveal its selection once rows exist.
+    /// Consumed by the next row build.
+    pub(crate) reveal_selection: bool,
     /// A synthesized all-added card for a focused *untracked* file, keyed by
     /// path; `None` in the value means the read failed. git has no patch for
     /// an untracked file, so focusing one reads its bytes instead — lazily,
@@ -193,6 +199,8 @@ impl Tty7App {
             preview: None,
             preview_loading: None,
             review_box: None,
+            review_to_new: false,
+            reveal_selection: false,
             selection: None,
             selecting: false,
             list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
@@ -302,6 +310,8 @@ impl Tty7App {
             preview: None,
             preview_loading: None,
             review_box: None,
+            review_to_new: false,
+            reveal_selection: false,
             selection: None,
             selecting: false,
             list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
@@ -463,7 +473,14 @@ impl Tty7App {
     }
 
     /// Open the inline review comment box for the current selection.
-    pub(crate) fn open_review_box(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// With `to_new`, confirming the box sends to a NEW agent tab instead
+    /// of the running one.
+    pub(crate) fn open_review_box(
+        &mut self,
+        to_new: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let has_selection = self
             .tabs
             .get(self.active)
@@ -483,6 +500,7 @@ impl Tty7App {
             .and_then(|t| t.diff_overlay.as_mut())
         {
             overlay.review_box = Some(box_entity);
+            overlay.review_to_new = to_new;
         }
         cx.notify();
     }
@@ -494,6 +512,19 @@ impl Tty7App {
             .and_then(|o| o.review_box.as_ref())
             .map(|b| b.read(cx).value().trim().to_string())
             .unwrap_or_default()
+    }
+
+    /// Drop the open comment box after its comment was consumed.
+    fn close_review_box(&mut self, cx: &mut Context<Self>) {
+        if let Some(overlay) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|t| t.diff_overlay.as_mut())
+        {
+            overlay.review_box = None;
+            overlay.review_to_new = false;
+        }
+        cx.notify();
     }
 
     /// Inline review strip under the header: comment box plus Save/Send.
@@ -520,23 +551,13 @@ impl Tty7App {
             return None;
         }
         if !has_box {
-            return Some(
-                h_flex()
-                    .flex_shrink_0()
-                    .px(px(crate::ui::app::CONTENT_INSET))
-                    .py(px(6.))
-                    .child(
-                        Button::new("diff-review-comment")
-                            .label("Review selection…")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_review_box(window, cx);
-                            })),
-                    )
-                    .into_any_element(),
-            );
+            // The comment box opens from the row right-click menu; no
+            // separate button is kept in the strip.
+            return None;
         }
         let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
         let input = overlay.review_box.clone()?;
+        let to_new = overlay.review_to_new;
         Some(
             v_flex()
                 .flex_shrink_0()
@@ -552,15 +573,35 @@ impl Tty7App {
                                 .label("Save draft")
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     let comment = this.review_box_text(cx);
-                                    this.review_save_selection_as_draft(&comment, cx);
+                                    if this.review_save_selection_as_draft(&comment, cx) {
+                                        this.close_review_box(cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("diff-review-cancel")
+                                .label("Cancel")
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.close_review_box(cx);
                                 })),
                         )
                         .child(
                             Button::new("diff-review-send")
-                                .label("Attach to agent")
-                                .on_click(cx.listener(|this, _, window, cx| {
+                                .label(if to_new {
+                                    "Send to new agent"
+                                } else {
+                                    "Attach to agent"
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     let comment = this.review_box_text(cx);
-                                    let _ = this.review_send_selection_to_agent(&comment, window, cx);
+                                    let sent = if to_new {
+                                        this.review_send_to_new_agent(&comment, window, cx)
+                                    } else {
+                                        this.review_send_selection_to_agent(&comment, window, cx)
+                                    };
+                                    if sent.is_ok() && to_new {
+                                        this.close_review_box(cx);
+                                    }
                                 })),
                         ),
                 )
@@ -815,6 +856,15 @@ impl Tty7App {
                 .track_focus(&focus_handle)
                 .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                     if ev.keystroke.key.as_str() == "escape" {
+                        let had_box = this
+                            .tabs
+                            .get(this.active)
+                            .and_then(|t| t.diff_overlay.as_ref())
+                            .is_some_and(|o| o.review_box.is_some());
+                        if had_box {
+                            this.close_review_box(cx);
+                            return;
+                        }
                         this.close_diff_overlay(window, cx);
                     }
                     // The overlay takes focus when a row is dragged, so this is
@@ -1334,6 +1384,29 @@ impl Tty7App {
             if new_document {
                 overlay.list.scroll_to(gpui::ListOffset::default());
             }
+            // A jump asked to reveal its selection: scroll the first covered
+            // row to the top once rows exist, then consume the request.
+            if overlay.reveal_selection && !rows.is_empty() {
+                overlay.reveal_selection = false;
+                if let Some(sel) = overlay.selection.clone() {
+                    let (start, end) = if sel.anchor <= sel.head {
+                        (sel.anchor, sel.head)
+                    } else {
+                        (sel.head, sel.anchor)
+                    };
+                    if let Some(ix) = rows.iter().position(|row| match row {
+                        DiffRow::Split { at, .. } | DiffRow::Unified { at, .. } => {
+                            at.path.as_ref() == sel.path && start <= at.id && at.id <= end
+                        }
+                        _ => false,
+                    }) {
+                        overlay.list.scroll_to(gpui::ListOffset {
+                            item_ix: ix,
+                            offset_in_item: px(0.),
+                        });
+                    }
+                }
+            }
             overlay.rows = Rc::new(rows);
             overlay.rows_key = Some(key);
         } else if let Some(held) = overlay.rows_key.as_mut() {
@@ -1755,6 +1828,28 @@ fn copy_menu(
                     app.update(cx, |this, cx| this.copy_diff_selection(cx)).ok();
                 }
             }))
+            .item(
+                PopupMenuItem::new(t(L10nKey::DiffReviewInNewAgent)).on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.open_review_box(true, window, cx);
+                        })
+                        .ok();
+                    }
+                }),
+            )
+            .item(
+                PopupMenuItem::new(t(L10nKey::DiffReviewAttach)).on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.open_review_box(false, window, cx);
+                        })
+                        .ok();
+                    }
+                }),
+            )
         })
         .into_any_element()
 }
@@ -2153,7 +2248,7 @@ fn diff_unified_row(
 /// Which layout the overlay draws. One setting for the window, not one per
 /// overlay: VS Code's `diffEditor.renderSideBySide` is global for the same
 /// reason — re-picking on every open is a chore, not a choice.
-fn view_mode(cx: &gpui::App) -> DiffViewMode {
+pub(crate) fn view_mode(cx: &gpui::App) -> DiffViewMode {
     cx.try_global::<Config>()
         .map(|cfg| cfg.diff_view)
         .unwrap_or_default()
@@ -3778,6 +3873,8 @@ mod selection_gpui_tests {
                 preview: None,
                 preview_loading: None,
                 review_box: None,
+            review_to_new: false,
+            reveal_selection: false,
                 selection: None,
                 selecting: false,
                 list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))

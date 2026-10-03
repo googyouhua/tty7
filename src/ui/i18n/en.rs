@@ -1547,6 +1547,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffViewSplit => "Side by Side",
         L10nKey::DiffViewUnified => "Unified",
         L10nKey::DiffCopySelection => "Copy Selected Lines",
+        L10nKey::DiffReviewInNewAgent => "Review in new agent…",
+        L10nKey::DiffReviewAttach => "Attach to agent…",
         L10nKey::PendingConnecting => "Connecting to {machine}…",
         L10nKey::PendingUnreachable => "Could not reach {machine}",
         L10nKey::WorktreePromptNeedsName => "The worktree needs a name",
@@ -2013,6 +2015,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
         L10nKey::AppNoAgentOnPath => "No coding agent was found on this machine's PATH",
+        L10nKey::ReviewAgentTimeout => "The new agent did not start in time — try again.",
         L10nKey::AppNoAgentSeenHere => {
             "No coding agent has run in this workspace yet — start one by hand once and it will be offered here"
         }

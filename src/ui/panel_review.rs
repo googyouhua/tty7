@@ -134,36 +134,105 @@ impl Tty7App {
                 d.path.clone(),
                 d.lines.clone(),
             );
-            body = body.child(
-                h_flex()
-                    .id(("panel-review-draft", i))
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(8.))
-                    .py(px(2.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .truncate()
-                            .child(format!("{} {} — {}", d.path, d.lines, d.comment)),
-                    )
-                    .child(
-                        div()
-                            .id(("panel-review-draft-del", i))
-                            .text_sm()
-                            .px(px(6.))
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().accent.opacity(0.12)))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.review.remove_draft(&tag, &path, &lines);
-                                cx.notify();
-                            }))
-                            .child("Delete"),
-                    ),
-            );
+            let is_editing = self
+                .review
+                .editing_key()
+                .is_some_and(|k| k == (tag.clone(), path.clone(), lines.clone()));
+            let accent = cx.theme().accent;
+            let (jump_tag, jump_path, jump_lines) = (tag.clone(), path.clone(), lines.clone());
+            let mut row = h_flex()
+                .id(("panel-review-draft", i))
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .py(px(2.))
+                .child(
+                    div()
+                        .id(("panel-review-draft-jump", i))
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .truncate()
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(accent))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.review_jump_to_draft(
+                                &jump_tag,
+                                &jump_path,
+                                &jump_lines,
+                                window,
+                                cx,
+                            );
+                        }))
+                        .child(format!("{} {} — {}", d.path, d.lines, d.comment)),
+                );
+            {
+                let (tag, path, lines) = (tag.clone(), path.clone(), lines.clone());
+                row = row.child(
+                    div()
+                        .id(("panel-review-draft-edit", i))
+                        .text_sm()
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().accent.opacity(0.12)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.review_edit_draft(&tag, &path, &lines, window, cx);
+                        }))
+                        .child(if is_editing { "Close" } else { "Edit" }),
+                );
+            }
+            {
+                let (tag, path, lines) = (tag.clone(), path.clone(), lines.clone());
+                row = row.child(
+                    div()
+                        .id(("panel-review-draft-del", i))
+                        .text_sm()
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().accent.opacity(0.12)))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.review.remove_draft(&tag, &path, &lines);
+                            cx.notify();
+                        }))
+                        .child("Delete"),
+                );
+            }
+            body = body.child(row);
+            if is_editing {
+                if let Some(input) = self.review.edit_box() {
+                    body = body.child(
+                        v_flex()
+                            .gap(px(6.))
+                            .px(px(8.))
+                            .py(px(4.))
+                            .child(gpui_component::input::Input::new(&input))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        Button::new(("panel-review-draft-save", i))
+                                            .label("Save")
+                                            .on_click(cx.listener(
+                                                move |this, _, _window, cx| {
+                                                    this.review_save_edit(cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new(("panel-review-draft-send", i))
+                                            .label("Send to new agent")
+                                            .on_click(cx.listener(
+                                                move |this, _, window, cx| {
+                                                    this.review_send_edit(window, cx);
+                                                },
+                                            )),
+                                    ),
+                            ),
+                    );
+                }
+            }
         }
         body = body.child(
             div()
