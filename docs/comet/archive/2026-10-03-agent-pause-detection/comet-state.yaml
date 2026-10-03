@@ -1,9 +1,9 @@
 schema: comet.native.v4
 name: agent-pause-detection
 language: en
-phase: verify
-status: await-user
-state_version: 24
+phase: archive
+status: done
+state_version: 28
 brief: brief.md
 document_constraints_version: 1
 shape_confirmation_hash: db90a1adc58e890a6547cb2fe5963734f96c31f9dc6dbe4929951bfeeead1af1
@@ -21,9 +21,9 @@ workspace:
   isolation: worktree
   change_branch: comet/agent-pause-detection
   target_branch: main
-  finish: null
+  finish: push
 loop:
-  stage: await-user
+  stage: done
   goal_cycle: 4
   iteration: 1
   attempt: 1
@@ -32,7 +32,7 @@ loop:
   no_progress_count: 0
   execution_failure_count: 0
   previous_unresolved_ids: []
-  next_action: confirm-skill-coordinated-pass
+  next_action: null
 acceptance:
   - id: A1
     source: brief.md
@@ -108,14 +108,7 @@ builder_handoff:
   known_limits_truncated: false
   review: null
   submitted_at: 2026-10-03T00:48:27.067Z
-blockers:
-  - owner: user
-    reason:
-      text: The generic Skill bridge cannot prove an independent Verifier execution;
-        user confirmation is required before Archive.
-      truncated: false
-    acceptance_ids: []
-    resolution_action: await-user
+blockers: []
 verification:
   candidate_id: 1e43f0bd-47ac-4212-bf6c-4937e618390e
   identity_provider: skill-coordinated
@@ -155,5 +148,5 @@ history_overflow:
     recovery: 0
 verification_result: pass
 verification_report: verification.md
-archived: false
+archived: true
 created_at: 2026-10-02T08:39:08.784Z
