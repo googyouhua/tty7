@@ -380,6 +380,7 @@ fn desired_node_from_session(layout: &SessionPane, remote_window: bool) -> Optio
             agent,
             agent_session_id,
             agent_launch_argv,
+            role,
         } => {
             let pane = (*pane_id)?;
             if remote_window && ssh_spec.is_some() {
@@ -395,6 +396,7 @@ fn desired_node_from_session(layout: &SessionPane, remote_window: bool) -> Optio
                         agent,
                         session_id: agent_session_id.clone(),
                         launch_argv: agent_launch_argv.clone(),
+                        role: role.clone(),
                         status: None,
                     }),
                     shell: shell.clone(),
@@ -444,6 +446,10 @@ fn desired_node(pane: &Pane, remote_window: bool, cx: &App) -> Option<DesiredNod
                     agent,
                     session_id: session.as_ref().and_then(|s| s.session_id.clone()),
                     launch_argv: session.as_ref().and_then(|s| s.launch_argv.clone()),
+                    // A live view carries no role tag: detection only ever
+                    // sees the base agent. The tag travels on the spawn and
+                    // the session record instead.
+                    role: None,
                     status: None,
                 }
             });
@@ -471,6 +477,7 @@ fn desired_node(pane: &Pane, remote_window: bool, cx: &App) -> Option<DesiredNod
                 agent,
                 session_id: spawn.agent_session_id.clone(),
                 launch_argv: spawn.agent_launch_argv.clone(),
+                role: spawn.role.clone(),
                 status: None,
             });
             Some(DesiredNode::Leaf {
@@ -2089,6 +2096,7 @@ fn session_pane_from_node(node: &PaneNode, panes: &[PaneRecord]) -> SessionPane 
                 agent: agent.as_ref().map(|a| a.agent),
                 agent_session_id: agent.as_ref().and_then(|a| a.session_id.clone()),
                 agent_launch_argv: agent.as_ref().and_then(|a| a.launch_argv.clone()),
+                role: agent.as_ref().and_then(|a| a.role.clone()),
             }
         }
         PaneNode::Split { axis, ratio, a, b } => SessionPane::Split {
@@ -3464,6 +3472,7 @@ mod tests {
             agent: crate::core::cli_agent::CLIAgent::Claude,
             session_id: Some("abc".into()),
             launch_argv: None,
+            role: None,
             status: None,
         });
         let mut shell_pane = PaneRecord::new(7);
@@ -5759,6 +5768,7 @@ mod tests {
                     agent: CLIAgent::Claude,
                     session_id: Some("sid".into()),
                     launch_argv: Some(vec!["claude".into()]),
+                    role: None,
                     status: None,
                 }),
                 ..PaneRecord::new(2)
@@ -6038,6 +6048,7 @@ mod tests {
             agent: Some(crate::core::cli_agent::CLIAgent::Claude),
             agent_session_id: Some(format!("sess-{pane}")),
             agent_launch_argv: None,
+            role: None,
         };
         let layout = SessionPane::Split {
             axis: SessionAxis::Horizontal,
@@ -6076,6 +6087,7 @@ mod tests {
                 agent: None,
                 agent_session_id: None,
                 agent_launch_argv: None,
+                role: None,
             }),
         };
         assert_eq!(

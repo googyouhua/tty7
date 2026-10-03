@@ -449,6 +449,11 @@ pub struct TerminalView {
     agent_detection_armed: bool,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
     last_agent_session: (Option<String>, Option<Vec<String>>),
+    /// The custom role slug this pane was launched for, if any. Detection
+    /// only ever sees the base agent, so the tag is seeded from the spawn
+    /// when the view is built and travels back out on session save — a slug
+    /// whose role file is gone reads as no role (see `role_display`).
+    role: Option<String>,
     agent_turn_started: Option<std::time::Instant>,
     /// The "finished" notification for a turn that just reached `Done`,
     /// waiting out [`AGENT_DONE_SETTLE`]. Dropped — and so never sent — when
@@ -1922,6 +1927,7 @@ impl TerminalView {
             agent_detection_armed,
             last_agent_status: None,
             last_agent_session: (None, None),
+            role: None,
             agent_turn_started: None,
             pending_finish_notice: None,
             agent_was_rich: false,
@@ -2172,6 +2178,17 @@ impl TerminalView {
 
     pub fn agent(&self) -> Option<crate::core::cli_agent::CLIAgent> {
         self.terminal.foreground_agent()
+    }
+
+    /// The custom role slug this pane was launched for, if any — seeded from
+    /// the spawn, never detected. Task 4's starters menu and session save
+    /// read it from here.
+    pub fn set_role(&mut self, role: Option<String>) {
+        self.role = role;
+    }
+
+    pub fn role(&self) -> Option<&str> {
+        self.role.as_deref()
     }
 
     pub fn agent_session(&self) -> Option<crate::core::cli_agent::AgentSessionState> {

@@ -391,6 +391,7 @@ mod tests {
                     agent: CLIAgent::Claude,
                     session_id: None,
                     launch_argv: None,
+                    role: None,
                     status: None,
                 }),
                 ..PaneRecord::new(2)

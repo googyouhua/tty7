@@ -353,6 +353,22 @@ impl Tty7App {
             log::warn!("no pane opened for role {}; not launching it", role.slug);
             return;
         };
+        // Tag the pane with the role: the slug for display and restore, the
+        // base agent for detection-independent bookkeeping, and the launch
+        // argv the resume derives its flags from. A pane that is still
+        // connecting carries it on its spawn; one already up (a local shell)
+        // is detected as its base agent from here on — the live tag belongs
+        // to the display-side work, not this spawn metadata.
+        if let PaneSlot::Connecting(pending) = &slot {
+            let argv: Vec<String> =
+                role.launch.split_whitespace().map(str::to_string).collect();
+            let (slug, base) = (role.slug.clone(), role.base);
+            pending.update(cx, |pending, _| {
+                pending.spawn.role = Some(slug);
+                pending.spawn.agent = Some(base);
+                pending.spawn.agent_launch_argv = Some(argv);
+            });
+        }
         run_when_ready(&slot, command, cx);
         // Recency only, under the role's own key — see `role_frecency_key`.
         self.update_config(cx, |cfg| {

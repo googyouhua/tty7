@@ -275,7 +275,7 @@ git commit -m "feat: offer roles in palette with LaunchRole actions"
 
 **Interfaces:**
 - Consumes: Task 2 `role_launch_line`, `role_resume_line`; existing `PendingSpawn.agent_launch_argv`, `run_when_ready`.
-- Produces: `PendingSpawn.role: Option<String>`; `fn launch_role(role: &AgentRole, ...)`; `fn role_display(role_name: Option<&str>, agent: Option<CLIAgent>) -> String` used by Task 4.
+- Produces: `PendingSpawn.role: Option<String>`; `fn launch_role(role: &AgentRole, ...)`; `fn role_display(role_slug: Option<&str>, agent: Option<CLIAgent>) -> String` (resolves the slug via `find_role`; unknown/deleted slug reads as no role) used by Task 4.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -305,10 +305,14 @@ pub struct PendingSpawn {
 }
 
 // app.rs
-pub(crate) fn role_display(role_name: Option<&str>, agent: Option<CLIAgent>) -> String {
-    match (role_name.map(str::trim).filter(|s| !s.is_empty()), agent) {
+pub(crate) fn role_display(role_slug: Option<&str>, agent: Option<CLIAgent>) -> String {
+    let name = role_slug
+        .map(str::trim)
+        .filter(|slug| !slug.is_empty())
+        .and_then(|slug| find_role(slug).map(|role| role.name));
+    match (name, agent) {
         (Some(name), Some(a)) => format!("{name} ({})", a.display_name()),
-        (Some(name), None) => name.to_string(),
+        (Some(name), None) => name,
         (None, Some(a)) => a.display_name().to_string(),
         (None, None) => String::from("Shell"),
     }
@@ -391,7 +395,7 @@ pub(crate) fn plan_role_first_send(role: &AgentRole) -> Option<RoleFirstSend> {
 }
 ```
 
-`TwoPhase` execution: send `launch` via `run_when_ready`; queue `followup` via a second `run_when_ready`-style send using `submit_bytes(&followup)` after a short delay, then `capture --plain` check and resend Enter when the line is still sitting on the prompt (the swallowed-Enter rule from `skills/tty7/SKILL.md`). Starters: pane right-click `Send starter: <label>` rows plus palette entries, each sending `submit_bytes(&starter.prompt)`.
+`TwoPhase` execution: send `launch` via `run_when_ready`; queue `followup` via a second `run_when_ready`-style send using `submit_bytes(&followup)` after a short delay, then `capture --plain` check and resend Enter when the line is still sitting on the prompt (the swallowed-Enter rule from `skills/tty7/SKILL.md`). Starters: pane right-click `Send starter: <label>` rows plus palette entries, each sending `submit_bytes(&starter.prompt)`. The starters submenu is headed with the pane's role via `role_display(view.role(), view.agent())` — this is `role_display`'s first production caller (it ships tested-but-uncalled from Task 3); a pane with no role shows no header, only the starter rows.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
