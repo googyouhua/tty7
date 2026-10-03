@@ -69,6 +69,31 @@ The key is your command's name; the value is one of the slugs above (`claude`,
 `droid`, `pi`, `auggie`, `hermes`, `vibe`, `antigravity`, `grok`, `qwen`,
 `omp`, `kimi`, `qodercli`, `qoderclicn`, `crush`, `codebuddy`, `empryo`, `prime-agent`).
 
+### Custom roles
+
+A role is a named job bound to one of the agents above, with its own launch
+command and opening prompt — e.g. a `Frontend Reviewer` that runs
+`claude --model opus` and starts every session with review instructions.
+Manage them under **Settings → Agents**: each role holds a name, a base
+agent, a launch command, a description, instructions sent first on every
+fresh launch, and up to three conversation starters you can send from the
+pane's right-click menu.
+
+Roles live outside `config.json`, one directory per role:
+
+```
+~/.config/tty7/roles/frontend-reviewer/role.json
+```
+
+A role launches from Search Everywhere as `Role: <name>` (bindable as
+`LaunchRole:<slug>`), and otherwise behaves exactly like its base agent:
+same avatar, status dots, notifications, resume, and history.
+
+Remote caveat: role definitions are per machine. Launching a local role
+into a remote workspace just types its launch line over there, so the
+remote machine needs the same CLI installed — the same rule that already
+applies to wrappers named in a local `agent_launch`.
+
 ## Quick launch
 
 Every agent tty7 finds on your `PATH` is one row away in Search Everywhere: **Agent:
