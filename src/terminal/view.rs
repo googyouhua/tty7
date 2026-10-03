@@ -27,8 +27,9 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
-    OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
-    SendBackTab, SendRoleStarter, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
+    OpenLinkUnderPointer, OpenLinkWithDefaultApp, OpenRoleAgent, RevealLinkUnderPointer,
+    SaveAgentLaunchArgs, SendBackTab, SendRoleStarter, SendTab, SplitDown, SplitRight,
+    ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
@@ -8191,6 +8192,21 @@ impl Render for TerminalView {
                         )
                     }
                     None => menu,
+                };
+
+                // A way into roles from the pane itself: opens Search
+                // pre-filtered to role rows, which already apply the right
+                // offering rules for this workspace. Shown whenever at
+                // least one role exists.
+                let has_roles = crate::core::agent_roles::roles_dir()
+                    .map(|dir| !crate::core::agent_roles::load_roles(&dir).is_empty())
+                    .unwrap_or(false);
+                let menu = match has_roles {
+                    true => menu.menu(
+                        t(L10nKey::AppMenuOpenRoleAgent),
+                        Box::new(OpenRoleAgent),
+                    ),
+                    false => menu,
                 };
 
                 // A pane running a role that defines conversation starters

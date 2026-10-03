@@ -72,19 +72,22 @@ pub(crate) fn role_for_launch_action(action: &str, roles: &[AgentRole]) -> Optio
         .cloned()
 }
 
-pub(crate) fn offered_roles(
-    roles: Vec<AgentRole>,
-    path: &std::ffi::OsStr,
-    seen_bases: Option<&[String]>,
-) -> Vec<AgentRole> {
-    roles
-        .into_iter()
-        .filter(|r| match seen_bases {
-            Some(seen) => seen.iter().any(|s| s.eq_ignore_ascii_case(r.base.slug())),
-            None => role_launch_program(r)
-                .is_some_and(|p| crate::core::cli_agent::program_on_path(&p, path)),
-        })
-        .collect()
+/// Roles on offer: on this computer, those whose launch program is on
+/// `PATH`; on a remote workspace, all of them. The far `PATH` cannot be
+/// asked, and roles are user-curated a handful — a missing binary fails
+/// visibly in the pane it was typed into, which beats hiding a role whose
+/// agent is installed over there.
+pub(crate) fn offered_roles(roles: Vec<AgentRole>, path: Option<&std::ffi::OsStr>) -> Vec<AgentRole> {
+    match path {
+        None => roles,
+        Some(path) => roles
+            .into_iter()
+            .filter(|r| {
+                role_launch_program(r)
+                    .is_some_and(|p| crate::core::cli_agent::program_on_path(&p, path))
+            })
+            .collect(),
+    }
 }
 
 pub(crate) fn role_launch_line(role: &AgentRole) -> String {
@@ -374,19 +377,21 @@ impl Tty7App {
     /// The roles this window's quick launch offers, most-used-first — the
     /// mirror of [`Self::offered_agents`]. On this computer that is the roles
     /// whose launch program is on `PATH`; on a remote workspace, whose `PATH`
-    /// cannot be asked, the roles whose base agent was seen running there.
+    /// cannot be asked, every role — a missing binary fails visibly where it
+    /// is typed instead of hiding the role.
     pub(crate) fn offered_roles_here(&self, cx: &App) -> Vec<AgentRole> {
         let Some(dir) = crate::core::agent_roles::roles_dir() else {
             return Vec::new();
         };
         let loaded = crate::core::agent_roles::load_roles(&dir);
-        let candidates = match WorkspaceStore::all(cx)
+        let remote = WorkspaceStore::all(cx)
             .get(self.workspace)
-            .filter(|view| view.is_remote())
-        {
-            Some(view) => offered_roles(loaded, "".as_ref(), Some(&view.seen_agents)),
-            None => offered_roles(loaded, &std::env::var_os("PATH").unwrap_or_default(), None),
+            .is_some_and(|view| view.is_remote());
+        let path = match remote {
+            true => None,
+            false => Some(std::env::var_os("PATH").unwrap_or_default()),
         };
+        let candidates = offered_roles(loaded, path.as_deref());
         let cfg = cx.global::<Config>();
         let now = unix_now();
         let score = |role: &AgentRole| {
@@ -901,21 +906,21 @@ mod tests {
             role("good", CLIAgent::Claude, "cc --fast"),
             role("missing", CLIAgent::Claude, "nope --fast"),
         ];
-        let offered = offered_roles(roles, dir.path().as_os_str(), None);
+        let offered = offered_roles(roles, Some(dir.path().as_os_str()));
         assert_eq!(
             offered.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(),
             vec!["good"]
         );
-        // A remote workspace cannot answer for its PATH: the roles whose
-        // base agent was seen there are offered instead.
+        // A remote workspace cannot answer for its PATH, so every role is
+        // offered: a missing binary fails visibly where it is typed.
         let roles = vec![
-            role("seen", CLIAgent::Codex, "nope"),
-            role("unseen", CLIAgent::Claude, "nope"),
+            role("unseen-a", CLIAgent::Codex, "nope"),
+            role("unseen-b", CLIAgent::Claude, "nope"),
         ];
-        let offered = offered_roles(roles, "".as_ref(), Some(&["codex".to_string()]));
+        let offered = offered_roles(roles, None);
         assert_eq!(
             offered.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(),
-            vec!["seen"]
+            vec!["unseen-a", "unseen-b"]
         );
     }
 

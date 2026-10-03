@@ -2269,6 +2269,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuCopySessionId => "セッション ID をコピー",
         L10nKey::AppMenuForkSession => "セッションをフォーク",
         L10nKey::AppMenuSaveAgentLaunchArgs => "現在の起動引数をデフォルトに設定",
+        L10nKey::AppMenuOpenRoleAgent => "ロールエージェントを開く…",
         L10nKey::AppMenuClosePaneTab => "閉じる",
         L10nKey::AppMenuCloseOtherTabs => "他のタブを閉じる",
         L10nKey::AppMenuCloseTabsRight => "右側のタブを閉じる",

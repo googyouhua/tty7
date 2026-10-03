@@ -2053,6 +2053,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuCopySessionId => "复制会话 ID",
         L10nKey::AppMenuForkSession => "Fork 会话",
         L10nKey::AppMenuSaveAgentLaunchArgs => "将当前启动参数设为默认",
+        L10nKey::AppMenuOpenRoleAgent => "打开角色 agent…",
         L10nKey::AppMenuClosePaneTab => "关闭",
         L10nKey::AppMenuCloseOtherTabs => "关闭其他标签页",
         L10nKey::AppMenuCloseTabsRight => "关闭右侧标签页",

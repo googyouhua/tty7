@@ -189,3 +189,9 @@ pub struct SendRoleStarter {
     pub slug: String,
     pub index: usize,
 }
+
+/// Open Search Everywhere pre-filtered to role rows, so a role is one
+/// right-click away even where its quick-launch rows cannot be listed.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = tty7, no_json)]
+pub struct OpenRoleAgent;

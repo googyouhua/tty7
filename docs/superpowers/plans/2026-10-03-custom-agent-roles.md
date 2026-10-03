@@ -541,3 +541,19 @@ git commit -m "docs: custom agent roles usage and remote caveat"
 - Produces: `role_launch_argv(role)`, `model_choices(base)`, `model_flag(base)`; no other task depends on it.
 
 **Steps:** core field + sources + tests → GUI form + launch wiring → i18n → suites → commit.
+
+---
+
+### Task 8: Remote offering without seen-gate (user-approved 2026-10-03)
+
+Remote workspaces offer every role instead of only seen bases (far PATH
+unaskable; roles are few; missing binaries fail visibly). Files:
+`src/ui/agent_launch.rs` (`offered_roles` takes `Option<&OsStr>`, tests
+updated). Docs: spec §7 + overview remote caveat.
+
+### Task 9: Pane right-click opener (user-approved 2026-10-03)
+
+`OpenRoleAgent` action + "Open role agent…" pane menu item opening Search
+Everywhere pre-filtered to `Role:` rows (uniform offering rules everywhere).
+Files: `src/core/actions.rs`, `src/terminal/view.rs`, `src/ui/app.rs`,
+i18n `AppMenuOpenRoleAgent` ×3.

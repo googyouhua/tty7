@@ -99,6 +99,7 @@ does not host models, so the role maps onto: identity + launch + prompts.
 
 ## 6. Model selection (added 2026-10-03, user-approved)
 
+
 - Role schema gains optional `model`: empty means "the launch line and the
   base default decide", exactly today's behavior.
 - `models.json` beside `roles/` maps base slugs to `{flag, models[]}`. It is
@@ -119,3 +120,13 @@ does not host models, so the role maps onto: identity + launch + prompts.
   so a resumed session keeps its model.
 - Explicitly out: vendor API fetching, model capability metadata, per-model
   pricing display.
+
+## 7. Remote offering + pane opener (added 2026-10-03, user-approved)
+
+- Remote workspaces offer every role: the far `PATH` cannot be asked and
+  roles are user-curated few, so a missing binary fails visibly in the pane
+  instead of hiding the role. (A live server-side PATH check would need a
+  new dialect-gated protocol request plus async offering; parked.)
+- Pane right-click gains "Open role agent…", which opens Search Everywhere
+  pre-filtered to `Role:` rows — so the same offering rules apply in every
+  workspace without duplicating them in the menu.

@@ -10336,6 +10336,11 @@ impl Render for Tty7App {
                     this.save_agent_launch_args(window, cx)
                 }))
                 .on_action(cx.listener(
+                    |this, _: &OpenRoleAgent, window, cx| {
+                        this.open_search(SearchTab::Terminals, "Role:", window, cx)
+                    },
+                ))
+                .on_action(cx.listener(
                     |this, action: &SendRoleStarter, window, cx| {
                         this.send_role_starter(&action.slug, action.index, window, cx)
                     },

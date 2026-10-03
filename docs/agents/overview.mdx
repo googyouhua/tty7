@@ -91,10 +91,12 @@ A role launches from Search Everywhere as `Role: <name>` (bindable as
 `LaunchRole:<slug>`), and otherwise behaves exactly like its base agent:
 same avatar, status dots, notifications, resume, and history.
 
-Remote caveat: role definitions are per machine. Launching a local role
-into a remote workspace just types its launch line over there, so the
-remote machine needs the same CLI installed — the same rule that already
-applies to wrappers named in a local `agent_launch`.
+Remote caveat: role definitions are per machine. In a remote workspace
+every role is listed (the far `PATH` cannot be checked); launching one
+types its launch line over there, so the remote machine needs the same CLI
+installed — a missing binary fails visibly in the pane. Right-clicking a
+pane offers "Open role agent…", which jumps to Search pre-filtered to
+`Role:` rows.
 
 ## Quick launch
 

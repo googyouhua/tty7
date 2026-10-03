@@ -2206,6 +2206,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuCopySessionId => "Copy Session ID",
         L10nKey::AppMenuForkSession => "Fork Session",
         L10nKey::AppMenuSaveAgentLaunchArgs => "Set Current Launch Args as Default",
+        L10nKey::AppMenuOpenRoleAgent => "Open role agent…",
         L10nKey::AppMenuClosePaneTab => "Close",
         L10nKey::AppMenuCloseOtherTabs => "Close Other Tabs",
         L10nKey::AppMenuCloseTabsRight => "Close Tabs to the Right",
