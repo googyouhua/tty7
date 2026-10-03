@@ -57,7 +57,12 @@ impl Tty7App {
     }
 
     /// Branch names for `repo`, re-read every [`BRANCH_TTL`].
-    fn review_branches(&mut self, host: SharedHost, repo: &RepoKey, cx: &mut Context<Self>) -> Vec<String> {
+    fn review_branches(
+        &mut self,
+        host: SharedHost,
+        repo: &RepoKey,
+        cx: &mut Context<Self>,
+    ) -> Vec<String> {
         let entry = self.review.branch_list_mut(repo);
         let due = !entry.loading && entry.read_at.is_none_or(|t| t.elapsed() > BRANCH_TTL);
         let branches = entry.branches.clone();
@@ -79,8 +84,7 @@ impl Tty7App {
                     entry.loading = false;
                     entry.read_at = Some(Instant::now());
                     if let Some(raw) = out {
-                        let branches =
-                            crate::ui::review_state::BranchList::parse(&raw);
+                        let branches = crate::ui::review_state::BranchList::parse(&raw);
                         if entry.branches != branches {
                             entry.branches = branches;
                             cx.notify();
@@ -101,9 +105,7 @@ impl Tty7App {
         let branches = self.review_branches(host.clone(), &repo, cx);
         let head_info = self.github_branch(host.clone(), &repo, cx);
         let current = head_info.as_ref().map(|h| h.branch.as_str());
-        let upstream = head_info
-            .as_ref()
-            .and_then(|h| h.upstream.as_deref());
+        let upstream = head_info.as_ref().and_then(|h| h.upstream.as_deref());
         let (base, head) = self
             .review
             .resolve_selection(&repo, current, upstream)
@@ -129,11 +131,7 @@ impl Tty7App {
             body = body.child(self.review_files_section(host.clone(), &repo, &base, &head, cx));
         }
         for (i, d) in self.review.all_drafts_sorted().iter().take(20).enumerate() {
-            let (tag, path, lines) = (
-                d.source_tag.clone(),
-                d.path.clone(),
-                d.lines.clone(),
-            );
+            let (tag, path, lines) = (d.source_tag.clone(), d.path.clone(), d.lines.clone());
             let is_editing = self
                 .review
                 .editing_key()
@@ -214,20 +212,16 @@ impl Tty7App {
                                     .child(
                                         Button::new(("panel-review-draft-save", i))
                                             .label("Save")
-                                            .on_click(cx.listener(
-                                                move |this, _, _window, cx| {
-                                                    this.review_save_edit(cx);
-                                                },
-                                            )),
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                this.review_save_edit(cx);
+                                            })),
                                     )
                                     .child(
                                         Button::new(("panel-review-draft-send", i))
                                             .label("Send to new agent")
-                                            .on_click(cx.listener(
-                                                move |this, _, window, cx| {
-                                                    this.review_send_edit(window, cx);
-                                                },
-                                            )),
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.review_send_edit(window, cx);
+                                            })),
                                     ),
                             ),
                     );
@@ -258,7 +252,10 @@ impl Tty7App {
         let repo = repo.clone();
         let current = current;
         let label = if branches.is_empty() {
-            format!("{}: reading branches…", if is_base { "base" } else { "head" })
+            format!(
+                "{}: reading branches…",
+                if is_base { "base" } else { "head" }
+            )
         } else {
             format!("{}: {}", if is_base { "base" } else { "head" }, current)
         };
@@ -266,69 +263,58 @@ impl Tty7App {
             .ghost()
             .small()
             .dropdown_caret(true)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(label),
-            )
+            .child(div().flex_1().min_w_0().truncate().child(label))
             .w_full()
-            .dropdown_menu_with_anchor(
-                gpui::Anchor::TopLeft,
-                move |menu, _window, cx| {
-                    // Read at open time, not at render time: the render-time
-                    // list may still have been loading when this button drew.
-                    let fresh = app
-                        .update(cx, |this, _| {
-                            this.review
-                                .branch_list(&repo)
-                                .map(|l| l.branches.clone())
-                                .unwrap_or_default()
-                        })
-                        .unwrap_or_default();
-                    let mut menu = menu.min_w(px(220.));
-                    if fresh.is_empty() {
-                        return menu.item(PopupMenuItem::label("No branches loaded yet"));
-                    }
-                    for b in &fresh {
-                        let name = b.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(name.clone())
-                                .checked(name == current)
-                                .on_click({
-                                    let app = app.clone();
-                                    let repo = repo.clone();
-                                    move |_, _window, cx| {
-                                        let _ = app.update(cx, |this, cx| {
-                                            let (mut base, mut head) = this
+            .dropdown_menu_with_anchor(gpui::Anchor::TopLeft, move |menu, _window, cx| {
+                // Read at open time, not at render time: the render-time
+                // list may still have been loading when this button drew.
+                let fresh = app
+                    .update(cx, |this, _| {
+                        this.review
+                            .branch_list(&repo)
+                            .map(|l| l.branches.clone())
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                let mut menu = menu.min_w(px(220.));
+                if fresh.is_empty() {
+                    return menu.item(PopupMenuItem::label("No branches loaded yet"));
+                }
+                for b in &fresh {
+                    let name = b.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(name.clone())
+                            .checked(name == current)
+                            .on_click({
+                                let app = app.clone();
+                                let repo = repo.clone();
+                                move |_, _window, cx| {
+                                    let _ = app.update(cx, |this, cx| {
+                                        let (mut base, mut head) =
+                                            this.review.selection_for(&repo).unwrap_or_default();
+                                        if base.is_empty() || head.is_empty() {
+                                            // First pick seeds from the resolved pair.
+                                            let resolved = this
                                                 .review
-                                                .selection_for(&repo)
+                                                .resolve_selection(&repo, None, None)
                                                 .unwrap_or_default();
-                                            if base.is_empty() || head.is_empty() {
-                                                // First pick seeds from the resolved pair.
-                                                let resolved = this
-                                                    .review
-                                                    .resolve_selection(&repo, None, None)
-                                                    .unwrap_or_default();
-                                                base = resolved.0;
-                                                head = resolved.1;
-                                            }
-                                            if is_base {
-                                                base = name.clone();
-                                            } else {
-                                                head = name.clone();
-                                            }
-                                            this.review.set_selection(&repo, base, head);
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        );
-                    }
-                    menu
-                },
-            )
+                                            base = resolved.0;
+                                            head = resolved.1;
+                                        }
+                                        if is_base {
+                                            base = name.clone();
+                                        } else {
+                                            head = name.clone();
+                                        }
+                                        this.review.set_selection(&repo, base, head);
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    );
+                }
+                menu
+            })
             .into_any_element()
     }
 

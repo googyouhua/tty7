@@ -2078,7 +2078,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
         L10nKey::AppNoAgentOnPath => "このマシンの PATH にコーディングエージェントが見つかりません",
-        L10nKey::ReviewAgentTimeout => "新しいエージェントが時間内に起動しませんでした。もう一度お試しください。",
+        L10nKey::ReviewAgentTimeout => {
+            "新しいエージェントが時間内に起動しませんでした。もう一度お試しください。"
+        }
         L10nKey::AppNoAgentSeenHere => {
             "このワークスペースではまだコーディングエージェントが実行されていません — 一度手動で起動すると、ここに表示されます"
         }

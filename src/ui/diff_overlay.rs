@@ -490,9 +490,8 @@ impl Tty7App {
             return;
         }
         let active = self.active;
-        let box_entity = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Comment on the selected diff…")
-        });
+        let box_entity =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Comment on the selected diff…"));
         box_entity.update(cx, |state, cx| state.focus(window, cx));
         if let Some(overlay) = self
             .tabs
@@ -578,13 +577,11 @@ impl Tty7App {
                                     }
                                 })),
                         )
-                        .child(
-                            Button::new("diff-review-cancel")
-                                .label("Cancel")
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.close_review_box(cx);
-                                })),
-                        )
+                        .child(Button::new("diff-review-cancel").label("Cancel").on_click(
+                            cx.listener(|this, _, _window, cx| {
+                                this.close_review_box(cx);
+                            }),
+                        ))
                         .child(
                             Button::new("diff-review-send")
                                 .label(if to_new {
@@ -839,10 +836,7 @@ impl Tty7App {
                 let column_h = if cfg!(target_os = "macos") {
                     None
                 } else {
-                    Some(
-                        window.viewport_size().height.as_f32()
-                            - crate::ui::app::TITLE_BAR_HEIGHT,
-                    )
+                    Some(window.viewport_size().height.as_f32() - crate::ui::app::TITLE_BAR_HEIGHT)
                 };
                 match column_h {
                     Some(h) => shell.h(px(h.max(200.))).w_full(),
@@ -1377,8 +1371,7 @@ impl Tty7App {
             let new_document = overlay.rows_key.as_ref().is_none_or(|held| {
                 !Arc::ptr_eq(&held.snap, from.snap)
                     || held.focused != from.focused
-                    || held.preview.as_ref().map(Arc::as_ptr)
-                        != from.preview.map(Arc::as_ptr)
+                    || held.preview.as_ref().map(Arc::as_ptr) != from.preview.map(Arc::as_ptr)
             });
             resync_list(&overlay.list, &overlay.rows, &rows);
             if new_document {
@@ -1839,17 +1832,15 @@ fn copy_menu(
                     }
                 }),
             )
-            .item(
-                PopupMenuItem::new(t(L10nKey::DiffReviewAttach)).on_click({
-                    let app = app.clone();
-                    move |_, window, cx| {
-                        app.update(cx, |this, cx| {
-                            this.open_review_box(false, window, cx);
-                        })
-                        .ok();
-                    }
-                }),
-            )
+            .item(PopupMenuItem::new(t(L10nKey::DiffReviewAttach)).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    app.update(cx, |this, cx| {
+                        this.open_review_box(false, window, cx);
+                    })
+                    .ok();
+                }
+            }))
         })
         .into_any_element()
 }
@@ -3873,8 +3864,8 @@ mod selection_gpui_tests {
                 preview: None,
                 preview_loading: None,
                 review_box: None,
-            review_to_new: false,
-            reveal_selection: false,
+                review_to_new: false,
+                reveal_selection: false,
                 selection: None,
                 selecting: false,
                 list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
@@ -4026,7 +4017,10 @@ mod selection_gpui_tests {
         git(&["config", "user.name", "t"]);
         let mut big = String::new();
         for i in 0..200 {
-            big.push_str(&format!("\tfnock_{i} → “nock” 《中文》 {}\n", "x".repeat(300)));
+            big.push_str(&format!(
+                "\tfnock_{i} → “nock” 《中文》 {}\n",
+                "x".repeat(300)
+            ));
         }
         std::fs::write(root.join("a.rs"), &big).unwrap();
         std::fs::write(root.join("b.md"), "# title\n\nbody line\n").unwrap();
@@ -4035,7 +4029,10 @@ mod selection_gpui_tests {
         git(&["checkout", "--quiet", "-b", "feat"]);
         let mut big2 = String::new();
         for i in 0..200 {
-            big2.push_str(&format!("\tfnock_{i} → “mock” 《中文改》 {}\n", "y".repeat(300)));
+            big2.push_str(&format!(
+                "\tfnock_{i} → “mock” 《中文改》 {}\n",
+                "y".repeat(300)
+            ));
         }
         std::fs::write(root.join("a.rs"), &big2).unwrap();
         std::fs::write(root.join("c.txt"), "new file\n").unwrap();

@@ -288,10 +288,7 @@ impl DiffSelection {
         match (nos.iter().min(), nos.iter().max()) {
             (Some(&lo), Some(&hi)) if lo == hi => format!("L{lo}"),
             (Some(&lo), Some(&hi)) => format!("L{lo}-{hi}"),
-            _ => format!(
-                "hunk {}:{}-{}:{}",
-                start.hunk, start.row, end.hunk, end.row
-            ),
+            _ => format!("hunk {}:{}-{}:{}", start.hunk, start.row, end.hunk, end.row),
         }
     }
 }
@@ -341,28 +338,13 @@ mod tests {
             },
         };
         // Unified rows carry their own numbers straight through.
-        let s = sel(
-            DiffViewMode::Unified,
-            None,
-            (0, 1),
-            (0, 2),
-        );
+        let s = sel(DiffViewMode::Unified, None, (0, 1), (0, 2));
         assert_eq!(s.line_label(&hunks), "L2-3");
         // Split view follows the dragged column: the old side names old lines.
-        let s = sel(
-            DiffViewMode::Split,
-            Some(Side::Old),
-            (0, 1),
-            (0, 1),
-        );
+        let s = sel(DiffViewMode::Split, Some(Side::Old), (0, 1), (0, 1));
         assert_eq!(s.line_label(&hunks), "L2");
         // The new side of the same rows names new lines.
-        let s = sel(
-            DiffViewMode::Split,
-            Some(Side::New),
-            (0, 1),
-            (0, 1),
-        );
+        let s = sel(DiffViewMode::Split, Some(Side::New), (0, 1), (0, 1));
         assert_eq!(s.line_label(&hunks), "L2");
     }
 

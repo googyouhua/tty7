@@ -169,12 +169,7 @@ impl ReviewState {
         self.selection.insert(repo.clone(), (base, head));
     }
 
-    pub fn file_list(
-        &self,
-        repo: &RepoKey,
-        base: &str,
-        head: &str,
-    ) -> Option<&FileListCache> {
+    pub fn file_list(&self, repo: &RepoKey, base: &str, head: &str) -> Option<&FileListCache> {
         self.file_lists
             .get(&(repo.clone(), base.to_string(), head.to_string()))
     }
@@ -185,11 +180,8 @@ impl ReviewState {
     }
 
     pub fn draft(&self, source_tag: &str, path: &str, lines: &str) -> Option<&ReviewDraft> {
-        self.drafts.get(&(
-            source_tag.to_string(),
-            path.to_string(),
-            lines.to_string(),
-        ))
+        self.drafts
+            .get(&(source_tag.to_string(), path.to_string(), lines.to_string()))
     }
 
     pub fn update_draft_comment(
@@ -199,11 +191,10 @@ impl ReviewState {
         lines: &str,
         comment: String,
     ) -> bool {
-        match self.drafts.get_mut(&(
-            source_tag.to_string(),
-            path.to_string(),
-            lines.to_string(),
-        )) {
+        match self
+            .drafts
+            .get_mut(&(source_tag.to_string(), path.to_string(), lines.to_string()))
+        {
             Some(d) => {
                 d.comment = comment;
                 true
@@ -220,11 +211,7 @@ impl ReviewState {
         self.edit_box.clone()
     }
 
-    pub fn begin_edit(
-        &mut self,
-        key: (String, String, String),
-        box_entity: Entity<InputState>,
-    ) {
+    pub fn begin_edit(&mut self, key: (String, String, String), box_entity: Entity<InputState>) {
         self.editing = Some(key);
         self.edit_box = Some(box_entity);
     }
@@ -268,21 +255,13 @@ impl ReviewState {
             .or_else(|| current.filter(|c| has(c)).map(str::to_string))
             .unwrap_or_else(|| "HEAD".to_string());
         let base = stored_base.filter(|b| has(b)).or_else(|| {
-            upstream
-                .filter(|u| has(u))
-                .map(str::to_string)
-                .or_else(|| {
-                    ["main", "master", "origin/main", "origin/master"]
-                        .into_iter()
-                        .find(|b| has(b))
-                        .map(str::to_string)
-                        .or_else(|| {
-                            list.branches
-                                .iter()
-                                .find(|b| *b != &head)
-                                .cloned()
-                        })
-                })
+            upstream.filter(|u| has(u)).map(str::to_string).or_else(|| {
+                ["main", "master", "origin/main", "origin/master"]
+                    .into_iter()
+                    .find(|b| has(b))
+                    .map(str::to_string)
+                    .or_else(|| list.branches.iter().find(|b| *b != &head).cloned())
+            })
         })?;
         Some((base, head))
     }

@@ -6991,7 +6991,12 @@ impl Tty7App {
             .find(runs_agent)
     }
 
-    pub(crate) fn deliver_agent_prompt(&mut self, prompt: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn deliver_agent_prompt(
+        &mut self,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.agent_target_leaf(cx) else {
             crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
             return;

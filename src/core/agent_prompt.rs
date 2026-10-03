@@ -62,7 +62,11 @@ pub fn build_review_attach_prompt(
         return None;
     }
     let path = path.trim();
-    let path = if path.is_empty() { "(unknown file)" } else { path };
+    let path = if path.is_empty() {
+        "(unknown file)"
+    } else {
+        path
+    };
     let mut prompt = String::from(
         "Please help with this code review finding. Look at the selected diff and address my comment.",
     );

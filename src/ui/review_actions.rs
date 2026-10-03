@@ -28,8 +28,16 @@ fn source_label(source: &DiffSource) -> String {
 
 impl Tty7App {
     /// Save the overlay's current selection as a local draft.
-    pub(crate) fn review_save_selection_as_draft(&mut self, comment: &str, cx: &mut Context<Self>) -> bool {
-        let overlay = match self.tabs.get(self.active).and_then(|t| t.diff_overlay.as_ref()) {
+    pub(crate) fn review_save_selection_as_draft(
+        &mut self,
+        comment: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let overlay = match self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.diff_overlay.as_ref())
+        {
             Some(o) => o,
             None => return false,
         };
@@ -41,11 +49,7 @@ impl Tty7App {
         let overlay_cwd = overlay.cwd.clone();
         let (source, file) = match &overlay.load {
             DiffLoad::Ready(snap) => {
-                let f = snap
-                    .files
-                    .iter()
-                    .find(|f| f.path == sel.path)
-                    .cloned();
+                let f = snap.files.iter().find(|f| f.path == sel.path).cloned();
                 let root = snap.root.clone();
                 (snap.source.clone(), f.map(|f| (root, f)))
             }
@@ -60,10 +64,7 @@ impl Tty7App {
                 _ => return false,
             },
         };
-        let hunks = file
-            .as_ref()
-            .map(|f| f.hunks.clone())
-            .unwrap_or_default();
+        let hunks = file.as_ref().map(|f| f.hunks.clone()).unwrap_or_default();
         let diff = sel.text(&hunks);
         if diff.trim().is_empty() {
             return false;
@@ -141,8 +142,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        let Some((path, lines, prompt, comment_len, _)) =
-            self.review_selection_prompt(comment)
+        let Some((path, lines, prompt, comment_len, _)) = self.review_selection_prompt(comment)
         else {
             return Err("no-selection");
         };
@@ -175,8 +175,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        let Some((path, lines, prompt, comment_len, label)) =
-            self.review_selection_prompt(comment)
+        let Some((path, lines, prompt, comment_len, label)) = self.review_selection_prompt(comment)
         else {
             return Err("no-selection");
         };
@@ -266,11 +265,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let key = (
-            source_tag.to_string(),
-            path.to_string(),
-            lines.to_string(),
-        );
+        let key = (source_tag.to_string(), path.to_string(), lines.to_string());
         if self.review.editing_key().as_ref() == Some(&key) {
             self.review.end_edit();
             cx.notify();
@@ -294,8 +289,7 @@ impl Tty7App {
 
     /// Save the Review tab editor text back into its draft.
     pub(crate) fn review_save_edit(&mut self, cx: &mut Context<Self>) {
-        let (Some(key), Some(box_entity)) =
-            (self.review.editing_key(), self.review.edit_box())
+        let (Some(key), Some(box_entity)) = (self.review.editing_key(), self.review.edit_box())
         else {
             return;
         };
@@ -312,8 +306,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        let (Some(key), Some(box_entity)) =
-            (self.review.editing_key(), self.review.edit_box())
+        let (Some(key), Some(box_entity)) = (self.review.editing_key(), self.review.edit_box())
         else {
             return Err("no-selection");
         };
@@ -366,7 +359,10 @@ impl Tty7App {
         use crate::ui::app::SpawnWhere;
 
         let offered = self.offered_agents(cx);
-        let agent_frecency = cx.global::<crate::core::config::Config>().agent_frecency.clone();
+        let agent_frecency = cx
+            .global::<crate::core::config::Config>()
+            .agent_frecency
+            .clone();
         let Some(agent) = most_recent(&offered, &agent_frecency) else {
             let remote =
                 crate::core::session::WorkspaceStore::remote_ref(cx, self.workspace).is_some();
@@ -404,10 +400,7 @@ impl Tty7App {
                     break leaf;
                 }
                 if std::time::Instant::now() >= deadline {
-                    crate::terminal::notify_desktop(
-                        Some("tty7"),
-                        t(L10nKey::ReviewAgentTimeout),
-                    );
+                    crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::ReviewAgentTimeout));
                     log::warn!("review: new agent tab did not report running in time");
                     return;
                 }
@@ -421,9 +414,7 @@ impl Tty7App {
             let settled = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 let status = this
-                    .update(cx, |_, cx| {
-                        leaf.read(cx).agent_session().map(|s| s.status)
-                    })
+                    .update(cx, |_, cx| leaf.read(cx).agent_session().map(|s| s.status))
                     .ok()
                     .flatten();
                 match status {
@@ -432,9 +423,7 @@ impl Tty7App {
                     | Some(AgentStatus::Done) => break,
                     _ => {}
                 }
-                if std::time::Instant::now() >= settled
-                    || std::time::Instant::now() >= deadline
-                {
+                if std::time::Instant::now() >= settled || std::time::Instant::now() >= deadline {
                     break;
                 }
                 cx.background_executor()
