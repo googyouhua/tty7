@@ -196,7 +196,7 @@ fn window_overrides_active(config: &Config, backdrop_is_local: bool) -> bool {
         || (backdrop_is_local && config.window_backdrop != WindowBackdrop::Auto)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
     General,
     Appearance,
@@ -3702,7 +3702,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn humanize_action_splits_on_capitals() {
         assert_eq!(humanize_action("NewTab"), "New Tab");
@@ -4186,6 +4185,92 @@ mod gpui_tests {
             assert_eq!(cx.global::<Config>().notify_threshold_secs, 73);
         });
         vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn agent_roles_page_adds_edits_and_deletes(cx: &mut TestAppContext) {
+        use crate::core::agent_roles::{delete_role, load_roles, roles_dir};
+        use crate::core::cli_agent::CLIAgent;
+        crate::core::config::pin_test_config_dir();
+        // Unique to this test; the pinned config dir is shared process-wide.
+        const SLUG: &str = "settings-ui-probe";
+        // Scrub residue from an earlier interrupted run before starting.
+        if let Some(dir) = roles_dir() {
+            let _ = delete_role(&dir, SLUG);
+        }
+        let (app, mut vcx) = harness(cx);
+        // Open the page and draw the empty list: exercises the list render.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::AgentRoles, window, cx);
+            assert_eq!(
+                app.active_settings().unwrap().section,
+                SettingsSection::AgentRoles
+            );
+        });
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        // Fill the add form and save: the slug is minted from the name.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_role_add(window, cx);
+            let s = app.active_settings().unwrap();
+            let f = s.role_form.as_ref().expect("add form is open");
+            let inputs = (
+                f.name.clone(),
+                f.launch.clone(),
+                f.description.clone(),
+                f.instructions.clone(),
+                f.starter_labels.clone(),
+                f.starter_prompts.clone(),
+            );
+            inputs.0.update(cx, |i, cx| i.set_value("Settings UI Probe", window, cx));
+            inputs.1.update(cx, |i, cx| i.set_value("claude --model opus", window, cx));
+            inputs.2.update(cx, |i, cx| i.set_value("probe", window, cx));
+            inputs.3.update(cx, |i, cx| i.set_value("Be terse.", window, cx));
+            inputs.4[0].update(cx, |i, cx| i.set_value("Review a PR", window, cx));
+            inputs.5[0].update(cx, |i, cx| i.set_value("Review it.", window, cx));
+            app.set_role_base(0, cx);
+            app.save_role_form(cx);
+            assert!(
+                app.active_settings().unwrap().role_form.is_none(),
+                "a valid save closes the form"
+            );
+        });
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        let role = load_roles(&roles_dir().unwrap())
+            .into_iter()
+            .find(|r| r.slug == SLUG)
+            .expect("saved role on disk");
+        assert_eq!(role.name, "Settings UI Probe");
+        assert_eq!(role.base, CLIAgent::ALL[0]);
+        assert_eq!(role.starters.len(), 1);
+        // Edit the description through the form.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_role_edit(SLUG, window, cx);
+            let s = app.active_settings().unwrap();
+            let description = s
+                .role_form
+                .as_ref()
+                .expect("edit form is open")
+                .description
+                .clone();
+            description.update(cx, |i, cx| i.set_value("edited", window, cx));
+            app.save_role_form(cx);
+        });
+        vcx.run_until_parked();
+        let edited = load_roles(&roles_dir().unwrap())
+            .into_iter()
+            .find(|r| r.slug == SLUG)
+            .unwrap();
+        assert_eq!(edited.description, "edited");
+        // Delete removes the file.
+        app.update_in(&mut vcx, |app, _window, cx| {
+            app.remove_agent_role(SLUG, cx);
+        });
+        vcx.run_until_parked();
+        assert!(load_roles(&roles_dir().unwrap())
+            .iter()
+            .all(|r| r.slug != SLUG));
     }
 
     #[gpui::test]

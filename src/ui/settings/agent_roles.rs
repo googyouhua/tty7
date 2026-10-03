@@ -15,12 +15,12 @@ use crate::core::cli_agent::CLIAgent;
 pub(crate) struct AgentRoleForm {
     /// Slug being edited; `None` adds a new role (slug minted on save).
     editing: Option<String>,
-    name: Entity<InputState>,
-    launch: Entity<InputState>,
-    description: Entity<InputState>,
-    instructions: Entity<InputState>,
-    starter_labels: [Entity<InputState>; 3],
-    starter_prompts: [Entity<InputState>; 3],
+    pub(crate) name: Entity<InputState>,
+    pub(crate) launch: Entity<InputState>,
+    pub(crate) description: Entity<InputState>,
+    pub(crate) instructions: Entity<InputState>,
+    pub(crate) starter_labels: [Entity<InputState>; 3],
+    pub(crate) starter_prompts: [Entity<InputState>; 3],
     base: CLIAgent,
     error: Option<String>,
     _subs: Vec<Subscription>,
