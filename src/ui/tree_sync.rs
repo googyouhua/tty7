@@ -446,10 +446,9 @@ fn desired_node(pane: &Pane, remote_window: bool, cx: &App) -> Option<DesiredNod
                     agent,
                     session_id: session.as_ref().and_then(|s| s.session_id.clone()),
                     launch_argv: session.as_ref().and_then(|s| s.launch_argv.clone()),
-                    // A live view carries no role tag: detection only ever
-                    // sees the base agent. The tag travels on the spawn and
-                    // the session record instead.
-                    role: None,
+                    // The tag seeded from the spawn at connect time; the tree
+                    // carries it into hibernate/reopen restores with the seed.
+                    role: view.role().map(str::to_string),
                     status: None,
                 }
             });
