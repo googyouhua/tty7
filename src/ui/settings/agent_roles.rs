@@ -2,6 +2,7 @@
 //! to one of the built-in agents.
 
 use super::kit::{self, BtnKind, Tk, fs};
+use super::shell::SearchOption;
 use super::*;
 
 use crate::core::agent_roles::{
@@ -367,36 +368,49 @@ impl Tty7App {
         );
         // Model options: "launch line only" first, then whatever the base
         // offers; a saved model the list no longer names stays selectable
-        // as-is rather than silently clearing.
-        let mut model_options: Vec<String> = vec![t(L10nKey::SettingsRoleModelNone).to_string()];
-        model_options.extend(form.models.iter().cloned());
-        if !form.model.is_empty() && !model_options[1..].contains(&form.model) {
-            model_options.insert(1, form.model.clone());
+        // as-is rather than silently clearing. A search dropdown like the
+        // font menus: model lists run long and the plain popover cannot
+        // scroll.
+        let mut model_values: Vec<String> = vec![String::new()];
+        model_values.extend(form.models.iter().cloned());
+        if !form.model.is_empty() && !model_values[1..].contains(&form.model) {
+            model_values.push(form.model.clone());
         }
-        let model_selected = match form.model.as_str() {
-            "" => 0,
-            current => model_options
-                .iter()
-                .position(|m| m == current)
-                .unwrap_or(0),
-        };
-        let model_names: Vec<&str> = model_options.iter().map(String::as_str).collect();
-        let model_values = model_options.clone();
-        let model_choice = self.settings_choice(
+        let model_labels: Vec<SharedString> = model_values
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                if i == 0 {
+                    SharedString::from(t(L10nKey::SettingsRoleModelNone))
+                } else {
+                    SharedString::from(m.clone())
+                }
+            })
+            .collect();
+        let model_selected = model_values
+            .iter()
+            .position(|m| *m == form.model)
+            .filter(|_| !form.model.is_empty())
+            .unwrap_or(0);
+        let model_options = std::rc::Rc::new(
+            model_labels
+                .into_iter()
+                .map(|label| SearchOption { label, font: None })
+                .collect::<Vec<_>>(),
+        );
+        let model_values = std::rc::Rc::new(model_values);
+        let model_choice = self.settings_search_dropdown(
             "role-model",
-            &model_names,
-            model_selected,
-            cx,
-            move |this, ix, _w, cx| {
+            model_options[model_selected].label.clone(),
+            model_options,
+            Some(model_selected),
+            std::rc::Rc::new(move |this, ix, _w, cx| {
                 if let Some(form) = this.role_form_mut() {
-                    // Index 0 is "launch line only", i.e. the empty model.
-                    form.model = match ix {
-                        0 => String::new(),
-                        _ => model_values.get(ix).cloned().unwrap_or_default(),
-                    };
+                    form.model = model_values.get(ix).cloned().unwrap_or_default();
                 }
                 cx.notify();
-            },
+            }),
+            cx,
         );
         const W: f32 = 320.;
         let mut rows: Vec<AnyElement> = vec![
