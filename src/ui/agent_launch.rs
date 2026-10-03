@@ -88,7 +88,11 @@ pub(crate) fn offered_roles(
 }
 
 pub(crate) fn role_launch_line(role: &AgentRole) -> String {
-    role.launch.trim().to_string()
+    let line = role.launch.trim();
+    match line.is_empty() {
+        true => role.base.binary().to_string(),
+        false => line.to_string(),
+    }
 }
 
 pub(crate) fn role_resume_line(role: &AgentRole, session_id: &str) -> Option<String> {
@@ -837,8 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn role_model_appends_its_flag() {
-        let role = AgentRole {
+    fn role_model_appends_its_flag() {        let role = AgentRole {
             slug: "m".into(),
             name: "M".into(),
             base: CLIAgent::OpenCode,
@@ -857,6 +860,21 @@ mod tests {
         // And a resume replays it.
         let line = role_resume_line(&role, "sess-1").expect("resumable");
         assert!(line.contains("--model"), "{line}");
+    }
+
+    #[test]
+    fn empty_launch_line_means_the_bare_base_binary() {
+        let role = AgentRole {
+            slug: "b".into(),
+            name: "B".into(),
+            base: CLIAgent::Codex,
+            description: String::new(),
+            launch: String::new(),
+            model: String::new(),
+            instructions: String::new(),
+            starters: vec![],
+        };
+        assert_eq!(role_launch_line(&role), "codex");
     }
 
     #[test]

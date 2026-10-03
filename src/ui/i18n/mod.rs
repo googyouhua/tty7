@@ -620,7 +620,6 @@ l10n_keys! {
     SettingsRoleStarters,
     SettingsRoleStartersDesc,
     SettingsRoleNameRequired,
-    SettingsRoleLaunchRequired,
     SettingsRoleFollowupMissed,
     SettingsRoleSearchKeywords,
     SettingsReadingAgentConfig,

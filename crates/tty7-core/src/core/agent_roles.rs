@@ -96,10 +96,8 @@ fn load_one(dir: &Path, slug: &str) -> Option<AgentRole> {
         .unwrap_or("")
         .trim()
         .to_string();
-    if launch.is_empty() {
-        log::warn!("ignoring role at {}: empty launch command", dir.display());
-        return None;
-    }
+    // Empty stays empty: it launches the base binary, like an unset
+    // `agent_launch` entry does.
     let mut starters: Vec<RoleStarter> = v
         .get("starters")
         .and_then(|s| s.as_array())
@@ -172,7 +170,11 @@ pub fn load_roles(dir: &Path) -> Vec<AgentRole> {
 }
 
 pub fn role_launch_program(role: &AgentRole) -> Option<String> {
-    crate::core::cli_agent::launch_program(&role.launch)
+    // An empty launch line means the bare base binary.
+    Some(
+        crate::core::cli_agent::launch_program(&role.launch)
+            .unwrap_or_else(|| role.base.binary().to_string()),
+    )
 }
 
 /// The argv a role launches (and resumes) with: the launch words plus
@@ -184,6 +186,9 @@ pub fn role_launch_argv(role: &AgentRole) -> Vec<String> {
         .split_whitespace()
         .map(str::to_string)
         .collect();
+    if argv.is_empty() {
+        argv.push(role.base.binary().to_string());
+    }
     let model = role.model.trim();
     if !model.is_empty()
         && let Some(flag) = model_flag(role.base)
@@ -489,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_launch_skips_only_that_file() {
+    fn empty_launch_means_the_bare_base_binary() {
         let dir = tempfile::TempDir::new().unwrap();
         write_role(
             dir.path(),
@@ -504,8 +509,11 @@ mod tests {
         let roles = load_roles(dir.path());
         assert_eq!(
             roles.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(),
-            vec!["good"]
+            vec!["blank", "good"]
         );
+        let blank = roles.iter().find(|r| r.slug == "blank").unwrap();
+        assert_eq!(blank.launch, "");
+        assert_eq!(role_launch_argv(blank), vec!["claude"]);
     }
 
     #[test]
@@ -570,7 +578,23 @@ mod tests {
     }
 
     #[test]
-    fn blank_names_fall_back_to_slug() {        let dir = tempfile::TempDir::new().unwrap();
+    fn blank_launch_argv_starts_with_the_base_binary() {
+        let role = AgentRole {
+            slug: "b".to_string(),
+            name: "B".to_string(),
+            base: CLIAgent::Claude,
+            description: String::new(),
+            launch: "   ".to_string(),
+            model: String::new(),
+            instructions: String::new(),
+            starters: vec![],
+        };
+        assert_eq!(role_launch_argv(&role), vec!["claude"]);
+    }
+
+    #[test]
+    fn blank_names_fall_back_to_slug() {
+        let dir = tempfile::TempDir::new().unwrap();
         write_role(
             dir.path(),
             "good",

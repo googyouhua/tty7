@@ -221,13 +221,6 @@ impl Tty7App {
             cx.notify();
             return;
         }
-        if launch.is_empty() {
-            if let Some(form) = self.role_form_mut() {
-                form.error = Some(t(L10nKey::SettingsRoleLaunchRequired).to_string());
-            }
-            cx.notify();
-            return;
-        }
         let slug = match editing {
             Some(slug) => slug,
             None => {
