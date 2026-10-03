@@ -198,8 +198,10 @@ fn send_input_to_a_dead_pane_answers_an_error() {
     let err = panes
         .send_input(pane_id, b"echo too_late\r")
         .expect_err("input into an exited pane must fail");
+    // The pane record may already be reaped by the time the input arrives,
+    // so either refusal counts — what matters is that late input fails.
     assert!(
-        err.to_string().contains("not running"),
+        err.to_string().contains("not running") || err.to_string().contains("no such pane"),
         "the refusal was {err}"
     );
 }
