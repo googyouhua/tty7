@@ -39,7 +39,10 @@ pub enum CommandKind {
     NewAgentTab,
     LaunchAgent(CLIAgent),
     LaunchRole(String),
-    SendRoleStarter { slug: String, index: usize },
+    SendRoleStarter {
+        slug: String,
+        index: usize,
+    },
     ResetFontSize,
     NextPane,
     PrevPane,

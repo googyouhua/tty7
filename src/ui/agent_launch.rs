@@ -77,7 +77,10 @@ pub(crate) fn role_for_launch_action(action: &str, roles: &[AgentRole]) -> Optio
 /// asked, and roles are user-curated a handful — a missing binary fails
 /// visibly in the pane it was typed into, which beats hiding a role whose
 /// agent is installed over there.
-pub(crate) fn offered_roles(roles: Vec<AgentRole>, path: Option<&std::ffi::OsStr>) -> Vec<AgentRole> {
+pub(crate) fn offered_roles(
+    roles: Vec<AgentRole>,
+    path: Option<&std::ffi::OsStr>,
+) -> Vec<AgentRole> {
     match path {
         None => roles,
         Some(path) => roles
@@ -823,10 +826,9 @@ mod tests {
         };
         // Flags stay words of their own; only the prompt may be quoted.
         match plan_role_first_send(&role) {
-            Some(RoleFirstSend::PromptArg(parts)) => assert_eq!(
-                parts,
-                vec!["claude", "--model", "opus", "Be terse."]
-            ),
+            Some(RoleFirstSend::PromptArg(parts)) => {
+                assert_eq!(parts, vec!["claude", "--model", "opus", "Be terse."])
+            }
             _ => panic!("expected PromptArg"),
         };
         let opencode = AgentRole {
@@ -846,7 +848,8 @@ mod tests {
     }
 
     #[test]
-    fn role_model_appends_its_flag() {        let role = AgentRole {
+    fn role_model_appends_its_flag() {
+        let role = AgentRole {
             slug: "m".into(),
             name: "M".into(),
             base: CLIAgent::OpenCode,

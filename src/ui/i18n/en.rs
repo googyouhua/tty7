@@ -703,13 +703,19 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRoleEdit => "Edit role",
         L10nKey::SettingsRoleEditAction => "Edit",
         L10nKey::SettingsRoleName => "Name",
-        L10nKey::SettingsRoleNameDesc => "Shown in Search and the launch rows; the slug is minted from it once.",
+        L10nKey::SettingsRoleNameDesc => {
+            "Shown in Search and the launch rows; the slug is minted from it once."
+        }
         L10nKey::SettingsRoleBase => "Base agent",
         L10nKey::SettingsRoleBaseDesc => "Detection, status and resume all follow this agent.",
         L10nKey::SettingsRoleLaunch => "Launch command",
-        L10nKey::SettingsRoleLaunchDesc => "Typed into a fresh shell. Empty means the bare base binary.",
+        L10nKey::SettingsRoleLaunchDesc => {
+            "Typed into a fresh shell. Empty means the bare base binary."
+        }
         L10nKey::SettingsRoleModel => "Model",
-        L10nKey::SettingsRoleModelDesc => "Appended after the launch command. Empty means the launch line decides.",
+        L10nKey::SettingsRoleModelDesc => {
+            "Appended after the launch command. Empty means the launch line decides."
+        }
         L10nKey::SettingsRoleModelNone => "Launch line only",
         L10nKey::SettingsRoleRefresh => "Refresh",
         L10nKey::SettingsRoleDescription => "Description",
@@ -719,8 +725,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRoleStarters => "Conversation starters",
         L10nKey::SettingsRoleStartersDesc => "Up to three; pick one from the pane menu to send it.",
         L10nKey::SettingsRoleNameRequired => "Give the role a name.",
-        L10nKey::SettingsRoleFollowupMissed => "The agent never came up, so the role's instructions were skipped. Send one from the pane menu if needed.",
-        L10nKey::SettingsRoleSearchKeywords => "role roles agent starter instructions launch custom",
+        L10nKey::SettingsRoleFollowupMissed => {
+            "The agent never came up, so the role's instructions were skipped. Send one from the pane menu if needed."
+        }
+        L10nKey::SettingsRoleSearchKeywords => {
+            "role roles agent starter instructions launch custom"
+        }
         L10nKey::SettingsReadingAgentConfig => "Reading this machine's agent config…",
         L10nKey::SettingsStatusNotInstalled => "Not installed",
         L10nKey::SettingsStatusInstalled => "Installed",

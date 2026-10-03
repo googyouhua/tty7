@@ -710,13 +710,21 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRoleEdit => "ロールを編集",
         L10nKey::SettingsRoleEditAction => "編集",
         L10nKey::SettingsRoleName => "名前",
-        L10nKey::SettingsRoleNameDesc => "検索と起動行に表示されます。スラッグはここから一度だけ生成されます。",
+        L10nKey::SettingsRoleNameDesc => {
+            "検索と起動行に表示されます。スラッグはここから一度だけ生成されます。"
+        }
         L10nKey::SettingsRoleBase => "ベースエージェント",
-        L10nKey::SettingsRoleBaseDesc => "検出・ステータス・再開はすべてこのエージェントに従います。",
+        L10nKey::SettingsRoleBaseDesc => {
+            "検出・ステータス・再開はすべてこのエージェントに従います。"
+        }
         L10nKey::SettingsRoleLaunch => "起動コマンド",
-        L10nKey::SettingsRoleLaunchDesc => "新しいシェルに入力します。空欄の場合はベースの素のコマンドを使います。",
+        L10nKey::SettingsRoleLaunchDesc => {
+            "新しいシェルに入力します。空欄の場合はベースの素のコマンドを使います。"
+        }
         L10nKey::SettingsRoleModel => "モデル",
-        L10nKey::SettingsRoleModelDesc => "起動コマンドの後ろに追加します。空欄の場合は起動行に従います。",
+        L10nKey::SettingsRoleModelDesc => {
+            "起動コマンドの後ろに追加します。空欄の場合は起動行に従います。"
+        }
         L10nKey::SettingsRoleModelNone => "起動行のみ",
         L10nKey::SettingsRoleRefresh => "更新",
         L10nKey::SettingsRoleDescription => "説明",
@@ -726,7 +734,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRoleStarters => "会話スターター",
         L10nKey::SettingsRoleStartersDesc => "最大3件。ペインメニューから選んで送信します。",
         L10nKey::SettingsRoleNameRequired => "ロールに名前を付けてください。",
-        L10nKey::SettingsRoleFollowupMissed => "エージェントが起動しなかったため、ロールの指示を送信しませんでした。必要に応じてペインメニューから再送信してください。",
+        L10nKey::SettingsRoleFollowupMissed => {
+            "エージェントが起動しなかったため、ロールの指示を送信しませんでした。必要に応じてペインメニューから再送信してください。"
+        }
         L10nKey::SettingsRoleSearchKeywords => "ロール エージェント 起動 スターター 指示 カスタム",
         L10nKey::SettingsReadingAgentConfig => "このマシンのエージェント設定を読み込んでいます…",
         L10nKey::SettingsStatusNotInstalled => "未インストール",

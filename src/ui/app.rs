@@ -6907,9 +6907,7 @@ impl Tty7App {
                 }
                 None => log::warn!("role '{slug}' is gone; not launching it"),
             },
-            SendRoleStarter { slug, index } => {
-                self.send_role_starter(&slug, index, window, cx)
-            }
+            SendRoleStarter { slug, index } => self.send_role_starter(&slug, index, window, cx),
             CopyAgentSessionId => self.copy_agent_session_id(self.active, window, cx),
             RenameWorkspace => self.start_workspace_rename(window, cx),
             OpenSettings => self.toggle_settings(window, cx),
@@ -10346,16 +10344,12 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &SaveAgentLaunchArgs, window, cx| {
                     this.save_agent_launch_args(window, cx)
                 }))
-                .on_action(cx.listener(
-                    |this, _: &OpenRoleAgent, window, cx| {
-                        this.open_search(SearchTab::Terminals, "Role:", window, cx)
-                    },
-                ))
-                .on_action(cx.listener(
-                    |this, action: &SendRoleStarter, window, cx| {
-                        this.send_role_starter(&action.slug, action.index, window, cx)
-                    },
-                ))
+                .on_action(cx.listener(|this, _: &OpenRoleAgent, window, cx| {
+                    this.open_search(SearchTab::Terminals, "Role:", window, cx)
+                }))
+                .on_action(cx.listener(|this, action: &SendRoleStarter, window, cx| {
+                    this.send_role_starter(&action.slug, action.index, window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
                     this.open_settings_section(SettingsSection::Keybindings, window, cx)
                 }))
@@ -11814,7 +11808,10 @@ mod tests {
         #[test]
         fn deleted_role_falls_back_to_base_display() {
             let planted = plant_frontend_reviewer();
-            assert_eq!(role_display(Some("gone"), Some(CLIAgent::Claude)), "Claude Code");
+            assert_eq!(
+                role_display(Some("gone"), Some(CLIAgent::Claude)),
+                "Claude Code"
+            );
             assert_eq!(
                 role_display(Some("frontend-reviewer"), Some(CLIAgent::Claude)),
                 "Frontend Reviewer (Claude Code)"

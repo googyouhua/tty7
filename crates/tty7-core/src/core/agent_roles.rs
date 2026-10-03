@@ -181,11 +181,7 @@ pub fn role_launch_program(role: &AgentRole) -> Option<String> {
 /// `{flag} {model}` when the role names a model. The flag comes from the
 /// same table as the model list ([`model_flag`]).
 pub fn role_launch_argv(role: &AgentRole) -> Vec<String> {
-    let mut argv: Vec<String> = role
-        .launch
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
+    let mut argv: Vec<String> = role.launch.split_whitespace().map(str::to_string).collect();
     if argv.is_empty() {
         argv.push(role.base.binary().to_string());
     }
@@ -360,7 +356,10 @@ fn read_claude_catalog_models() -> Vec<String> {
     for entry in entries.flatten() {
         let bytes = std::fs::read(entry.path()).unwrap_or_default();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-        if let Some(models) = json.pointer("/catalog/config/models").and_then(|m| m.as_array()) {
+        if let Some(models) = json
+            .pointer("/catalog/config/models")
+            .and_then(|m| m.as_array())
+        {
             out.extend(
                 models
                     .iter()
@@ -419,8 +418,7 @@ pub fn save_role(dir: &Path, role: &AgentRole) -> std::io::Result<()> {
     }
     let sub = dir.join(&role.slug);
     std::fs::create_dir_all(&sub)?;
-    let text = serde_json::to_string_pretty(&role_to_json(role))
-        .map_err(std::io::Error::other)?;
+    let text = serde_json::to_string_pretty(&role_to_json(role)).map_err(std::io::Error::other)?;
     std::fs::write(sub.join("role.json"), text)?;
     log::info!("saved agent role {}", role.slug);
     Ok(())
@@ -606,7 +604,8 @@ mod tests {
     }
 
     #[test]
-    fn save_loads_back_what_was_saved() {        let dir = tempfile::TempDir::new().unwrap();
+    fn save_loads_back_what_was_saved() {
+        let dir = tempfile::TempDir::new().unwrap();
         let role = AgentRole {
             slug: "frontend-reviewer".to_string(),
             name: "Frontend Reviewer".to_string(),

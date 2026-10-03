@@ -35,9 +35,7 @@ impl Tty7App {
     /// Every role on this machine, slug order — the list behind this page,
     /// the palette rows and every dispatch path.
     pub(crate) fn load_agent_roles() -> Vec<AgentRole> {
-        roles_dir()
-            .map(|dir| load_roles(&dir))
-            .unwrap_or_default()
+        roles_dir().map(|dir| load_roles(&dir)).unwrap_or_default()
     }
 
     fn role_form_mut(&mut self) -> Option<&mut AgentRoleForm> {
@@ -52,12 +50,14 @@ impl Tty7App {
         subs: &mut Vec<Subscription>,
     ) -> Entity<InputState> {
         let input = super::seed_input(window, cx, value, false);
-        subs.push(cx.subscribe_in(&input, window, |this, _i, ev: &InputEvent, _w, cx| {
-            if matches!(ev, InputEvent::Change) {
-                let _ = this.role_form_mut();
-                cx.notify();
-            }
-        }));
+        subs.push(
+            cx.subscribe_in(&input, window, |this, _i, ev: &InputEvent, _w, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    let _ = this.role_form_mut();
+                    cx.notify();
+                }
+            }),
+        );
         input
     }
 
@@ -71,14 +71,8 @@ impl Tty7App {
         let mut seed = |value: &str, subs: &mut Vec<Subscription>| {
             Self::seed_role_input(window, cx, value, subs)
         };
-        let name = seed(
-            editing.map(|r| r.name.as_str()).unwrap_or(""),
-            &mut subs,
-        );
-        let launch = seed(
-            editing.map(|r| r.launch.as_str()).unwrap_or(""),
-            &mut subs,
-        );
+        let name = seed(editing.map(|r| r.name.as_str()).unwrap_or(""), &mut subs);
+        let launch = seed(editing.map(|r| r.launch.as_str()).unwrap_or(""), &mut subs);
         let description = seed(
             editing.map(|r| r.description.as_str()).unwrap_or(""),
             &mut subs,
@@ -279,13 +273,15 @@ impl Tty7App {
         }
         let roles = Self::load_agent_roles();
         let mut rows: Vec<AnyElement> = vec![
-            h_flex().pb(px(4.)).child(
-                kit::button("role-new", t(L10nKey::SettingsRoleNew), BtnKind::Primary).on_click(
-                    cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
-                        this.start_role_add(window, cx);
-                    }),
-                ),
-            ).into_any_element(),
+            h_flex()
+                .pb(px(4.))
+                .child(
+                    kit::button("role-new", t(L10nKey::SettingsRoleNew), BtnKind::Primary)
+                        .on_click(cx.listener(|this, _ev: &gpui::ClickEvent, window, cx| {
+                            this.start_role_add(window, cx);
+                        })),
+                )
+                .into_any_element(),
         ];
         if roles.is_empty() {
             let tk = Tk::of(cx);
@@ -305,14 +301,18 @@ impl Tty7App {
                 t(L10nKey::SettingsRoleEditAction),
                 BtnKind::Secondary,
             )
-            .on_click(cx.listener(move |this, _ev: &gpui::ClickEvent, window, cx| {
-                this.start_role_edit(&slug, window, cx);
-            }));
+            .on_click(
+                cx.listener(move |this, _ev: &gpui::ClickEvent, window, cx| {
+                    this.start_role_edit(&slug, window, cx);
+                }),
+            );
             let slug = role.slug.clone();
             let delete = kit::button(("role-delete", i), t(L10nKey::Delete), BtnKind::Danger)
-                .on_click(cx.listener(move |this, _ev: &gpui::ClickEvent, _window, cx| {
-                    this.remove_agent_role(&slug, cx);
-                }));
+                .on_click(
+                    cx.listener(move |this, _ev: &gpui::ClickEvent, _window, cx| {
+                        this.remove_agent_role(&slug, cx);
+                    }),
+                );
             rows.push(
                 self.settings_row(
                     crate::ui::app::role_display(Some(&role.slug), Some(role.base)),
@@ -320,7 +320,11 @@ impl Tty7App {
                         true => role.launch.clone(),
                         false => role.description.clone(),
                     },
-                    h_flex().gap(px(8.)).child(edit).child(delete).into_any_element(),
+                    h_flex()
+                        .gap(px(8.))
+                        .child(edit)
+                        .child(delete)
+                        .into_any_element(),
                     cx,
                 )
                 .into_any_element(),
@@ -342,10 +346,7 @@ impl Tty7App {
             true => t(L10nKey::SettingsRoleEdit),
             false => t(L10nKey::SettingsRoleNew),
         };
-        let base_names: Vec<&str> = CLIAgent::ALL
-            .iter()
-            .map(|a| a.display_name())
-            .collect();
+        let base_names: Vec<&str> = CLIAgent::ALL.iter().map(|a| a.display_name()).collect();
         let base_selected = CLIAgent::ALL
             .iter()
             .position(|a| *a == form.base)

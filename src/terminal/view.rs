@@ -8143,9 +8143,9 @@ impl Render for TerminalView {
                     .role()
                     .and_then(crate::ui::agent_launch::find_role)
                     .filter(|role| !role.starters.is_empty());
-                let starter_role_name = starter_role.as_ref().map(|role| {
-                    crate::ui::app::role_display(Some(&role.slug), view.agent())
-                });
+                let starter_role_name = starter_role
+                    .as_ref()
+                    .map(|role| crate::ui::app::role_display(Some(&role.slug), view.agent()));
 
                 let menu = match (can_fork, fork_ready) {
                     (true, true) => {
@@ -8202,10 +8202,7 @@ impl Render for TerminalView {
                     .map(|dir| !crate::core::agent_roles::load_roles(&dir).is_empty())
                     .unwrap_or(false);
                 let menu = match has_roles {
-                    true => menu.menu(
-                        t(L10nKey::AppMenuOpenRoleAgent),
-                        Box::new(OpenRoleAgent),
-                    ),
+                    true => menu.menu(t(L10nKey::AppMenuOpenRoleAgent), Box::new(OpenRoleAgent)),
                     false => menu,
                 };
 

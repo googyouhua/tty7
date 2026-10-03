@@ -32,8 +32,8 @@ use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::presets;
 use tty7_core::core::onekey::{OneKeyEntry, OneKeyKind};
 
-mod agents;
 mod agent_roles;
+mod agents;
 mod editor;
 mod hosts;
 pub(crate) mod kit;
@@ -3690,14 +3690,11 @@ mod tests {
 
     #[test]
     fn role_rows_are_in_the_search_index() {
-        for title in [
-            L10nKey::SettingsRolesIntro,
-            L10nKey::SettingsRoleNew,
-        ] {
+        for title in [L10nKey::SettingsRolesIntro, L10nKey::SettingsRoleNew] {
             assert!(
-                settings_search_entries().iter().any(|e| e.section
-                    == SettingsSection::AgentRoles
-                    && e.title == title),
+                settings_search_entries()
+                    .iter()
+                    .any(|e| e.section == SettingsSection::AgentRoles && e.title == title),
                 "no Agents index entry for {title:?}",
             );
         }
@@ -4222,10 +4219,18 @@ mod gpui_tests {
                 f.starter_labels.clone(),
                 f.starter_prompts.clone(),
             );
-            inputs.0.update(cx, |i, cx| i.set_value("Settings UI Probe", window, cx));
-            inputs.1.update(cx, |i, cx| i.set_value("claude --model opus", window, cx));
-            inputs.2.update(cx, |i, cx| i.set_value("probe", window, cx));
-            inputs.3.update(cx, |i, cx| i.set_value("Be terse.", window, cx));
+            inputs
+                .0
+                .update(cx, |i, cx| i.set_value("Settings UI Probe", window, cx));
+            inputs
+                .1
+                .update(cx, |i, cx| i.set_value("claude --model opus", window, cx));
+            inputs
+                .2
+                .update(cx, |i, cx| i.set_value("probe", window, cx));
+            inputs
+                .3
+                .update(cx, |i, cx| i.set_value("Be terse.", window, cx));
             inputs.4[0].update(cx, |i, cx| i.set_value("Review a PR", window, cx));
             inputs.5[0].update(cx, |i, cx| i.set_value("Review it.", window, cx));
             app.set_role_base(0, cx);
@@ -4268,9 +4273,11 @@ mod gpui_tests {
             app.remove_agent_role(SLUG, cx);
         });
         vcx.run_until_parked();
-        assert!(load_roles(&roles_dir().unwrap())
-            .iter()
-            .all(|r| r.slug != SLUG));
+        assert!(
+            load_roles(&roles_dir().unwrap())
+                .iter()
+                .all(|r| r.slug != SLUG)
+        );
     }
 
     #[gpui::test]
