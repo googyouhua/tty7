@@ -96,3 +96,26 @@ does not host models, so the role maps onto: identity + launch + prompts.
   parsing. Remote non-sync is documentation-only.
 - Explicitly out of V1: skills, env/MCP/concurrency fields, Access, copy/archive
   UI, CLI verbs for roles, auto-sync of `roles/` to remotes.
+
+## 6. Model selection (added 2026-10-03, user-approved)
+
+- Role schema gains optional `model`: empty means "the launch line and the
+  base default decide", exactly today's behavior.
+- `models.json` beside `roles/` maps base slugs to `{flag, models[]}`. It is
+  user-editable and wins over everything except a live fetch: when vendors
+  ship new models, users edit the file instead of waiting for a release.
+- Fetch strategies (best-effort, local-only, no network beyond what the CLIs
+  do themselves): OpenCode runs `opencode models`; Claude Code reads its
+  local model-catalog cache (`$CLAUDE_CONFIG_DIR`, else `~/.claude`);
+  every other base has no fetcher and reads `models.json` only.
+- Choice order per base: live fetch → `models.json` → small built-in table
+  (flag + a few known models for the big four) → free-text fallback.
+  Nothing found means the dropdown hides and behavior is today's.
+- Settings form: picking a base repopulates the model dropdown at once; a
+  refresh control re-runs the fetch; the first entry is always "launch line
+  only" (empty model).
+- Launch: `{flag} {model}` is appended after the launch words (before any
+  prompt arg). Resume/fork replay it through the existing launch-argv path,
+  so a resumed session keeps its model.
+- Explicitly out: vendor API fetching, model capability metadata, per-model
+  pricing display.

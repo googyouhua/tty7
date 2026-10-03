@@ -5,8 +5,8 @@ use super::kit::{self, BtnKind, Tk, fs};
 use super::*;
 
 use crate::core::agent_roles::{
-    AgentRole, RoleStarter, delete_role, load_roles, roles_dir, save_role, slug_from_name,
-    unique_slug,
+    AgentRole, RoleStarter, delete_role, load_roles, model_choices, roles_dir, save_role,
+    slug_from_name, unique_slug,
 };
 use crate::core::cli_agent::CLIAgent;
 
@@ -22,6 +22,10 @@ pub(crate) struct AgentRoleForm {
     pub(crate) starter_labels: [Entity<InputState>; 3],
     pub(crate) starter_prompts: [Entity<InputState>; 3],
     base: CLIAgent,
+    /// Selected model override, empty for none. The dropdown options live
+    /// alongside so a refresh never loses the typed value.
+    model: String,
+    models: Vec<String>,
     error: Option<String>,
     _subs: Vec<Subscription>,
 }
@@ -103,6 +107,8 @@ impl Tty7App {
         let form = AgentRoleForm {
             editing: editing.map(|r| r.slug.clone()),
             base: editing.map(|r| r.base).unwrap_or(CLIAgent::Claude),
+            model: editing.map(|r| r.model.clone()).unwrap_or_default(),
+            models: model_choices(editing.map(|r| r.base).unwrap_or(CLIAgent::Claude)),
             name,
             launch,
             description,
@@ -147,7 +153,19 @@ impl Tty7App {
         if let Some(base) = CLIAgent::ALL.get(index) {
             if let Some(form) = self.role_form_mut() {
                 form.base = *base;
+                // A new base means a new model list; the old pick rarely
+                // survives the switch, so reset rather than keep a stale one.
+                form.model.clear();
+                form.models = model_choices(*base);
             }
+        }
+        cx.notify();
+    }
+
+    /// Re-run the model fetch for the form's base (the dropdown's refresh).
+    pub(crate) fn refresh_role_models(&mut self, cx: &mut Context<Self>) {
+        if let Some(form) = self.role_form_mut() {
+            form.models = model_choices(form.base);
         }
         cx.notify();
     }
@@ -162,7 +180,7 @@ impl Tty7App {
             return;
         };
         // Read everything first so the borrow ends before validating.
-        let (editing, name, launch, description, instructions, starters, base) = {
+        let (editing, name, launch, description, instructions, starters, base, model) = {
             let Some(form) = self.role_form_mut() else {
                 return;
             };
@@ -192,6 +210,7 @@ impl Tty7App {
                 val(&form.instructions),
                 starters,
                 form.base,
+                form.model.clone(),
             )
         };
         if name.is_empty() {
@@ -224,6 +243,7 @@ impl Tty7App {
             base,
             description,
             launch,
+            model,
             instructions,
             starters,
         };
@@ -345,6 +365,39 @@ impl Tty7App {
                 this.set_role_base(ix, cx);
             },
         );
+        // Model options: "launch line only" first, then whatever the base
+        // offers; a saved model the list no longer names stays selectable
+        // as-is rather than silently clearing.
+        let mut model_options: Vec<String> = vec![t(L10nKey::SettingsRoleModelNone).to_string()];
+        model_options.extend(form.models.iter().cloned());
+        if !form.model.is_empty() && !model_options[1..].contains(&form.model) {
+            model_options.insert(1, form.model.clone());
+        }
+        let model_selected = match form.model.as_str() {
+            "" => 0,
+            current => model_options
+                .iter()
+                .position(|m| m == current)
+                .unwrap_or(0),
+        };
+        let model_names: Vec<&str> = model_options.iter().map(String::as_str).collect();
+        let model_values = model_options.clone();
+        let model_choice = self.settings_choice(
+            "role-model",
+            &model_names,
+            model_selected,
+            cx,
+            move |this, ix, _w, cx| {
+                if let Some(form) = this.role_form_mut() {
+                    // Index 0 is "launch line only", i.e. the empty model.
+                    form.model = match ix {
+                        0 => String::new(),
+                        _ => model_values.get(ix).cloned().unwrap_or_default(),
+                    };
+                }
+                cx.notify();
+            },
+        );
         const W: f32 = 320.;
         let mut rows: Vec<AnyElement> = vec![
             self.settings_row(
@@ -359,6 +412,28 @@ impl Tty7App {
                 t(L10nKey::SettingsRoleBase),
                 t(L10nKey::SettingsRoleBaseDesc),
                 base_choice,
+                cx,
+            )
+            .into_any_element(),
+            self.settings_row(
+                t(L10nKey::SettingsRoleModel),
+                t(L10nKey::SettingsRoleModelDesc),
+                h_flex()
+                    .gap(px(8.))
+                    .child(model_choice)
+                    .child(
+                        kit::button(
+                            "role-models-refresh",
+                            t(L10nKey::SettingsRoleRefresh),
+                            BtnKind::Link,
+                        )
+                        .on_click(cx.listener(
+                            |this, _ev: &gpui::ClickEvent, _w, cx| {
+                                this.refresh_role_models(cx);
+                            },
+                        )),
+                    )
+                    .into_any_element(),
                 cx,
             )
             .into_any_element(),

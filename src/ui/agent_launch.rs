@@ -20,7 +20,7 @@ use std::sync::LazyLock;
 use gpui::{App, Axis, Context, Entity, Window};
 use gpui_component::WindowExt as _;
 
-use crate::core::agent_roles::{AgentRole, role_launch_program};
+use crate::core::agent_roles::{AgentRole, role_launch_argv, role_launch_program};
 use crate::core::cli_agent::{CLIAgent, launch_program, program_on_path};
 use crate::core::config::{Config, ProfileUsage, unix_now};
 use crate::core::session::WorkspaceStore;
@@ -92,7 +92,8 @@ pub(crate) fn role_launch_line(role: &AgentRole) -> String {
 }
 
 pub(crate) fn role_resume_line(role: &AgentRole, session_id: &str) -> Option<String> {
-    let argv: Vec<String> = role.launch.split_whitespace().map(str::to_string).collect();
+    // Built from the full launch argv so a role model replays too.
+    let argv = role_launch_argv(role);
     role.base.resume_command(session_id, Some(&argv))
 }
 
@@ -113,17 +114,15 @@ pub(crate) fn plan_role_first_send(role: &AgentRole) -> Option<RoleFirstSend> {
     }
     if let Some(mut argv) = role.base.prompt_args(text) {
         // Words, not the whole line: joining quotes each word, so the
-        // launch flags stay flags and only the prompt gets quoted.
-        let mut full: Vec<String> = role
-            .launch
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+        // launch flags stay flags and only the prompt gets quoted. The
+        // role model rides along as just another flag pair.
+        let mut full = role_launch_argv(role);
         full.append(&mut argv);
         return Some(RoleFirstSend::PromptArg(full));
     }
     Some(RoleFirstSend::TwoPhase {
-        launch: role_launch_line(role),
+        // Joined from argv so a role model rides along, like above.
+        launch: join_shell_args(&role_launch_argv(role)),
         followup: text.to_string(),
     })
 }
@@ -446,8 +445,7 @@ impl Tty7App {
         // is detected as its base agent from here on — the live tag belongs
         // to the display-side work, not this spawn metadata.
         if let PaneSlot::Connecting(pending) = &slot {
-            let argv: Vec<String> =
-                role.launch.split_whitespace().map(str::to_string).collect();
+            let argv = role_launch_argv(&role);
             let (slug, base) = (role.slug.clone(), role.base);
             pending.update(cx, |pending, _| {
                 pending.spawn.role = Some(slug);
@@ -790,6 +788,7 @@ mod tests {
             base: CLIAgent::Claude,
             description: String::new(),
             launch: "claude --model opus".into(),
+            model: String::new(),
             instructions: String::new(),
             starters: vec![],
         };
@@ -809,6 +808,7 @@ mod tests {
             base: CLIAgent::Claude,
             description: String::new(),
             launch: "claude --model opus".into(),
+            model: String::new(),
             instructions: "Be terse.".into(),
             starters: vec![],
         };
@@ -837,6 +837,29 @@ mod tests {
     }
 
     #[test]
+    fn role_model_appends_its_flag() {
+        let role = AgentRole {
+            slug: "m".into(),
+            name: "M".into(),
+            base: CLIAgent::OpenCode,
+            description: String::new(),
+            launch: "opencode".into(),
+            model: "gpt-x".into(),
+            instructions: "Do it.".into(),
+            starters: vec![],
+        };
+        match plan_role_first_send(&role) {
+            Some(RoleFirstSend::TwoPhase { launch, .. }) => {
+                assert!(launch.contains("--model gpt-x"), "{launch}")
+            }
+            _ => panic!("expected TwoPhase"),
+        }
+        // And a resume replays it.
+        let line = role_resume_line(&role, "sess-1").expect("resumable");
+        assert!(line.contains("--model"), "{line}");
+    }
+
+    #[test]
     fn only_roles_whose_launch_program_is_on_path_are_offered() {
         let dir = tempfile::TempDir::new().unwrap();
         let bin = dir.path().join("cc");
@@ -852,6 +875,7 @@ mod tests {
             base,
             description: String::new(),
             launch: launch.into(),
+            model: String::new(),
             instructions: String::new(),
             starters: vec![],
         };

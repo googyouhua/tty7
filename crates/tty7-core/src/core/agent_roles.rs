@@ -14,6 +14,9 @@ pub struct AgentRole {
     pub base: CLIAgent,
     pub description: String,
     pub launch: String,
+    /// Model override, empty for none. Appended as `{flag} {model}` after
+    /// the launch words (see [`role_launch_argv`]).
+    pub model: String,
     pub instructions: String,
     pub starters: Vec<RoleStarter>,
 }
@@ -138,6 +141,13 @@ fn load_one(dir: &Path, slug: &str) -> Option<AgentRole> {
             .unwrap_or("")
             .to_string(),
         launch,
+        model: v
+            .get("model")
+            .and_then(|s| s.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string(),
         instructions: v
             .get("instructions")
             .and_then(|s| s.as_str())
@@ -165,6 +175,202 @@ pub fn role_launch_program(role: &AgentRole) -> Option<String> {
     crate::core::cli_agent::launch_program(&role.launch)
 }
 
+/// The argv a role launches (and resumes) with: the launch words plus
+/// `{flag} {model}` when the role names a model. The flag comes from the
+/// same table as the model list ([`model_flag`]).
+pub fn role_launch_argv(role: &AgentRole) -> Vec<String> {
+    let mut argv: Vec<String> = role
+        .launch
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let model = role.model.trim();
+    if !model.is_empty()
+        && let Some(flag) = model_flag(role.base)
+    {
+        argv.push(flag.to_string());
+        argv.push(model.to_string());
+    }
+    argv
+}
+
+/// The CLI flag a base agent takes its model under. First `models.json`,
+/// then the built-in table — so users can correct a flag without a rebuild.
+pub fn model_flag(base: CLIAgent) -> Option<&'static str> {
+    if let Some(flag) = models_file_flag(base) {
+        return Some(flag);
+    }
+    Some(match base {
+        CLIAgent::Claude => "--model",
+        CLIAgent::Codex => "--model",
+        CLIAgent::Gemini => "--model",
+        CLIAgent::OpenCode => "--model",
+        CLIAgent::Cursor => "--model",
+        CLIAgent::Copilot => "--model",
+        CLIAgent::Qwen => "--model",
+        CLIAgent::Kimi => "--model",
+        CLIAgent::Droid => "--model",
+        CLIAgent::Grok => "--model",
+        CLIAgent::QoderCLI | CLIAgent::QoderCLICn => "--model",
+        CLIAgent::CodeBuddy => "--model",
+        CLIAgent::Crush => "--model",
+        CLIAgent::Pi => "--model",
+        CLIAgent::OhMyPi => "--model",
+        CLIAgent::PrimeAgent => "--model",
+        CLIAgent::TraeCode => "--model",
+        CLIAgent::Goose => "--model",
+        CLIAgent::Vibe => "--model",
+        CLIAgent::Auggie => "--model",
+        CLIAgent::Amp => "--model",
+        CLIAgent::Aider => "--model",
+        CLIAgent::Hermes => "--model",
+        CLIAgent::Antigravity => "--model",
+        CLIAgent::Empryo => "--model",
+    })
+}
+
+/// Read the per-base `{flag, models[]}` table out of `models.json` beside
+/// `roles/`. Missing file, bad JSON and unknown bases all read as empty —
+/// the dropdown then hides and the launch line rules alone.
+fn models_file() -> serde_json::Value {
+    let Some(path) = crate::core::config::config_dir_path().map(|d| d.join("models.json")) else {
+        return serde_json::json!({});
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::json!({}))
+}
+
+/// The `models.json` flag override for `base`, if it names one. Leaked on
+/// first read like the keymap's role action names: the file is read through
+/// this one choke point, so a later refresh only touches here.
+fn models_file_flag(base: CLIAgent) -> Option<&'static str> {
+    let flag = models_file()
+        .get(base.slug())?
+        .get("flag")?
+        .as_str()?
+        .trim()
+        .to_string();
+    (!flag.is_empty()).then(|| Box::leak(flag.into_boxed_str()) as &str)
+}
+
+/// The `models.json` model list for `base`, if it names any.
+fn models_file_models(base: CLIAgent) -> Vec<String> {
+    models_file()
+        .get(base.slug())
+        .and_then(|e| e.get("models"))
+        .and_then(|m| m.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A small built-in model table for the big four, used only when neither a
+/// live fetch nor `models.json` names any. Stale the moment vendors move —
+/// the file above is the correction path.
+fn builtin_models(base: CLIAgent) -> &'static [&'static str] {
+    match base {
+        CLIAgent::Claude => &["opus", "sonnet", "haiku"],
+        CLIAgent::Codex => &["gpt-5.1", "gpt-5-mini"],
+        CLIAgent::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
+        CLIAgent::OpenCode => &["opencode/gpt-5", "opencode/claude-sonnet-4-5"],
+        _ => &[],
+    }
+}
+
+/// Models known right now for `base`: a live fetch first, then
+/// `models.json`, then the built-in table. Empty means the caller falls
+/// back to free text (or hides the picker).
+pub fn model_choices(base: CLIAgent) -> Vec<String> {
+    let mut out = fetch_models(base);
+    if out.is_empty() {
+        out = models_file_models(base);
+    }
+    if out.is_empty() {
+        out = builtin_models(base).iter().map(|s| s.to_string()).collect();
+    }
+    out
+}
+
+/// Best-effort live model lists. No network beyond what the CLIs do
+/// themselves; anything slow or failing reads as empty in under a second.
+fn fetch_models(base: CLIAgent) -> Vec<String> {
+    match base {
+        CLIAgent::OpenCode => fetch_opencode_models(),
+        CLIAgent::Claude => read_claude_catalog_models(),
+        _ => Vec::new(),
+    }
+}
+
+/// `opencode models`, one `provider/model` per line. Runs synchronously —
+/// callers only invoke it on base change or explicit refresh, never per
+/// frame. Anything failing reads as empty.
+fn fetch_opencode_models() -> Vec<String> {
+    let program = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("opencode"))
+        .find(|p| p.is_file());
+    let Some(program) = program else {
+        return Vec::new();
+    };
+    let Ok(out) = std::process::Command::new(&program).arg("models").output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Claude Code's local model-catalog cache (`$CLAUDE_CONFIG_DIR`, else
+/// `~/.claude`): the model ids it lists, when it has fetched any. Reuses
+/// the same roots the hooks installer honours.
+fn read_claude_catalog_models() -> Vec<String> {
+    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| std::path::PathBuf::from(h).join(".claude"))
+        });
+    let Some(dir) = base.map(|d| d.join("cache").join("model-catalog")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let bytes = std::fs::read(entry.path()).unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        if let Some(models) = json.pointer("/catalog/config/models").and_then(|m| m.as_array()) {
+            out.extend(
+                models
+                    .iter()
+                    .filter_map(|m| m.get("id")?.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// A fresh slug for `want` that no slug in `existing` takes: `want` itself,
 /// or `want-2`, `want-3`, … The Settings page mints these for new roles.
 pub fn unique_slug(existing: &[String], want: &str) -> String {
@@ -189,6 +395,7 @@ pub fn role_to_json(role: &AgentRole) -> serde_json::Value {
         "base": role.base.slug(),
         "description": role.description,
         "launch": role.launch,
+        "model": role.model,
         "instructions": role.instructions,
         "starters": role.starters.iter().map(|s| {
             serde_json::json!({"label": s.label, "prompt": s.prompt})
@@ -340,8 +547,30 @@ mod tests {
     }
 
     #[test]
-    fn blank_names_fall_back_to_slug() {
-        let dir = tempfile::TempDir::new().unwrap();
+    fn launch_argv_appends_model_flag() {
+        let role = AgentRole {
+            slug: "m".to_string(),
+            name: "M".to_string(),
+            base: CLIAgent::OpenCode,
+            description: String::new(),
+            launch: "opencode".to_string(),
+            model: "gpt-x".to_string(),
+            instructions: String::new(),
+            starters: vec![],
+        };
+        assert_eq!(
+            role_launch_argv(&role),
+            vec!["opencode", "--model", "gpt-x"]
+        );
+        let bare = AgentRole {
+            model: String::new(),
+            ..role
+        };
+        assert_eq!(role_launch_argv(&bare), vec!["opencode"]);
+    }
+
+    #[test]
+    fn blank_names_fall_back_to_slug() {        let dir = tempfile::TempDir::new().unwrap();
         write_role(
             dir.path(),
             "good",
@@ -360,6 +589,7 @@ mod tests {
             base: CLIAgent::Claude,
             description: "Reviews frontend PRs".to_string(),
             launch: "claude --model opus".to_string(),
+            model: "opus".to_string(),
             instructions: "Be terse.".to_string(),
             starters: vec![RoleStarter {
                 label: "Review a PR".to_string(),
@@ -380,6 +610,7 @@ mod tests {
             base: CLIAgent::Claude,
             description: String::new(),
             launch: "claude".to_string(),
+            model: String::new(),
             instructions: String::new(),
             starters: vec![],
         };

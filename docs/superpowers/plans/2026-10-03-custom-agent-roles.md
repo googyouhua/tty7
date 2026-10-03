@@ -524,3 +524,20 @@ Expected: PASS.
 git add docs/agents/overview.mdx docs/reference/configuration.mdx
 git commit -m "docs: custom agent roles usage and remote caveat"
 ```
+
+---
+
+### Task 7: Model selection (added post-V1, user-approved 2026-10-03)
+
+**Files:**
+- Modify: `crates/tty7-core/src/core/agent_roles.rs` (`model` field, `models.json` read, fetchers, `model_flag`, `model_choices`, `role_launch_argv`)
+- Modify: `src/ui/agent_launch.rs` (argv via `role_launch_argv`, model append test)
+- Modify: `src/ui/settings/agent_roles.rs` (form `model`/`models`, base-change reload, refresh, save, model dropdown row)
+- Modify: `src/ui/i18n/mod.rs`, `en.rs`, `zh.rs`, `ja.rs` (`SettingsRoleModel[Desc]`, `SettingsRoleModelNone`, `SettingsRoleRefresh`)
+- Modify: spec §6 + `docs/agents/overview.mdx` roles section (model line)
+
+**Interfaces:**
+- Consumes: Tasks 1–5 (`AgentRole`, `role_launch_line`, resume replay, form pattern).
+- Produces: `role_launch_argv(role)`, `model_choices(base)`, `model_flag(base)`; no other task depends on it.
+
+**Steps:** core field + sources + tests → GUI form + launch wiring → i18n → suites → commit.
