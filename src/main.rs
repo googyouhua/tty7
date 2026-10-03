@@ -742,9 +742,10 @@ fn main() {
         return;
     }
     // Bare or cold-path launch with no explicit instance asks who is using
-    // tty7, even when a window is already registered.
+    // tty7. A bare launch that reaches a running window exits in the forward
+    // above, so the picker only ever appears with no window registered.
     if wants_instance_picker(&args) {
-        match crate::ui::instance_picker::run_picker() {
+        match crate::ui::instance_picker::run_picker(&args) {
             Some(selection) => {
                 if let Err(e) = crate::ui::instance_picker::apply_selection(&selection) {
                     eprintln!("tty7: {e:#}");

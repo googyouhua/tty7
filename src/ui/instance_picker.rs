@@ -14,10 +14,14 @@
 //!   directory's memory file; the picker waits for a confirm and never
 //!   auto-enters. Closing it quits the launch.
 //!
-//! The main flow continues in-process afterwards: picking only sets the
-//! config directory, and every downstream step (daemon ensure, window
-//! forward, first window) already resolves it live.
+//! On Windows the platform runner ends in `ExitProcess`, so continuing in
+//! this process after the picker is impossible: confirming relaunches this
+//! executable with the resolved `--config-dir` (plus the original launch
+//! arguments) and quits. Other platforms continue in-process. Either way
+//! the follow-up launch carries an explicit config, so it skips the picker
+//! and remembers the choice for the next bare launch.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -153,6 +157,8 @@ pub struct InstancePicker {
     input: Entity<InputState>,
     focus: FocusHandle,
     error: bool,
+    relaunch_failed: bool,
+    passthrough: Vec<OsString>,
     result: Arc<Mutex<Option<Option<PickerSelection>>>>,
     _sub: Subscription,
 }
@@ -160,6 +166,7 @@ pub struct InstancePicker {
 impl InstancePicker {
     fn new(
         state: PickerState,
+        passthrough: Vec<OsString>,
         result: Arc<Mutex<Option<Option<PickerSelection>>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -185,12 +192,28 @@ impl InstancePicker {
             input,
             focus,
             error: false,
+            relaunch_failed: false,
+            passthrough,
             result,
             _sub,
         }
     }
 
-    fn finish(&self, choice: Option<PickerSelection>, cx: &mut Context<Self>) {
+    fn finish(&mut self, choice: Option<PickerSelection>, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        if let Some(choice) = &choice {
+            // `platform.run` never returns on Windows — it ends in
+            // `ExitProcess` — so hand the resolved config to a fresh process
+            // (which skips the picker and remembers the choice) and quit.
+            // Anywhere else the caller continues in-process below.
+            if let Err(e) = relaunch_with(choice, &self.passthrough) {
+                log::error!("instance picker relaunch failed: {e:#}");
+                // Stay: quitting here would lose the launch with no window.
+                self.relaunch_failed = true;
+                cx.notify();
+                return;
+            }
+        }
         *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(choice);
         cx.quit();
     }
@@ -207,7 +230,7 @@ impl InstancePicker {
         let _ = window;
     }
 
-    fn cancel(&self, cx: &mut Context<Self>) {
+    fn cancel(&mut self, cx: &mut Context<Self>) {
         self.finish(None, cx);
     }
 
@@ -242,6 +265,7 @@ impl Render for InstancePicker {
         let rows = self.state.row_count();
         let cursor = self.state.cursor;
         let invalid = self.error;
+        let relaunch_failed = self.relaunch_failed;
         let input = self.input.clone();
         v_flex()
             .on_action(
@@ -301,13 +325,30 @@ impl Render for InstancePicker {
                         .child(t(L10nKey::InstancePickerInvalid)),
                 )
             })
+            .when(relaunch_failed, |column| {
+                column.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(gpui::rgb(0xC0392B))
+                        .child(t(L10nKey::InstancePickerRelaunchFailed)),
+                )
+            })
             .child(
-                h_flex().justify_end().child(
-                    Button::new("instance-picker-enter")
-                        .label(t(L10nKey::InstancePickerEnter))
-                        .primary()
-                        .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                ),
+                h_flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("instance-picker-close")
+                            .label(t(L10nKey::InstancePickerClose))
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                    )
+                    .child(
+                        Button::new("instance-picker-enter")
+                            .label(t(L10nKey::InstancePickerEnter))
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    ),
             )
             .track_focus(&self.focus)
     }
@@ -315,7 +356,13 @@ impl Render for InstancePicker {
 
 /// Run the picker as this process's gpui application. Returns the confirmed
 /// selection, or `None` when the user closed it without choosing.
-pub fn run_picker() -> Option<PickerSelection> {
+///
+/// `passthrough` is the original launch arguments (minus the program name).
+/// On Windows the confirmed selection relaunches this executable with the
+/// resolved `--config-dir` plus these arguments instead of returning — the
+/// platform runner ends in `ExitProcess`, so returning would end the launch
+/// with no window. Cancel still returns `None` everywhere.
+pub fn run_picker(passthrough: &[OsString]) -> Option<PickerSelection> {
     let names = instance::list_names();
     let last = instance::read_last();
     let state = PickerState::new(names, last.as_deref());
@@ -325,6 +372,8 @@ pub fn run_picker() -> Option<PickerSelection> {
     // Locale of the default config: the picker runs before Config loads.
     let language = crate::core::config::Config::load().gui_language.clone();
     let application = gpui_platform::application().with_assets(crate::ui::assets::Assets);
+    // Owned before the spawn: the async block outlives this frame.
+    let passthrough = passthrough.to_vec();
     application.run(move |cx| {
         cx.spawn(async move |cx| {
             let _ = cx.update(|cx| {
@@ -347,9 +396,17 @@ pub fn run_picker() -> Option<PickerSelection> {
                     ..Default::default()
                 };
                 let result = outcome.clone();
+                let passthrough = passthrough.clone();
                 let opened = cx.open_window(options, |window, cx| {
-                    let view =
-                        cx.new(|cx| InstancePicker::new(state.clone(), result.clone(), window, cx));
+                    let view = cx.new(|cx| {
+                        InstancePicker::new(
+                            state.clone(),
+                            passthrough.clone(),
+                            result.clone(),
+                            window,
+                            cx,
+                        )
+                    });
                     let handle = view.read(cx).input.read(cx).focus_handle(cx);
                     window.focus(&handle, cx);
                     cx.new(|cx| gpui_component::Root::new(view, window, cx))
@@ -366,6 +423,32 @@ pub fn run_picker() -> Option<PickerSelection> {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .flatten()
+}
+
+/// Relaunch this executable with the resolved `--config-dir` plus the
+/// original launch arguments. Windows-only: the platform runner ends in
+/// `ExitProcess`, so the picker cannot hand control back to `main`.
+#[cfg(windows)]
+fn relaunch_with(choice: &PickerSelection, passthrough: &[OsString]) -> anyhow::Result<()> {
+    let dir = choice
+        .config_dir()
+        .ok_or_else(|| anyhow::anyhow!("no directory resolves for this instance"))?;
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--config-dir").arg(&dir);
+    // The picker only runs with no explicit config, so nothing here can
+    // collide with the `--config-dir` above — an open path included.
+    cmd.args(passthrough);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    use std::os::windows::process::CommandExt as _;
+    // Detached, no console: the picker process exits right after spawning.
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    cmd.spawn()?;
+    Ok(())
 }
 
 #[cfg(test)]

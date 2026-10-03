@@ -4095,6 +4095,7 @@ mod tests {
             name: name.into(),
             depth,
             foreground,
+            ..Default::default()
         }
     }
 
@@ -4130,6 +4131,7 @@ mod tests {
             agent,
             session_id: None,
             launch_argv: None,
+            role: None,
             status: None,
         });
     }

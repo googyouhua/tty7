@@ -283,6 +283,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavInput => "キーボードとマウス",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "連携",
+        L10nKey::SettingsNavAgentRoles => "エージェント",
         L10nKey::SettingsNavKeybindings => "キーボードショートカット",
         L10nKey::SettingsNavAbout => "情報",
         L10nKey::SettingsHeader => "設定",
@@ -700,6 +701,43 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentsIntroDesc => {
             "フックでエージェントの状態（作業中 / 待機中 / 完了）をタブバーに表示します"
         }
+        L10nKey::SettingsRolesIntro => "カスタムエージェント",
+        L10nKey::SettingsRolesIntroDesc => {
+            "仕事に名前を付け、組み込みエージェントのいずれかに結び付け、独自のコマンドと開始プロンプトで起動します。"
+        }
+        L10nKey::SettingsRolesEmpty => "カスタムロールはまだありません。",
+        L10nKey::SettingsRoleNew => "新規ロール",
+        L10nKey::SettingsRoleEdit => "ロールを編集",
+        L10nKey::SettingsRoleEditAction => "編集",
+        L10nKey::SettingsRoleName => "名前",
+        L10nKey::SettingsRoleNameDesc => {
+            "検索と起動行に表示されます。スラッグはここから一度だけ生成されます。"
+        }
+        L10nKey::SettingsRoleBase => "ベースエージェント",
+        L10nKey::SettingsRoleBaseDesc => {
+            "検出・ステータス・再開はすべてこのエージェントに従います。"
+        }
+        L10nKey::SettingsRoleLaunch => "起動コマンド",
+        L10nKey::SettingsRoleLaunchDesc => {
+            "新しいシェルに入力します。空欄の場合はベースの素のコマンドを使います。"
+        }
+        L10nKey::SettingsRoleModel => "モデル",
+        L10nKey::SettingsRoleModelDesc => {
+            "起動コマンドの後ろに追加します。空欄の場合は起動行に従います。"
+        }
+        L10nKey::SettingsRoleModelNone => "起動行のみ",
+        L10nKey::SettingsRoleRefresh => "更新",
+        L10nKey::SettingsRoleDescription => "説明",
+        L10nKey::SettingsRoleDescriptionDesc => "表示のみ。エージェントには送信されません。",
+        L10nKey::SettingsRoleInstructions => "指示",
+        L10nKey::SettingsRoleInstructionsDesc => "新規起動のたびに最初に送信されます。",
+        L10nKey::SettingsRoleStarters => "会話スターター",
+        L10nKey::SettingsRoleStartersDesc => "最大3件。ペインメニューから選んで送信します。",
+        L10nKey::SettingsRoleNameRequired => "ロールに名前を付けてください。",
+        L10nKey::SettingsRoleFollowupMissed => {
+            "エージェントが起動しなかったため、ロールの指示を送信しませんでした。必要に応じてペインメニューから再送信してください。"
+        }
+        L10nKey::SettingsRoleSearchKeywords => "ロール エージェント 起動 スターター 指示 カスタム",
         L10nKey::SettingsReadingAgentConfig => "このマシンのエージェント設定を読み込んでいます…",
         L10nKey::SettingsStatusNotInstalled => "未インストール",
         L10nKey::SettingsStatusInstalled => "インストール済み",
@@ -772,6 +810,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyModeNever => "通知しない",
         L10nKey::NotifyModeUnfocused => "非フォーカス時のみ",
         L10nKey::NotifyModeAlways => "常に通知",
+        L10nKey::ProgramNotesDropped => "このペインのほかの通知は表示されませんでした",
         L10nKey::SettingsStartupNormal => "通常サイズ",
         L10nKey::SettingsStartupMaximized => "最大化",
         L10nKey::SettingsStartupFullscreen => "全画面",
@@ -1423,6 +1462,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelFilesTitle => "ファイル",
         L10nKey::PanelSearchTitle => "検索",
         L10nKey::PanelGitHubTitle => "GitHub",
+        L10nKey::PanelReviewTitle => "レビュー",
         L10nKey::PanelNoSession => "アクティブなセッションがありません",
         L10nKey::PanelNoSessionHint => {
             "タブを開くと、そのシェル、ディレクトリ、プロセスがここに表示されます"
@@ -1440,6 +1480,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNoChangesHint => "ワーキングツリーはクリーンです",
         L10nKey::PanelSessionSubtitle => "セッション",
         L10nKey::PanelProcessesSubtitle => "プロセス",
+        L10nKey::PanelProcessesTotal => "合計",
         L10nKey::PanelPortsSubtitle => "ポート",
         L10nKey::PanelLatency => "遅延",
         L10nKey::PanelPortsUnsupported => "リモートの tty7-server が古く、ポートを列挙できません。",
@@ -1610,6 +1651,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffViewSplit => "左右分割",
         L10nKey::DiffViewUnified => "統合",
         L10nKey::DiffCopySelection => "選択した行をコピー",
+        L10nKey::DiffReviewInNewAgent => "新しいエージェントでレビュー…",
+        L10nKey::DiffReviewAttach => "実行中のエージェントに送る…",
         L10nKey::PendingConnecting => "{machine} に接続中…",
         L10nKey::PendingUnreachable => "{machine} に到達できませんでした",
         L10nKey::WorktreePromptNeedsName => "ワークツリーには名前が必要です",
@@ -1736,7 +1779,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerDefault => "デフォルト",
         L10nKey::InstancePickerNewPlaceholder => "新しいユーザー名…",
         L10nKey::InstancePickerEnter => "開く",
+        L10nKey::InstancePickerClose => "閉じる",
+        L10nKey::InstanceBadgeWelcome => "やあ {name}",
         L10nKey::InstancePickerInvalid => "ユーザー名は [a-z0-9-] のみ使用できます。",
+        L10nKey::InstancePickerRelaunchFailed => {
+            "tty7 を起動できませんでした。もう一度お試しください。"
+        }
         L10nKey::SwitcherStartingServer => "tty7 のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "tty7 のサーバーをダウンロード中… {done} / {total}"
@@ -1878,6 +1926,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRightPanelFiles => "右パネル: ファイル",
         L10nKey::CmdRightPanelSearch => "右パネル: 検索",
         L10nKey::CmdRightPanelGitHub => "右パネル: GitHub",
+        L10nKey::CmdRightPanelReview => "右パネル: レビュー",
         L10nKey::CmdChangeTheme => "テーマを変更…",
         L10nKey::CmdResetFontSize => "フォントサイズをリセット",
         L10nKey::CmdEnterFullScreen => "全画面表示",
@@ -1911,6 +1960,29 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdGitToggleGraph => "Git: コミット履歴の表示切替",
         L10nKey::CmdClearScrollback => "スクロールバックをクリア",
         L10nKey::CmdFindInTerminal => "ターミナル内を検索…",
+        L10nKey::CmdToggleComposer => "メッセージ入力欄の切り替え",
+        L10nKey::ComposerModeDefault => "編集前に確認",
+        L10nKey::ComposerModeAcceptEdits => "編集を自動承認",
+        L10nKey::ComposerModePlan => "プランモード",
+        L10nKey::ComposerModeBypass => "権限確認をスキップ",
+        L10nKey::ComposerModeAuto => "自動モード",
+        L10nKey::ComposerModeTip => "権限モード  ·  Shift+Tab で切り替え",
+        L10nKey::ComposerModel => "モデル",
+        L10nKey::ComposerModelTip => "モデルを切り替え",
+        L10nKey::ComposerModelDefault => "デフォルト（推奨）",
+        L10nKey::ComposerEffort => "推論の強さ",
+        L10nKey::ComposerEffortTip => "推論の強さ  ·  クリックして変更",
+        L10nKey::ComposerPlaceholder => "{agent} にメッセージ   ·   @ ファイル   / コマンド",
+        L10nKey::ComposerPlaceholderFiles => "{agent} にメッセージ   ·   @ ファイル",
+        L10nKey::ComposerSendTip => "送信（Enter）  ·  Shift+Enter で改行",
+        L10nKey::ComposerAttach => "ファイルや画像を添付",
+        L10nKey::ComposerMenuCommands => "コマンド",
+        L10nKey::ComposerMenuFiles => "ファイル",
+        L10nKey::ComposerCmdProject => "プロジェクトのコマンド",
+        L10nKey::ComposerCmdUser => "ユーザーのコマンド",
+        L10nKey::ComposerAgentAsking => {
+            "{agent} が質問しています。ターミナルで答えてから送信してください。"
+        }
         L10nKey::CmdFindNext => "次を検索",
         L10nKey::CmdFindPrevious => "前を検索",
         L10nKey::CmdCopy => "コピー",
@@ -2044,6 +2116,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
         L10nKey::AppNoAgentOnPath => "このマシンの PATH にコーディングエージェントが見つかりません",
+        L10nKey::ReviewAgentTimeout => {
+            "新しいエージェントが時間内に起動しませんでした。もう一度お試しください。"
+        }
         L10nKey::AppNoAgentSeenHere => {
             "このワークスペースではまだコーディングエージェントが実行されていません — 一度手動で起動すると、ここに表示されます"
         }
@@ -2211,6 +2286,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuCopySessionId => "セッション ID をコピー",
         L10nKey::AppMenuForkSession => "セッションをフォーク",
         L10nKey::AppMenuSaveAgentLaunchArgs => "現在の起動引数をデフォルトに設定",
+        L10nKey::AppMenuOpenRoleAgent => "ロールエージェントを開く…",
         L10nKey::AppMenuClosePaneTab => "閉じる",
         L10nKey::AppMenuCloseOtherTabs => "他のタブを閉じる",
         L10nKey::AppMenuCloseTabsRight => "右側のタブを閉じる",
@@ -2278,6 +2354,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarUngroupedGroup => "未分類",
         L10nKey::SidebarMoveToGroup => "グループへ移動",
         L10nKey::SidebarNewGroup => "新規グループ…",
+        L10nKey::SidebarRemoveFromGroup => "グループから外す",
         L10nKey::SidebarNewGroupName => "新規グループ",
         L10nKey::SidebarRenameGroup => "グループ名を変更",
         L10nKey::SidebarPinGroup => "グループを固定",

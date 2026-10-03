@@ -4,7 +4,7 @@ use crate::core::actions::*;
 use crate::core::config::{Config, KeybindingOverride};
 use crate::terminal::view::{
     AlternatePaste, ClearScrollback, CopyText, FindInTerminal, FindNext, FindPrevious,
-    InsertNewline, InsertNewlineFallback, PasteText,
+    InsertNewline, InsertNewlineFallback, PasteText, ToggleComposer,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::palette;
@@ -408,6 +408,15 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
             .iter()
             .map(|(_, name)| (name.as_str(), "")),
     );
+    // One slot per role on disk, unbound, beside the agents': the palette's
+    // `Role: …` rows are what these run, and each takes a key the same way
+    // any other action does.
+    let role_names = crate::ui::agent_launch::launch_role_action_names();
+    let after_agents = at + crate::ui::agent_launch::launch_action_names().len();
+    bindings.splice(
+        after_agents..after_agents,
+        role_names.iter().map(|name| (*name, "")),
+    );
     bindings
 }
 
@@ -594,6 +603,13 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
             per_platform("secondary-k", "secondary-shift-k"),
         ),
         ("InsertNewline", INSERT_NEWLINE_DEFAULT),
+        // ⌘I for "input". Nothing in the table holds it, and no shell or agent
+        // reads Cmd at all. Off macOS Ctrl+I is Tab, so the chord takes Shift
+        // like every other terminal command there.
+        (
+            "ToggleComposer",
+            per_platform("secondary-i", "secondary-shift-i"),
+        ),
         ("CopyText", per_platform("", "ctrl-shift-c")),
         ("PasteText", paste_text_default()),
         ("AlternatePaste", alternate_paste_default()),
@@ -677,6 +693,7 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ShowRightPanelSearch", ""),
         ("ShowRightPanelChanges", ""),
         ("ShowRightPanelGitHub", ""),
+        ("ShowRightPanelReview", ""),
         ("EditorSave", "secondary-s"),
         ("EditorSaveAs", "secondary-shift-s"),
         ("EditorGoToLine", "ctrl-g"),
@@ -775,6 +792,14 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
                 &[("name", agent.display_name())],
             ),
         ));
+    }
+    if let Some(slug) = action.strip_prefix(crate::ui::agent_launch::LAUNCH_ROLE_PREFIX) {
+        // The role's own name while it is on disk; the slug is what a row
+        // retargeted at a deleted role still shows.
+        let name = crate::ui::agent_launch::find_role(slug)
+            .map(|role| role.name)
+            .unwrap_or_else(|| slug.trim().to_string());
+        return Some((CommandGroup::Agents, format!("Role: {name}")));
     }
     if let Some(n) = action.strip_prefix("SelectWorkspace") {
         return Some((
@@ -989,11 +1014,19 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::View,
             t(L10nKey::CmdRightPanelGitHub).to_string(),
         ),
+        "ShowRightPanelReview" => (
+            CommandGroup::View,
+            t(L10nKey::CmdRightPanelReview).to_string(),
+        ),
         "FindInTerminal" => (
             CommandGroup::Terminal,
             t(L10nKey::CmdFindInTerminal).to_string(),
         ),
         "FindNext" => (CommandGroup::Terminal, t(L10nKey::CmdFindNext).to_string()),
+        "ToggleComposer" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdToggleComposer).to_string(),
+        ),
         "FindPrevious" => (
             CommandGroup::Terminal,
             t(L10nKey::CmdFindPrevious).to_string(),
@@ -1667,7 +1700,7 @@ fn keystroke_is_valid(s: &str) -> bool {
 fn action_context(action: &str) -> Option<&'static str> {
     match action {
         "FindInTerminal" | "FindNext" | "FindPrevious" | "ClearScrollback" | "InsertNewline"
-        | "CopyText" | "PasteText" => Some("Terminal"),
+        | "CopyText" | "PasteText" | "ToggleComposer" => Some("Terminal"),
         // `alt_screen` is declared by the pane whenever a full-screen program
         // owns the grid, so this binding is simply absent there and Ctrl+V
         // carries on to the PTY as SYN (#677).
@@ -1686,6 +1719,22 @@ fn action_context(action: &str) -> Option<&'static str> {
 fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
     if let Some(agent) = crate::ui::agent_launch::agent_for_launch_action(action) {
         return Some(KeyBinding::new(keystroke, LaunchAgent { agent }, None));
+    }
+    // Roles are files, not a fixed set, so any well-formed name dispatches:
+    // the listener resolves it against what is on disk and drops a stale one
+    // (a role deleted after the key was bound) with a warning.
+    if let Some(slug) = action.strip_prefix(crate::ui::agent_launch::LAUNCH_ROLE_PREFIX) {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            return None;
+        }
+        return Some(KeyBinding::new(
+            keystroke,
+            LaunchRole {
+                slug: slug.to_string(),
+            },
+            None,
+        ));
     }
     Some(match action {
         "NewTab" => KeyBinding::new(keystroke, NewTab, None),
@@ -1765,6 +1814,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ShowRightPanelFiles" => KeyBinding::new(keystroke, ShowRightPanelFiles, None),
         "ShowRightPanelSearch" => KeyBinding::new(keystroke, ShowRightPanelSearch, None),
         "ShowRightPanelGitHub" => KeyBinding::new(keystroke, ShowRightPanelGitHub, None),
+        "ShowRightPanelReview" => KeyBinding::new(keystroke, ShowRightPanelReview, None),
         "ScmCommit" => KeyBinding::new(keystroke, ScmCommit, action_context(action)),
         "ScmCommitAmend" => KeyBinding::new(keystroke, ScmCommitAmend, action_context(action)),
         "ScmStageAll" => KeyBinding::new(keystroke, ScmStageAll, None),
@@ -1781,6 +1831,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ToggleDiffViewMode" => KeyBinding::new(keystroke, ToggleDiffViewMode, None),
         "FindInTerminal" => KeyBinding::new(keystroke, FindInTerminal, action_context(action)),
         "FindNext" => KeyBinding::new(keystroke, FindNext, action_context(action)),
+        "ToggleComposer" => KeyBinding::new(keystroke, ToggleComposer, action_context(action)),
         "FindPrevious" => KeyBinding::new(keystroke, FindPrevious, action_context(action)),
         "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, action_context(action)),
         "InsertNewline" => KeyBinding::new(keystroke, InsertNewline, action_context(action)),
@@ -1942,6 +1993,7 @@ mod tests {
             "ShowRightPanelFiles",
             "ShowRightPanelSearch",
             "ShowRightPanelGitHub",
+            "ShowRightPanelReview",
         ] {
             assert!(bindable.contains(action), "{action} has nowhere to bind to");
             assert!(

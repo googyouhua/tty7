@@ -8,7 +8,9 @@ use gpui_component::input::Input;
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Selectable as _, Side, Sizable as _, h_flex,
+};
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::actions::{
@@ -656,11 +658,12 @@ pub(crate) fn chrome_tile(button: Button, selected: bool, cx: &gpui::App) -> But
 /// control, local to remote (Changes, GitHub). GitHub is last so that hiding
 /// it for a repository without a GitHub remote moves nothing. Search is not
 /// among them: the Files tab searches names and contents in one field.
-const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 4] = [
+const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 5] = [
     (RightPanelTab::Info, L10nKey::PanelInfoTitle),
     (RightPanelTab::Files, L10nKey::PanelFilesTitle),
     (RightPanelTab::Scm, L10nKey::PanelChangesTitle),
     (RightPanelTab::GitHub, L10nKey::PanelGitHubTitle),
+    (RightPanelTab::Review, L10nKey::PanelReviewTitle),
 ];
 
 fn right_panel_tab_size(window: &Window) -> f32 {
@@ -1338,8 +1341,64 @@ pub(crate) fn select_workspace_action(index: usize) -> Option<Box<dyn gpui::Acti
     })
 }
 
+/// Which instance the workspace chip's badge names: the reused username,
+/// or the default-instance mark.
+#[derive(Debug, PartialEq)]
+pub(crate) enum InstanceBadge {
+    Named(String),
+    Default,
+}
+
 impl Tty7App {
     pub(crate) const AVATAR_PX: f32 = 18.0;
+
+    /// Pure mapping over `memory_name_for` output, so the rule is
+    /// unit-testable without globals or a window.
+    pub(crate) fn instance_badge_kind(memory: Option<&str>) -> InstanceBadge {
+        match memory {
+            Some(name) if name != tty7_core::core::instance::DEFAULT_SENTINEL => {
+                InstanceBadge::Named(name.to_string())
+            }
+            _ => InstanceBadge::Default,
+        }
+    }
+
+    /// A bare username says nothing about what it names; the badge greets in
+    /// the running locale: `Hi <name>` / `嗨 <name>` / `やあ <name>`.
+    pub(crate) fn welcome_badge_text(label: &str) -> String {
+        t_fmt(L10nKey::InstanceBadgeWelcome, &[("name", label)])
+    }
+
+    /// The instance badge pinned after the workspace chip's chevron: the
+    /// username this window runs on (`user: <name>`), or the default mark
+    /// (`user: <default>`). Display-only; the chip keeps its own click.
+    /// Theme-following, like the monogram beside it.
+    fn instance_badge(cx: &gpui::App) -> impl IntoElement {
+        let dir = crate::core::config::config_dir_path();
+        let memory = dir
+            .as_deref()
+            .and_then(tty7_core::core::instance::memory_name_for);
+        let name: SharedString = match Self::instance_badge_kind(memory.as_deref()) {
+            InstanceBadge::Named(name) => name.into(),
+            InstanceBadge::Default => t(L10nKey::InstancePickerDefault).into(),
+        };
+        let label: SharedString = Self::welcome_badge_text(&name).into();
+        let tip = dir
+            .as_deref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| label.to_string());
+        div()
+            .id("instance-badge")
+            .flex_shrink_0()
+            .px(px(5.))
+            .rounded(px(4.))
+            .bg(cx.theme().secondary)
+            .text_color(cx.theme().foreground)
+            .text_size(px(13.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(label)
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+    }
 
     pub(crate) fn workspace_head(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         if let Some(rename) = self.workspace_rename.as_ref() {
@@ -1428,7 +1487,8 @@ impl Tty7App {
                                     .path("icons/chevrons-up-down.svg")
                                     .size(px(11.))
                                     .flex_shrink_0(),
-                            ),
+                            )
+                            .child(Self::instance_badge(cx)),
                     )
                     .xsmall()
                     .w_full()
@@ -1993,13 +2053,25 @@ impl Tty7App {
         index: usize,
         below_wording: bool,
         app: &gpui::WeakEntity<Self>,
-        window: &Window,
-        cx: &App,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
         let Some(entity) = app.upgrade() else {
             return menu;
         };
         let this = entity.read(cx);
+        // Taken before `this` is let go for the Move to Group submenu below.
+        let sidebar =
+            cx.global::<Config>().tab_bar_position == crate::core::config::TabBarPosition::Left;
+        let move_targets = sidebar.then(|| {
+            let keys = this.sidebar_group_keys(cx);
+            crate::ui::tab_sidebar::move_targets(&keys, &this.sidebar_groups, index)
+        });
+        let in_kept_group = this
+            .tabs
+            .get(index)
+            .and_then(|t| t.group.get())
+            .is_some_and(|g| this.sidebar_groups.contains(g));
         let tab_count = this.tabs.len();
         let cwd = this.tab_cwd_text(index, window, cx);
         let has_cwd = cwd.is_some();
@@ -2067,48 +2139,75 @@ impl Tty7App {
             );
         }
 
-        // Where this tab sits, and where it could be put instead.
+        // Where this tab sits, and where it could be put instead: every group
+        // the sidebar draws, auto ones included, behind a submenu — a sidebar
+        // grouping by repo can hold dozens, far too many to lay out flat.
         //
-        // Laid out flat rather than behind a "Move to Group ▸" submenu: there
-        // are never many pinned groups — they are kept by hand — so a submenu
-        // would cost a second click to show two or three items, and
-        // `PopupMenu::submenu` wants a `&mut Context` this function does not
-        // have. The label above them says what the block is.
+        // An auto group's membership is its tabs' cwds, so a tab can only be
+        // put in one by keeping the group: picking it pins the group (as its
+        // header's pin does) and the tab with it. Remove from Group, offered
+        // only for a tab kept in a group, hands it back to auto grouping.
         //
-        // No way back to auto grouping here: that is a drag below the divider,
-        // the one place in the sidebar where "not kept by hand" is drawn.
-        // Offered only with the tabs in the sidebar for the same reason — a
-        // group is something the sidebar draws, and "move to group" from the
-        // top tab bar would name something the user cannot see.
-        if cx.global::<Config>().tab_bar_position == crate::core::config::TabBarPosition::Left {
-            let here = this
-                .tabs
-                .get(index)
-                .and_then(|t| t.group.get())
-                .filter(|g| this.sidebar_groups.contains(*g));
-            menu = menu
-                .separator()
-                .item(PopupMenuItem::label(t(L10nKey::SidebarMoveToGroup)));
-            for (id, name) in this.pinned_group_names() {
-                menu = menu.item(
-                    PopupMenuItem::new(name)
-                        .checked(here == Some(id))
-                        .on_click({
+        // Offered only with the tabs in the sidebar — a group is something the
+        // sidebar draws, and "move to group" from the top tab bar would name
+        // something the user cannot see.
+        if let Some(targets) = move_targets {
+            let app = app.clone();
+            menu = menu.separator().submenu(
+                t(L10nKey::SidebarMoveToGroup),
+                window,
+                cx,
+                move |sub, _window, _cx| {
+                    // A left check makes every row of the menu reserve a
+                    // check column, so the whole submenu sat one icon's
+                    // width right of the tab menu beside it. On the right,
+                    // its labels line up with the parent's.
+                    let mut sub = sub.check_side(Side::Right);
+                    for (i, target) in targets.iter().enumerate() {
+                        // Pinned groups, then the auto ones, as the divider
+                        // splits them in the sidebar.
+                        if i > 0 && targets[i - 1].key.is_pinned() && !target.key.is_pinned() {
+                            sub = sub.separator();
+                        }
+                        let mut item =
+                            PopupMenuItem::new(target.name.clone()).checked(target.checked);
+                        if !target.checked {
                             let app = app.clone();
-                            move |_, _window, cx| {
-                                let _ = app
-                                    .update(cx, |this, cx| this.set_tab_group(index, Some(id), cx));
-                            }
-                        }),
-                );
-            }
-            menu = menu.item(PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click({
-                let app = app.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| this.new_tab_group(index, window, cx));
-                }
-            }));
+                            let key = target.key.clone();
+                            item = item.on_click(move |_, _window, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    this.move_tab_to(index, key.clone(), cx)
+                                });
+                            });
+                        }
+                        sub = sub.item(item);
+                    }
+                    if !targets.is_empty() {
+                        sub = sub.separator();
+                    }
+                    let remove = app.clone();
+                    let new = app.clone();
+                    sub.item(
+                        PopupMenuItem::new(t(L10nKey::SidebarRemoveFromGroup))
+                            .disabled(!in_kept_group)
+                            .on_click(move |_, _window, cx| {
+                                let _ = remove
+                                    .update(cx, |this, cx| this.set_tab_group(index, None, cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click(
+                            move |_, window, cx| {
+                                let _ = new
+                                    .update(cx, |this, cx| this.new_tab_group(index, window, cx));
+                            },
+                        ),
+                    )
+                },
+            );
         }
+        // Read again: the submenu above needed `cx` mutably.
+        let this = entity.read(cx);
 
         let in_repo = this.tab_is_in_repo(index, window, cx);
         if in_repo {
@@ -3094,6 +3193,30 @@ mod tests {
     use gpui::TestAppContext;
     use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn the_chip_badge_names_the_reused_username_or_the_default_mark() {
+        assert_eq!(
+            Tty7App::instance_badge_kind(Some("alice")),
+            InstanceBadge::Named("alice".to_string())
+        );
+        assert_eq!(
+            Tty7App::instance_badge_kind(Some(tty7_core::core::instance::DEFAULT_SENTINEL)),
+            InstanceBadge::Default
+        );
+        assert_eq!(Tty7App::instance_badge_kind(None), InstanceBadge::Default);
+    }
+
+    #[test]
+    fn the_badge_greets_in_the_running_locale() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "Hi alice");
+        crate::ui::i18n::set_locale("zh-CN");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "嗨 alice");
+        crate::ui::i18n::set_locale("ja-JP");
+        assert_eq!(Tty7App::welcome_badge_text("alice"), "やあ alice");
+        crate::ui::i18n::set_locale("en");
+    }
 
     /// Where a band lands in the terminal column, for a strip that starts
     /// `lead` in and ends `strip_end` from the column's left edge.

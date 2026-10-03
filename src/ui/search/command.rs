@@ -38,6 +38,11 @@ pub enum CommandKind {
     CopyAgentSessionId,
     NewAgentTab,
     LaunchAgent(CLIAgent),
+    LaunchRole(String),
+    SendRoleStarter {
+        slug: String,
+        index: usize,
+    },
     ResetFontSize,
     NextPane,
     PrevPane,
@@ -63,6 +68,7 @@ pub enum CommandKind {
     ShowRightPanel(RightPanelTab),
     ClearTerminal,
     FindInTerminal,
+    ToggleComposer,
     FindNext,
     FindPrevious,
     CopyText,
@@ -242,8 +248,10 @@ impl CommandKind {
             ShowRightPanel(RightPanelTab::Files) => "right-panel-files",
             ShowRightPanel(RightPanelTab::Search) => "right-panel-search",
             ShowRightPanel(RightPanelTab::GitHub) => "right-panel-github",
+            ShowRightPanel(RightPanelTab::Review) => "right-panel-review",
             ClearTerminal => "clear-scrollback",
             FindInTerminal => "find",
+            ToggleComposer => "composer",
             FindNext => "find-next",
             FindPrevious => "find-previous",
             CopyText => "copy",
@@ -316,7 +324,9 @@ impl CommandKind {
             | OpenShell(_)
             | QuickConnect(_)
             | SaveQuickConnect(_)
-            | LaunchAgent(_) => return None,
+            | LaunchAgent(_)
+            | LaunchRole(_)
+            | SendRoleStarter { .. } => return None,
         })
     }
 
@@ -334,6 +344,12 @@ impl CommandKind {
             LaunchAgent(agent) => {
                 return crate::ui::keymap::effective_key(
                     crate::ui::agent_launch::launch_action_name(*agent),
+                    cx,
+                );
+            }
+            LaunchRole(slug) => {
+                return crate::ui::keymap::effective_key(
+                    &crate::ui::agent_launch::role_action_name(slug),
                     cx,
                 );
             }
@@ -390,9 +406,11 @@ impl CommandKind {
                 RightPanelTab::Files => "ShowRightPanelFiles",
                 RightPanelTab::Search => "ShowRightPanelSearch",
                 RightPanelTab::GitHub => "ShowRightPanelGitHub",
+                RightPanelTab::Review => "ShowRightPanelReview",
             },
             ClearTerminal => "ClearScrollback",
             FindInTerminal => "FindInTerminal",
+            ToggleComposer => "ToggleComposer",
             FindNext => "FindNext",
             FindPrevious => "FindPrevious",
             ReopenClosedTab => "ReopenClosedTab",
@@ -468,7 +486,9 @@ impl CommandKind {
             | SaveSshSessionAsHost
             | QuickConnect(_)
             | SaveQuickConnect(_)
-            | LaunchAgent(_) => return None,
+            | LaunchAgent(_)
+            | LaunchRole(_)
+            | SendRoleStarter { .. } => return None,
         };
         crate::ui::keymap::effective_key(action, cx)
     }
@@ -735,6 +755,10 @@ impl Item {
                 L10nKey::CmdRightPanelGitHub,
                 ShowRightPanel(RightPanelTab::GitHub),
             ),
+            Item::localized(
+                L10nKey::CmdRightPanelReview,
+                ShowRightPanel(RightPanelTab::Review),
+            ),
             Item::localized(L10nKey::CmdChangeTheme, OpenThemePicker),
             Item::localized(L10nKey::CmdResetFontSize, ResetFontSize),
             Item::localized(L10nKey::CmdEnterFullScreen, ToggleFullscreen),
@@ -761,6 +785,7 @@ impl Item {
         let terminal = [
             Item::localized(L10nKey::CmdClearScrollback, ClearTerminal),
             Item::localized(L10nKey::CmdFindInTerminal, FindInTerminal),
+            Item::localized(L10nKey::CmdToggleComposer, ToggleComposer),
             Item::localized(L10nKey::CmdFindNext, FindNext),
             Item::localized(L10nKey::CmdFindPrevious, FindPrevious),
             Item::localized(L10nKey::CmdCopy, CopyText),
@@ -932,6 +957,7 @@ mod tests {
             CommandKind::PasteText,
             CommandKind::SelectAllText,
             CommandKind::FindInTerminal,
+            CommandKind::ToggleComposer,
             CommandKind::FindNext,
             CommandKind::FindPrevious,
             CommandKind::OpenSettings,
@@ -942,6 +968,7 @@ mod tests {
             CommandKind::ShowRightPanel(RightPanelTab::Files),
             CommandKind::ShowRightPanel(RightPanelTab::Search),
             CommandKind::ShowRightPanel(RightPanelTab::GitHub),
+            CommandKind::ShowRightPanel(RightPanelTab::Review),
         ] {
             let id = kind.id().expect("static command has an id");
             assert!(seen.insert(id), "duplicate command id {id:?}");

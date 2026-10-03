@@ -20,6 +20,10 @@ pub struct PendingSpawn {
     pub agent: Option<crate::core::cli_agent::CLIAgent>,
     pub agent_session_id: Option<String>,
     pub agent_launch_argv: Option<Vec<String>>,
+    /// The custom role slug this pane was launched for, if any. A slug whose
+    /// role file is gone reads as no role at all: display and resume fall
+    /// back to the base agent (see `role_display`), never an error surface.
+    pub role: Option<String>,
     /// A command line to type into the shell once the pane exists, for a pane
     /// opened to run something (a quick-launched agent). Typed only into this
     /// pane, and only when it is a fresh shell rather than a restored one.

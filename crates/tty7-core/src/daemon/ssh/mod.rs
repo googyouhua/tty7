@@ -447,9 +447,44 @@ impl SshManager {
                 .await??
         };
 
+        // Reuse the username this process opened with: a GUI entered as `alice`
+        // lands its remote links on the far `tty7-alice` instance instead of
+        // whatever the far shell resolves. The default instance and explicit
+        // server commands keep today's behavior exactly.
+        let reuse = server_command
+            .is_none()
+            .then(remote_link::local_reuse_instance)
+            .flatten();
+        let instance_key = reuse.clone().unwrap_or_default();
+        // The instance directory needs the probed remote HOME, so probe once
+        // up front when reuse applies; the Control branch below reuses the
+        // result instead of probing a second time.
+        let probed_env: Option<remote_link::RemoteEnv> = match reuse.as_deref() {
+            Some(_) => probe_remote_env(conn).await,
+            None => None,
+        };
+
         let base = match server_command {
             Some(explicit) => explicit.to_string(),
-            None => crate::daemon::install::server_stdio_command(&installed),
+            None => {
+                let mut command = crate::daemon::install::server_stdio_command(&installed);
+                if let (Some(name), Some(env)) = (reuse.as_deref(), probed_env.as_ref()) {
+                    match env.home.as_deref().filter(|h| !h.is_empty()) {
+                        Some(home) => {
+                            command = remote_link::append_config_dir_arg(
+                                &command,
+                                &remote_link::instance_remote_dir(home, name),
+                            );
+                        }
+                        None => log::warn!(
+                            "ssh {:?}: reusing instance {name:?} needs the remote HOME; \
+                             continuing without --config-dir",
+                            conn.key()
+                        ),
+                    }
+                }
+                command
+            }
         };
         let command = setup.channel.bridge_command(&base);
 
@@ -460,9 +495,20 @@ impl SshManager {
             RouteChannel::Control => match remote_link::fixed_entry(&installed, &command) {
                 Some(entry) => entry,
                 None => {
-                    conn.remote_entry_or_init(|| async {
-                        let env = probe_remote_env(conn).await;
-                        let socket = env.as_ref().and_then(remote_link::remote_control_socket);
+                    let socket = match (reuse.as_deref(), probed_env) {
+                        (Some(name), Some(env)) => {
+                            let resolved = match env.home.as_deref().filter(|h| !h.is_empty()) {
+                                Some(home) => remote_link::env_for_instance(&env, home, name),
+                                None => env,
+                            };
+                            remote_link::remote_control_socket(&resolved)
+                        }
+                        _ => {
+                            let env = probe_remote_env(conn).await;
+                            env.as_ref().and_then(remote_link::remote_control_socket)
+                        }
+                    };
+                    conn.remote_entry_or_init(&instance_key, || async {
                         remote_link::choose_entry(socket.as_deref(), true, &command)
                     })
                     .await
@@ -479,8 +525,11 @@ impl SshManager {
                          falling back to `{command}`",
                         conn.key()
                     );
-                    conn.set_remote_entry(remote_link::choose_entry(Some(socket), false, &command))
-                        .await;
+                    conn.set_remote_entry(
+                        &instance_key,
+                        remote_link::choose_entry(Some(socket), false, &command),
+                    )
+                    .await;
                 }
             }
         }
