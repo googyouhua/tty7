@@ -44,16 +44,43 @@ pub fn roles_dir() -> Option<PathBuf> {
 }
 
 fn load_one(dir: &Path, slug: &str) -> Option<AgentRole> {
-    let text = std::fs::read_to_string(dir.join("role.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let file = dir.join("role.json");
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) => {
+            log::warn!(
+                "ignoring role at {}: cannot read role.json: {e}",
+                dir.display()
+            );
+            return None;
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                "ignoring role at {}: unparseable role.json: {e}",
+                dir.display()
+            );
+            return None;
+        }
+    };
     let file_slug = v.get("slug").and_then(|s| s.as_str()).unwrap_or("");
     if file_slug != slug || !slug_valid(file_slug) {
+        log::warn!(
+            "ignoring role at {}: slug {file_slug:?} does not match directory {slug:?} or is invalid",
+            dir.display()
+        );
         return None;
     }
-    let base = v
-        .get("base")
-        .and_then(|s| s.as_str())
-        .and_then(CLIAgent::from_slug)?;
+    let base_str = v.get("base").and_then(|s| s.as_str()).unwrap_or("");
+    let Some(base) = CLIAgent::from_slug(base_str) else {
+        log::warn!(
+            "ignoring role at {}: unknown base agent slug {base_str:?}",
+            dir.display()
+        );
+        return None;
+    };
     let launch = v
         .get("launch")
         .and_then(|s| s.as_str())
@@ -61,6 +88,7 @@ fn load_one(dir: &Path, slug: &str) -> Option<AgentRole> {
         .trim()
         .to_string();
     if launch.is_empty() {
+        log::warn!("ignoring role at {}: empty launch command", dir.display());
         return None;
     }
     let mut starters: Vec<RoleStarter> = v
