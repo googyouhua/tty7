@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use gpui::{App, Axis, Context, Window};
+use gpui::{App, Axis, Context, Entity, Window};
 use gpui_component::WindowExt as _;
 
 use crate::core::agent_roles::{AgentRole, role_launch_program};
@@ -94,6 +94,62 @@ pub(crate) fn role_launch_line(role: &AgentRole) -> String {
 pub(crate) fn role_resume_line(role: &AgentRole, session_id: &str) -> Option<String> {
     let argv: Vec<String> = role.launch.split_whitespace().map(str::to_string).collect();
     role.base.resume_command(session_id, Some(&argv))
+}
+
+/// How a role's instructions reach the agent on a fresh launch.
+pub(crate) enum RoleFirstSend {
+    /// The base takes an initial prompt argument (Claude, Codex, Gemini):
+    /// the whole command line as shell words, instructions last.
+    PromptArg(Vec<String>),
+    /// Anything else: type the launch line, then paste the instructions
+    /// into the agent once it is up.
+    TwoPhase { launch: String, followup: String },
+}
+
+pub(crate) fn plan_role_first_send(role: &AgentRole) -> Option<RoleFirstSend> {
+    let text = role.instructions.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(mut argv) = role.base.prompt_args(text) {
+        let mut full = vec![role_launch_line(role)];
+        full.append(&mut argv);
+        return Some(RoleFirstSend::PromptArg(full));
+    }
+    Some(RoleFirstSend::TwoPhase {
+        launch: role_launch_line(role),
+        followup: text.to_string(),
+    })
+}
+
+/// How long a fresh agent gets to reach its input before the role's
+/// instructions are pasted in. Best-effort (V1): anything earlier risks
+/// typing into a TUI that is still booting; the pane-side guard below is
+/// what keeps a late agent from eating the paste silently.
+const ROLE_FOLLOWUP_DELAY: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Paste `followup` into the agent running in `view`, after
+/// [`ROLE_FOLLOWUP_DELAY`]. A pane that is not running an agent by then
+/// gets nothing: pasting instructions into a bare shell would execute
+/// them as commands.
+pub(crate) fn send_role_followup_later(
+    view: Entity<crate::terminal::view::TerminalView>,
+    followup: String,
+    window: &mut Window,
+    cx: &mut Context<Tty7App>,
+) {
+    let view = view.downgrade();
+    cx.spawn_in(window, async move |_this, cx| {
+        cx.background_executor().timer(ROLE_FOLLOWUP_DELAY).await;
+        let _ = view.update_in(cx, |view, _, _| {
+            if view.agent().is_some() {
+                view.send_agent_prompt(&followup);
+            } else {
+                log::warn!("role instructions withheld: pane is not running an agent");
+            }
+        });
+    })
+    .detach();
 }
 
 /// One keymap action name per role on disk, in slug order
@@ -333,7 +389,15 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let command = role_launch_line(&role);
+        // Instructions ride the launch when the base takes a prompt
+        // argument, and follow a few seconds later otherwise; no
+        // instructions means the bare launch line.
+        let first_send = plan_role_first_send(&role);
+        let command = match &first_send {
+            None => role_launch_line(&role),
+            Some(RoleFirstSend::PromptArg(parts)) => join_shell_args(parts),
+            Some(RoleFirstSend::TwoPhase { launch, .. }) => launch.clone(),
+        };
         let slot = match at {
             SpawnWhere::NewTab => {
                 let cwd = self.tabs.get(self.active).and_then(|t| {
@@ -369,7 +433,16 @@ impl Tty7App {
                 pending.spawn.agent_launch_argv = Some(argv);
             });
         }
-        run_when_ready(&slot, command, cx);
+        // The delayed paste only fits a pane that is already up: one still
+        // connecting gets its followup at the arrival transition instead,
+        // which recomputes the same plan from the role file.
+        match (&slot, first_send) {
+            (PaneSlot::Ready(view), Some(RoleFirstSend::TwoPhase { followup, .. })) => {
+                run_when_ready(&slot, command, cx);
+                send_role_followup_later(view.clone(), followup, window, cx);
+            }
+            _ => run_when_ready(&slot, command, cx),
+        }
         // Recency only, under the role's own key — see `role_frecency_key`.
         self.update_config(cx, |cfg| {
             cfg.agent_frecency
@@ -704,6 +777,37 @@ mod tests {
             Some("frontend-reviewer".to_string())
         );
         assert!(role_for_launch_action("LaunchRole:nobody", &[role]).is_none());
+    }
+
+    #[test]
+    fn instructions_use_prompt_arg_where_supported() {
+        let role = AgentRole {
+            slug: "r".into(),
+            name: "R".into(),
+            base: CLIAgent::Claude,
+            description: String::new(),
+            launch: "claude".into(),
+            instructions: "Be terse.".into(),
+            starters: vec![],
+        };
+        assert!(matches!(
+            plan_role_first_send(&role),
+            Some(RoleFirstSend::PromptArg(_))
+        ));
+        let opencode = AgentRole {
+            base: CLIAgent::OpenCode,
+            launch: "opencode".into(),
+            ..role
+        };
+        assert!(matches!(
+            plan_role_first_send(&opencode),
+            Some(RoleFirstSend::TwoPhase { .. })
+        ));
+        let silent = AgentRole {
+            instructions: "   ".into(),
+            ..opencode
+        };
+        assert!(plan_role_first_send(&silent).is_none());
     }
 
     #[test]

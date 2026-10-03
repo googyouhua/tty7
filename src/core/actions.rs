@@ -179,3 +179,13 @@ pub struct LaunchAgent {
 pub struct LaunchRole {
     pub slug: String,
 }
+
+/// Send one of a role's conversation starters to the pane running that
+/// role. Built per starter for the palette and the pane context menu;
+/// see `ui::agent_launch::plan_role_first_send` for the launch-time half.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = tty7, no_json)]
+pub struct SendRoleStarter {
+    pub slug: String,
+    pub index: usize,
+}

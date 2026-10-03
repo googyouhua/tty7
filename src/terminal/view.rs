@@ -28,7 +28,7 @@ use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
     OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
-    SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
+    SendBackTab, SendRoleStarter, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
@@ -8135,6 +8135,16 @@ impl Render for TerminalView {
                     view.agent_session()
                         .is_some_and(|s| s.launch_argv.is_some())
                 });
+                // The role backing this pane's starters, if it runs one that
+                // defines any. Resolved here, beside the other probes, so no
+                // view borrow crosses the submenu calls below.
+                let starter_role = view
+                    .role()
+                    .and_then(crate::ui::agent_launch::find_role)
+                    .filter(|role| !role.starters.is_empty());
+                let starter_role_name = starter_role.as_ref().map(|role| {
+                    crate::ui::app::role_display(Some(&role.slug), view.agent())
+                });
 
                 let menu = match (can_fork, fork_ready) {
                     (true, true) => {
@@ -8181,6 +8191,34 @@ impl Render for TerminalView {
                         )
                     }
                     None => menu,
+                };
+
+                // A pane running a role that defines conversation starters
+                // offers them here, headed with the role's own name — the
+                // first production caller of `role_display`.
+                let menu = match (starter_role, starter_role_name) {
+                    (Some(role), Some(header)) => {
+                        let focus = menu_focus.clone();
+                        menu.separator().submenu(
+                            header,
+                            window,
+                            cx,
+                            move |submenu, _window, _cx| {
+                                let mut submenu = submenu.action_context(focus.clone());
+                                for (index, starter) in role.starters.iter().enumerate() {
+                                    submenu = submenu.menu(
+                                        starter.label.clone(),
+                                        Box::new(SendRoleStarter {
+                                            slug: role.slug.clone(),
+                                            index,
+                                        }),
+                                    );
+                                }
+                                submenu
+                            },
+                        )
+                    }
+                    _ => menu,
                 };
 
                 menu.separator()

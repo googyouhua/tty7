@@ -39,6 +39,7 @@ pub enum CommandKind {
     NewAgentTab,
     LaunchAgent(CLIAgent),
     LaunchRole(String),
+    SendRoleStarter { slug: String, index: usize },
     ResetFontSize,
     NextPane,
     PrevPane,
@@ -320,7 +321,8 @@ impl CommandKind {
             | QuickConnect(_)
             | SaveQuickConnect(_)
             | LaunchAgent(_)
-            | LaunchRole(_) => return None,
+            | LaunchRole(_)
+            | SendRoleStarter { .. } => return None,
         })
     }
 
@@ -480,7 +482,8 @@ impl CommandKind {
             | QuickConnect(_)
             | SaveQuickConnect(_)
             | LaunchAgent(_)
-            | LaunchRole(_) => return None,
+            | LaunchRole(_)
+            | SendRoleStarter { .. } => return None,
         };
         crate::ui::keymap::effective_key(action, cx)
     }
