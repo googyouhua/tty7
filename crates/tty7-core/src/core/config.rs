@@ -1587,6 +1587,10 @@ pub enum RightPanelTab {
     /// cost as `Search`.
     #[serde(rename = "github")]
     GitHub,
+    /// Code review: base/head picker for branch diffs plus local drafts.
+    /// Unknown to older builds, which fall back to `Info` via `de_lenient`.
+    #[serde(rename = "review")]
+    Review,
 }
 
 /// What opens when a file link in the grid is clicked.

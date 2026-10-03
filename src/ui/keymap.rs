@@ -693,6 +693,7 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ShowRightPanelSearch", ""),
         ("ShowRightPanelChanges", ""),
         ("ShowRightPanelGitHub", ""),
+        ("ShowRightPanelReview", ""),
         ("EditorSave", "secondary-s"),
         ("EditorSaveAs", "secondary-shift-s"),
         ("EditorGoToLine", "ctrl-g"),
@@ -1012,6 +1013,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "ShowRightPanelGitHub" => (
             CommandGroup::View,
             t(L10nKey::CmdRightPanelGitHub).to_string(),
+        ),
+        "ShowRightPanelReview" => (
+            CommandGroup::View,
+            t(L10nKey::CmdRightPanelReview).to_string(),
         ),
         "FindInTerminal" => (
             CommandGroup::Terminal,
@@ -1809,6 +1814,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ShowRightPanelFiles" => KeyBinding::new(keystroke, ShowRightPanelFiles, None),
         "ShowRightPanelSearch" => KeyBinding::new(keystroke, ShowRightPanelSearch, None),
         "ShowRightPanelGitHub" => KeyBinding::new(keystroke, ShowRightPanelGitHub, None),
+        "ShowRightPanelReview" => KeyBinding::new(keystroke, ShowRightPanelReview, None),
         "ScmCommit" => KeyBinding::new(keystroke, ScmCommit, action_context(action)),
         "ScmCommitAmend" => KeyBinding::new(keystroke, ScmCommitAmend, action_context(action)),
         "ScmStageAll" => KeyBinding::new(keystroke, ScmStageAll, None),
@@ -1987,6 +1993,7 @@ mod tests {
             "ShowRightPanelFiles",
             "ShowRightPanelSearch",
             "ShowRightPanelGitHub",
+            "ShowRightPanelReview",
         ] {
             assert!(bindable.contains(action), "{action} has nowhere to bind to");
             assert!(

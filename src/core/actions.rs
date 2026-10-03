@@ -88,6 +88,7 @@ actions!(
         ShowRightPanelFiles,
         ShowRightPanelSearch,
         ShowRightPanelGitHub,
+        ShowRightPanelReview,
         ScmCommit,
         ScmCommitAmend,
         ScmStageAll,

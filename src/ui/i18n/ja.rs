@@ -1452,6 +1452,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelFilesTitle => "ファイル",
         L10nKey::PanelSearchTitle => "検索",
         L10nKey::PanelGitHubTitle => "GitHub",
+        L10nKey::PanelReviewTitle => "レビュー",
         L10nKey::PanelNoSession => "アクティブなセッションがありません",
         L10nKey::PanelNoSessionHint => {
             "タブを開くと、そのシェル、ディレクトリ、プロセスがここに表示されます"
@@ -1640,6 +1641,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffViewSplit => "左右分割",
         L10nKey::DiffViewUnified => "統合",
         L10nKey::DiffCopySelection => "選択した行をコピー",
+        L10nKey::DiffReviewInNewAgent => "新しいエージェントでレビュー…",
+        L10nKey::DiffReviewAttach => "実行中のエージェントに送る…",
         L10nKey::PendingConnecting => "{machine} に接続中…",
         L10nKey::PendingUnreachable => "{machine} に到達できませんでした",
         L10nKey::WorktreePromptNeedsName => "ワークツリーには名前が必要です",
@@ -1913,6 +1916,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRightPanelFiles => "右パネル: ファイル",
         L10nKey::CmdRightPanelSearch => "右パネル: 検索",
         L10nKey::CmdRightPanelGitHub => "右パネル: GitHub",
+        L10nKey::CmdRightPanelReview => "右パネル: レビュー",
         L10nKey::CmdChangeTheme => "テーマを変更…",
         L10nKey::CmdResetFontSize => "フォントサイズをリセット",
         L10nKey::CmdEnterFullScreen => "全画面表示",
@@ -2102,6 +2106,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
         L10nKey::AppNoAgentOnPath => "このマシンの PATH にコーディングエージェントが見つかりません",
+        L10nKey::ReviewAgentTimeout => {
+            "新しいエージェントが時間内に起動しませんでした。もう一度お試しください。"
+        }
         L10nKey::AppNoAgentSeenHere => {
             "このワークスペースではまだコーディングエージェントが実行されていません — 一度手動で起動すると、ここに表示されます"
         }

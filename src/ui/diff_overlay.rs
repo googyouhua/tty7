@@ -8,6 +8,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, Pixels, SharedString, Window, div, prelude::*, px, rems,
 };
 use gpui_component::button::Button;
+use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
@@ -51,6 +52,15 @@ pub(crate) struct DiffOverlayState {
     pub(crate) loading: bool,
     pub(crate) expanded: HashMap<String, bool>,
     pub(crate) focus: Option<String>,
+    /// Inline review comment box for the current selection. `None` until the
+    /// user opens it; the text lives in the `InputState` itself.
+    pub(crate) review_box: Option<gpui::Entity<InputState>>,
+    /// When the open box was requested from the right-click menu: confirming
+    /// sends to a NEW agent instead of the running one.
+    pub(crate) review_to_new: bool,
+    /// A jump (from a draft) asked to reveal its selection once rows exist.
+    /// Consumed by the next row build.
+    pub(crate) reveal_selection: bool,
     /// A synthesized all-added card for a focused *untracked* file, keyed by
     /// path; `None` in the value means the read failed. git has no patch for
     /// an untracked file, so focusing one reads its bytes instead — lazily,
@@ -152,7 +162,12 @@ impl Tty7App {
                 return;
             }
             Some(o) => {
-                o.focus = focus;
+                if o.focus != focus {
+                    o.focus = focus.clone();
+                    // A kept scroll offset past the new file's last row paints
+                    // a blank viewport: the list only grows downward.
+                    o.list.scroll_to(gpui::ListOffset::default());
+                }
                 // Another file is on screen now; the range belonged to the
                 // one that left.
                 o.selection = None;
@@ -183,6 +198,9 @@ impl Tty7App {
             focus,
             preview: None,
             preview_loading: None,
+            review_box: None,
+            review_to_new: false,
+            reveal_selection: false,
             selection: None,
             selecting: false,
             list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
@@ -223,6 +241,87 @@ impl Tty7App {
             overlay.load = DiffLoad::Ready(snapshot);
             cx.notify();
         }
+    }
+
+    /// Open the overlay on an already-probed `Range` snapshot, typically the
+    /// Review tab's file-list snapshot: no second `git diff` runs, so a click
+    /// can never land on a different answer than the list that offered it.
+    /// Like [`Self::open_supplied_diff`] but for a git-backed source, which
+    /// keeps its identity (a later probe, if one ever runs, merges by key).
+    pub(crate) fn open_ready_range_diff(
+        &mut self,
+        host: crate::ui::host_ops::HostId,
+        snapshot: Arc<DiffSnapshot>,
+        focus: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        debug_assert!(matches!(snapshot.source, DiffSource::Range { .. }));
+        let (cwd, source) = (snapshot.root.clone(), snapshot.source.clone());
+        // Same toggle contract as `open_diff_overlay`: same file fronted
+        // twice closes, another file refocuses from the top.
+        let active = self.active;
+        let was_front = self.tabs.get(active).is_some_and(|t| {
+            t.overlay_top == crate::ui::app::OverlayTop::Diff || !self.code_panel_visible()
+        });
+        if let Some(tab) = self.tabs.get_mut(active) {
+            tab.overlay_top = crate::ui::app::OverlayTop::Diff;
+        }
+        match self
+            .tabs
+            .get_mut(active)
+            .and_then(|t| t.diff_overlay.as_mut())
+            .filter(|o| o.cwd == cwd && o.host_id == host && o.source == source)
+        {
+            Some(o) if o.focus == focus && was_front => {
+                self.close_diff_overlay(window, cx);
+                return;
+            }
+            Some(o) => {
+                if o.focus != focus {
+                    o.focus = focus.clone();
+                    o.list.scroll_to(gpui::ListOffset::default());
+                }
+                o.load = DiffLoad::Ready(Arc::clone(&snapshot));
+                o.loading = false;
+                o.selection = None;
+                o.selecting = false;
+                let handle = o.focus_handle.clone();
+                window.focus(&handle, cx);
+                cx.notify();
+                return;
+            }
+            None => {}
+        }
+        self.remember_active_pane(window, cx);
+        let Some(tab) = self.tabs.get_mut(active) else {
+            return;
+        };
+        let focus_handle = cx.focus_handle();
+        tab.diff_overlay = Some(DiffOverlayState {
+            host_id: host,
+            cwd,
+            source,
+            focus_handle: focus_handle.clone(),
+            load: DiffLoad::Ready(snapshot),
+            loading: false,
+            expanded: HashMap::new(),
+            focus,
+            preview: None,
+            preview_loading: None,
+            review_box: None,
+            review_to_new: false,
+            reveal_selection: false,
+            selection: None,
+            selecting: false,
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
+                .with_size_hint(DIFF_LINE_H),
+            rows: Rc::new(Vec::new()),
+            rows_key: None,
+            epoch: None,
+        });
+        window.focus(&focus_handle, cx);
+        cx.notify();
     }
 
     /// Which file the open overlay is focused on — for the row that asked,
@@ -371,6 +470,140 @@ impl Tty7App {
             return;
         }
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    }
+
+    /// Open the inline review comment box for the current selection.
+    /// With `to_new`, confirming the box sends to a NEW agent tab instead
+    /// of the running one.
+    pub(crate) fn open_review_box(
+        &mut self,
+        to_new: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let has_selection = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.diff_overlay.as_ref())
+            .is_some_and(|o| o.selection.is_some());
+        if !has_selection {
+            return;
+        }
+        let active = self.active;
+        let box_entity =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Comment on the selected diff…"));
+        box_entity.update(cx, |state, cx| state.focus(window, cx));
+        if let Some(overlay) = self
+            .tabs
+            .get_mut(active)
+            .and_then(|t| t.diff_overlay.as_mut())
+        {
+            overlay.review_box = Some(box_entity);
+            overlay.review_to_new = to_new;
+        }
+        cx.notify();
+    }
+
+    fn review_box_text(&self, cx: &gpui::App) -> String {
+        self.tabs
+            .get(self.active)
+            .and_then(|t| t.diff_overlay.as_ref())
+            .and_then(|o| o.review_box.as_ref())
+            .map(|b| b.read(cx).value().trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Drop the open comment box after its comment was consumed.
+    fn close_review_box(&mut self, cx: &mut Context<Self>) {
+        if let Some(overlay) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|t| t.diff_overlay.as_mut())
+        {
+            overlay.review_box = None;
+            overlay.review_to_new = false;
+        }
+        cx.notify();
+    }
+
+    /// Inline review strip under the header: comment box plus Save/Send.
+    fn render_review_strip(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let has_selection = self
+            .tabs
+            .get(self.active)?
+            .diff_overlay
+            .as_ref()?
+            .selection
+            .is_some();
+        let has_box = self
+            .tabs
+            .get(self.active)?
+            .diff_overlay
+            .as_ref()?
+            .review_box
+            .is_some();
+        if !has_selection && !has_box {
+            return None;
+        }
+        if !has_box {
+            // The comment box opens from the row right-click menu; no
+            // separate button is kept in the strip.
+            return None;
+        }
+        let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
+        let input = overlay.review_box.clone()?;
+        let to_new = overlay.review_to_new;
+        Some(
+            v_flex()
+                .flex_shrink_0()
+                .gap(px(6.))
+                .px(px(crate::ui::app::CONTENT_INSET))
+                .py(px(8.))
+                .child(Input::new(&input))
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .child(
+                            Button::new("diff-review-save")
+                                .label("Save draft")
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    let comment = this.review_box_text(cx);
+                                    if this.review_save_selection_as_draft(&comment, cx) {
+                                        this.close_review_box(cx);
+                                    }
+                                })),
+                        )
+                        .child(Button::new("diff-review-cancel").label("Cancel").on_click(
+                            cx.listener(|this, _, _window, cx| {
+                                this.close_review_box(cx);
+                            }),
+                        ))
+                        .child(
+                            Button::new("diff-review-send")
+                                .label(if to_new {
+                                    "Send to new agent"
+                                } else {
+                                    "Attach to agent"
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    let comment = this.review_box_text(cx);
+                                    let sent = if to_new {
+                                        this.review_send_to_new_agent(&comment, window, cx)
+                                    } else {
+                                        this.review_send_selection_to_agent(&comment, window, cx)
+                                    };
+                                    if sent.is_ok() && to_new {
+                                        this.close_review_box(cx);
+                                    }
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn spawn_diff_probe(&mut self, cx: &mut Context<Self>) {
@@ -561,17 +794,18 @@ impl Tty7App {
     ) -> Option<AnyElement> {
         self.spawn_untracked_preview_if_needed(cx);
         let body = self.sync_diff_rows(cx)?;
-        let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
-
-        let content = match body {
-            DiffBody::Message(text) => self.diff_message(text, cx),
-            DiffBody::Rows(snap) => self.diff_rows_list(overlay, snap, cx),
+        let (content, header, focus_handle) = {
+            let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
+            let content = match body {
+                DiffBody::Message(text) => self.diff_message(text, cx),
+                DiffBody::Rows(snap) => self.diff_rows_list(overlay, snap, cx),
+            };
+            let header = chrome
+                .renders_own_header()
+                .then(|| self.diff_header(overlay, chrome, window, cx));
+            (content, header, overlay.focus_handle.clone())
         };
-
-        let header = chrome
-            .renders_own_header()
-            .then(|| self.diff_header(overlay, chrome, window, cx));
-        let focus_handle = overlay.focus_handle.clone();
+        let review = self.render_review_strip(window, cx);
 
         let shell = v_flex();
         let shell = match chrome {
@@ -593,7 +827,22 @@ impl Tty7App {
             // Docked, the column wrapper has already painted the surface this
             // sits on — the same one the right panel uses — and nothing behind
             // it needs stopping.
-            DocumentChrome::Dock | DocumentChrome::DockHoisted => shell.size_full().min_w_0(),
+            //
+            // Definite height from the viewport, not flex: the flex chain
+            // above resolves indefinite in a real docked window, collapsing
+            // the virtualised list to zero (blank maximized, fine unmaximized
+            // or in fill).
+            DocumentChrome::Dock | DocumentChrome::DockHoisted => {
+                let column_h = if cfg!(target_os = "macos") {
+                    None
+                } else {
+                    Some(window.viewport_size().height.as_f32() - crate::ui::app::TITLE_BAR_HEIGHT)
+                };
+                match column_h {
+                    Some(h) => shell.h(px(h.max(200.))).w_full(),
+                    None => shell.flex_1().w_full().min_w_0().min_h_0(),
+                }
+            }
         };
         Some(
             shell
@@ -601,6 +850,15 @@ impl Tty7App {
                 .track_focus(&focus_handle)
                 .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                     if ev.keystroke.key.as_str() == "escape" {
+                        let had_box = this
+                            .tabs
+                            .get(this.active)
+                            .and_then(|t| t.diff_overlay.as_ref())
+                            .is_some_and(|o| o.review_box.is_some());
+                        if had_box {
+                            this.close_review_box(cx);
+                            return;
+                        }
                         this.close_diff_overlay(window, cx);
                     }
                     // The overlay takes focus when a row is dragged, so this is
@@ -620,6 +878,7 @@ impl Tty7App {
                     cx.listener(|this, _, _window, cx| this.end_diff_selection(cx)),
                 )
                 .children(header)
+                .children(review)
                 .child(content)
                 .into_any_element(),
         )
@@ -1106,7 +1365,41 @@ impl Tty7App {
                 ),
             };
             let key = from.to_key();
+            // A different document — new snapshot, focus, or preview — starts
+            // at the top. A scroll offset kept past the new content's last row
+            // paints a blank viewport: the list only grows downward.
+            let new_document = overlay.rows_key.as_ref().is_none_or(|held| {
+                !Arc::ptr_eq(&held.snap, from.snap)
+                    || held.focused != from.focused
+                    || held.preview.as_ref().map(Arc::as_ptr) != from.preview.map(Arc::as_ptr)
+            });
             resync_list(&overlay.list, &overlay.rows, &rows);
+            if new_document {
+                overlay.list.scroll_to(gpui::ListOffset::default());
+            }
+            // A jump asked to reveal its selection: scroll the first covered
+            // row to the top once rows exist, then consume the request.
+            if overlay.reveal_selection && !rows.is_empty() {
+                overlay.reveal_selection = false;
+                if let Some(sel) = overlay.selection.clone() {
+                    let (start, end) = if sel.anchor <= sel.head {
+                        (sel.anchor, sel.head)
+                    } else {
+                        (sel.head, sel.anchor)
+                    };
+                    if let Some(ix) = rows.iter().position(|row| match row {
+                        DiffRow::Split { at, .. } | DiffRow::Unified { at, .. } => {
+                            at.path.as_ref() == sel.path && start <= at.id && at.id <= end
+                        }
+                        _ => false,
+                    }) {
+                        overlay.list.scroll_to(gpui::ListOffset {
+                            item_ix: ix,
+                            offset_in_item: px(0.),
+                        });
+                    }
+                }
+            }
             overlay.rows = Rc::new(rows);
             overlay.rows_key = Some(key);
         } else if let Some(held) = overlay.rows_key.as_mut() {
@@ -1148,7 +1441,13 @@ impl Tty7App {
                 None => div().into_any_element(),
             }
         })
-        .size_full()
+        // Pure flex, no percentage heights: the file tree, the panel lists
+        // and now this list all take their height from the flex left over.
+        // `min_h_0` lets it shrink inside the column instead of forcing the
+        // header off the end.
+        .w_full()
+        .flex_1()
+        .min_h_0()
         // Only the vertical padding: `List` lays every item out at its own
         // full width and puts it at its own left edge, so a horizontal
         // padding here would be silently ignored. The rows carry their own —
@@ -1520,6 +1819,26 @@ fn copy_menu(
                 let app = app.clone();
                 move |_, _window, cx| {
                     app.update(cx, |this, cx| this.copy_diff_selection(cx)).ok();
+                }
+            }))
+            .item(
+                PopupMenuItem::new(t(L10nKey::DiffReviewInNewAgent)).on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.open_review_box(true, window, cx);
+                        })
+                        .ok();
+                    }
+                }),
+            )
+            .item(PopupMenuItem::new(t(L10nKey::DiffReviewAttach)).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    app.update(cx, |this, cx| {
+                        this.open_review_box(false, window, cx);
+                    })
+                    .ok();
                 }
             }))
         })
@@ -1920,7 +2239,7 @@ fn diff_unified_row(
 /// Which layout the overlay draws. One setting for the window, not one per
 /// overlay: VS Code's `diffEditor.renderSideBySide` is global for the same
 /// reason — re-picking on every open is a chore, not a choice.
-fn view_mode(cx: &gpui::App) -> DiffViewMode {
+pub(crate) fn view_mode(cx: &gpui::App) -> DiffViewMode {
     cx.try_global::<Config>()
         .map(|cfg| cfg.diff_view)
         .unwrap_or_default()
@@ -3545,6 +3864,9 @@ mod selection_gpui_tests {
                 focus: None,
                 preview: None,
                 preview_loading: None,
+                review_box: None,
+                review_to_new: false,
+                reveal_selection: false,
                 selection: None,
                 selecting: false,
                 list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
@@ -3591,6 +3913,216 @@ mod selection_gpui_tests {
                 .as_ref()
                 .and_then(|o| o.selection.clone())
         })
+    }
+
+    /// A docked diff column at desktop width has to paint its rows, not just
+    /// its header: the virtualised list must take height from the flex left
+    /// over, never from content it has not measured yet.
+    #[gpui::test]
+    fn a_docked_range_overlay_paints_its_rows(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            let overlay = app.tabs[0].diff_overlay.as_mut().unwrap();
+            let mut second = patched_file();
+            second.path = "src/second.rs".to_string();
+            let mut third = patched_file();
+            third.path = "src/third.rs".to_string();
+            overlay.load = DiffLoad::Ready(Arc::new(DiffSnapshot {
+                source: DiffSource::Range {
+                    base: "main".to_string(),
+                    head: "feat".to_string(),
+                },
+                files: vec![patched_file(), second, third],
+                ..Default::default()
+            }));
+            overlay.focus = Some("src/second.rs".to_string());
+            app.tabs[0].overlay_top = crate::ui::app::OverlayTop::Diff;
+            cx.notify();
+        });
+        vcx.simulate_resize(gpui::size(px(1920.), px(1080.)));
+        vcx.run_until_parked();
+        assert!(
+            app.update_in(&mut vcx, |app, window, cx| app
+                .document_dock_px(window, cx)
+                .is_some()),
+            "a 1920 window docks the document column"
+        );
+        row_probe::take();
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+        let built = row_probe::take();
+        assert!(
+            built > 0,
+            "the docked overlay painted no rows at desktop width"
+        );
+    }
+
+    /// The Review tab's click path end to end: a real terminal tab, the right
+    /// panel open beside a wide docked column, snapshot installed ready.
+    #[gpui::test]
+    fn a_ready_range_overlay_paints_with_panel_open(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+        let mut second = patched_file();
+        second.path = "src/second.rs".to_string();
+        let mut third = patched_file();
+        third.path = "src/third.rs".to_string();
+        let snap = Arc::new(DiffSnapshot {
+            source: DiffSource::Range {
+                base: "main".to_string(),
+                head: "feat".to_string(),
+            },
+            files: vec![patched_file(), second, third],
+            ..Default::default()
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.set_right_panel_tab(crate::core::config::RightPanelTab::Review, cx);
+            app.open_ready_range_diff(
+                crate::ui::host_ops::HostId::LOCAL,
+                snap,
+                Some("src/second.rs".to_string()),
+                window,
+                cx,
+            );
+        });
+        vcx.simulate_resize(gpui::size(px(1920.), px(1080.)));
+        vcx.run_until_parked();
+        row_probe::take();
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+        let built = row_probe::take();
+        assert!(
+            built > 0,
+            "the ready Range overlay painted no rows beside an open panel"
+        );
+    }
+
+    /// A realistic two-branch Range diff, unfocused, at desktop width: long
+    /// lines, tabs and CJK included. If this paints nothing, the blank is in
+    /// the render path, not the data.
+    #[gpui::test]
+    fn a_realistic_range_overlay_paints_unfocused(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("tty7-range-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet", "-b", "main"]);
+        git(&["config", "user.email", "t@x"]);
+        git(&["config", "user.name", "t"]);
+        let mut big = String::new();
+        for i in 0..200 {
+            big.push_str(&format!(
+                "\tfnock_{i} → “nock” 《中文》 {}\n",
+                "x".repeat(300)
+            ));
+        }
+        std::fs::write(root.join("a.rs"), &big).unwrap();
+        std::fs::write(root.join("b.md"), "# title\n\nbody line\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+        git(&["checkout", "--quiet", "-b", "feat"]);
+        let mut big2 = String::new();
+        for i in 0..200 {
+            big2.push_str(&format!(
+                "\tfnock_{i} → “mock” 《中文改》 {}\n",
+                "y".repeat(300)
+            ));
+        }
+        std::fs::write(root.join("a.rs"), &big2).unwrap();
+        std::fs::write(root.join("c.txt"), "new file\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "two"]);
+
+        let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+        let open = root.clone();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.set_right_panel_tab(crate::core::config::RightPanelTab::Review, cx);
+            app.open_diff_overlay(
+                crate::ui::host_ops::HostId::LOCAL,
+                open,
+                DiffSource::Range {
+                    base: "main".to_string(),
+                    head: "feat".to_string(),
+                },
+                None,
+                window,
+                cx,
+            );
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            vcx.background_executor.run_until_parked();
+            let ready = app.update_in(&mut vcx, |app, _, _| {
+                app.tabs[app.active]
+                    .diff_overlay
+                    .as_ref()
+                    .is_some_and(|o| matches!(o.load, DiffLoad::Ready(_)) && !o.loading)
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the range overlay never landed a snapshot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        vcx.simulate_resize(gpui::size(px(1920.), px(1080.)));
+        vcx.run_until_parked();
+        row_probe::take();
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+        let built = row_probe::take();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            built > 0,
+            "the realistic Range overlay painted no rows at desktop width"
+        );
+    }
+
+    /// Maximizing then restoring must not blank the list: paint at one size,
+    /// resize wide (dock) and narrow (fill fallback), paint at each step.
+    #[gpui::test]
+    fn resizing_keeps_the_rows_painted(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+        let mut second = patched_file();
+        second.path = "src/second.rs".to_string();
+        let snap = Arc::new(DiffSnapshot {
+            source: DiffSource::Range {
+                base: "main".to_string(),
+                head: "feat".to_string(),
+            },
+            files: vec![patched_file(), second],
+            ..Default::default()
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_ready_range_diff(
+                crate::ui::host_ops::HostId::LOCAL,
+                snap,
+                Some("src/second.rs".to_string()),
+                window,
+                cx,
+            );
+        });
+        for (w, h) in [(1280., 800.), (1920., 1080.), (1000., 700.), (1920., 1080.)] {
+            vcx.simulate_resize(gpui::size(px(w), px(h)));
+            vcx.run_until_parked();
+            row_probe::take();
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+            let built = row_probe::take();
+            assert!(
+                built > 0,
+                "no rows painted at {w}x{h}: resize blanked the overlay"
+            );
+        }
     }
 
     #[gpui::test]
