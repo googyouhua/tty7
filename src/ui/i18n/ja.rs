@@ -283,6 +283,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavInput => "キーボードとマウス",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "連携",
+        L10nKey::SettingsNavAgentRoles => "エージェント",
         L10nKey::SettingsNavKeybindings => "キーボードショートカット",
         L10nKey::SettingsNavAbout => "情報",
         L10nKey::SettingsHeader => "設定",
@@ -700,6 +701,29 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentsIntroDesc => {
             "フックでエージェントの状態（作業中 / 待機中 / 完了）をタブバーに表示します"
         }
+        L10nKey::SettingsRolesIntro => "カスタムエージェント",
+        L10nKey::SettingsRolesIntroDesc => {
+            "仕事に名前を付け、組み込みエージェントのいずれかに結び付け、独自のコマンドと開始プロンプトで起動します。"
+        }
+        L10nKey::SettingsRolesEmpty => "カスタムロールはまだありません。",
+        L10nKey::SettingsRoleNew => "新規ロール",
+        L10nKey::SettingsRoleEdit => "ロールを編集",
+        L10nKey::SettingsRoleEditAction => "編集",
+        L10nKey::SettingsRoleName => "名前",
+        L10nKey::SettingsRoleNameDesc => "検索と起動行に表示されます。スラッグはここから一度だけ生成されます。",
+        L10nKey::SettingsRoleBase => "ベースエージェント",
+        L10nKey::SettingsRoleBaseDesc => "検出・ステータス・再開はすべてこのエージェントに従います。",
+        L10nKey::SettingsRoleLaunch => "起動コマンド",
+        L10nKey::SettingsRoleLaunchDesc => "新しいシェルに入力します（例：claude --model opus）。",
+        L10nKey::SettingsRoleDescription => "説明",
+        L10nKey::SettingsRoleDescriptionDesc => "表示のみ。エージェントには送信されません。",
+        L10nKey::SettingsRoleInstructions => "指示",
+        L10nKey::SettingsRoleInstructionsDesc => "新規起動のたびに最初に送信されます。",
+        L10nKey::SettingsRoleStarters => "会話スターター",
+        L10nKey::SettingsRoleStartersDesc => "最大3件。ペインメニューから選んで送信します。",
+        L10nKey::SettingsRoleNameRequired => "ロールに名前を付けてください。",
+        L10nKey::SettingsRoleLaunchRequired => "起動コマンドを入力してください。",
+        L10nKey::SettingsRoleSearchKeywords => "ロール エージェント 起動 スターター 指示 カスタム",
         L10nKey::SettingsReadingAgentConfig => "このマシンのエージェント設定を読み込んでいます…",
         L10nKey::SettingsStatusNotInstalled => "未インストール",
         L10nKey::SettingsStatusInstalled => "インストール済み",

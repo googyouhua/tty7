@@ -33,6 +33,7 @@ use crate::ui::presets;
 use tty7_core::core::onekey::{OneKeyEntry, OneKeyKind};
 
 mod agents;
+mod agent_roles;
 mod editor;
 mod hosts;
 pub(crate) mod kit;
@@ -204,12 +205,13 @@ pub(crate) enum SettingsSection {
     Ssh,
     Mobile,
     Agents,
+    AgentRoles,
     Keybindings,
     About,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 8] = [
+    pub(crate) const ALL: [SettingsSection; 9] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Terminal,
@@ -217,6 +219,7 @@ impl SettingsSection {
         SettingsSection::Ssh,
         SettingsSection::Mobile,
         SettingsSection::Agents,
+        SettingsSection::AgentRoles,
         SettingsSection::About,
     ];
 
@@ -236,6 +239,7 @@ impl SettingsSection {
             Self::Ssh => L10nKey::SettingsNavSsh,
             Self::Mobile => L10nKey::SettingsNavMobile,
             Self::Agents => L10nKey::SettingsNavAgents,
+            Self::AgentRoles => L10nKey::SettingsNavAgentRoles,
             Self::Keybindings => L10nKey::SettingsNavKeybindings,
             Self::About => L10nKey::SettingsNavAbout,
         }
@@ -250,6 +254,7 @@ impl SettingsSection {
             Self::Ssh => "icons/settings/ssh.svg",
             Self::Mobile => "icons/settings/mobile.svg",
             Self::Agents => "icons/settings/integrations.svg",
+            Self::AgentRoles => "icons/settings/integrations.svg",
             Self::About => "icons/settings/about.svg",
         }
     }
@@ -263,6 +268,7 @@ impl SettingsSection {
             SettingsSection::Ssh => "settings:ssh",
             SettingsSection::Mobile => "settings:mobile",
             SettingsSection::Agents => "settings:agents",
+            SettingsSection::AgentRoles => "settings:agent-roles",
             SettingsSection::Keybindings => "settings:keybindings",
             SettingsSection::About => "settings:about",
         }
@@ -654,6 +660,16 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Agents,
             title: SettingsAgentAntigravity,
             keywords: SettingsSearchAntigravityKeywords,
+        },
+        SearchEntry {
+            section: AgentRoles,
+            title: SettingsRolesIntro,
+            keywords: SettingsRoleSearchKeywords,
+        },
+        SearchEntry {
+            section: AgentRoles,
+            title: SettingsRoleNew,
+            keywords: SettingsRoleSearchKeywords,
         },
         SearchEntry {
             section: General,
@@ -1272,6 +1288,8 @@ pub(crate) struct SettingsState {
     pub(crate) ssh_collapsed_groups: std::collections::HashSet<String>,
     /// The OneKey add/edit form (None when closed).
     pub(crate) onekey_form: Option<OneKeyForm>,
+    /// The custom-role add/edit form (None when the list is showing).
+    pub(crate) role_form: Option<agent_roles::AgentRoleForm>,
     pub(crate) agent_hooks_host: HostId,
     pub(crate) agent_hooks_states: AgentHooksView,
     pub(crate) agent_hooks_seq: u64,
@@ -3090,7 +3108,7 @@ mod tests {
             );
             assert!(SettingsSection::ALL.contains(&entry.section));
         }
-        assert_eq!(SettingsSection::ALL.len(), 8);
+        assert_eq!(SettingsSection::ALL.len(), 9);
         assert!(!SettingsSection::ALL.contains(&SettingsSection::Keybindings));
     }
 
@@ -3666,6 +3684,21 @@ mod tests {
                         && t(e.title) == agent.display_name()),
                 "no Agents index entry titled {:?}",
                 agent.display_name()
+            );
+        }
+    }
+
+    #[test]
+    fn role_rows_are_in_the_search_index() {
+        for title in [
+            L10nKey::SettingsRolesIntro,
+            L10nKey::SettingsRoleNew,
+        ] {
+            assert!(
+                settings_search_entries().iter().any(|e| e.section
+                    == SettingsSection::AgentRoles
+                    && e.title == title),
+                "no Agents index entry for {title:?}",
             );
         }
     }

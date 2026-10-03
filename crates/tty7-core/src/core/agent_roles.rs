@@ -157,6 +157,68 @@ pub fn role_launch_program(role: &AgentRole) -> Option<String> {
     crate::core::cli_agent::launch_program(&role.launch)
 }
 
+/// A fresh slug for `want` that no slug in `existing` takes: `want` itself,
+/// or `want-2`, `want-3`, … The Settings page mints these for new roles.
+pub fn unique_slug(existing: &[String], want: &str) -> String {
+    if !existing.iter().any(|s| s == want) {
+        return want.to_string();
+    }
+    for n in 2..1000 {
+        let cand = format!("{want}-{n}");
+        if !existing.iter().any(|s| s == &cand) {
+            return cand;
+        }
+    }
+    format!("{want}-new")
+}
+
+/// `role` as the JSON `role.json` holds — the same shape [`load_roles`]
+/// reads, so a save always loads back.
+pub fn role_to_json(role: &AgentRole) -> serde_json::Value {
+    serde_json::json!({
+        "slug": role.slug,
+        "name": role.name,
+        "base": role.base.slug(),
+        "description": role.description,
+        "launch": role.launch,
+        "instructions": role.instructions,
+        "starters": role.starters.iter().map(|s| {
+            serde_json::json!({"label": s.label, "prompt": s.prompt})
+        }).collect::<Vec<_>>(),
+    })
+}
+
+/// Write `role` to `roles/<slug>/role.json` under `dir`, creating the
+/// directory. Refuses a slug that fails [`slug_valid`].
+pub fn save_role(dir: &Path, role: &AgentRole) -> std::io::Result<()> {
+    if !slug_valid(&role.slug) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid role slug {:?}", role.slug),
+        ));
+    }
+    let sub = dir.join(&role.slug);
+    std::fs::create_dir_all(&sub)?;
+    let text = serde_json::to_string_pretty(&role_to_json(role))
+        .map_err(std::io::Error::other)?;
+    std::fs::write(sub.join("role.json"), text)?;
+    log::info!("saved agent role {}", role.slug);
+    Ok(())
+}
+
+/// Remove `roles/<slug>/` under `dir`. Missing slugs are already gone, so
+/// that is success, not an error.
+pub fn delete_role(dir: &Path, slug: &str) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(dir.join(slug)) {
+        Ok(()) => {
+            log::info!("deleted agent role {slug}");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +311,57 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["A", "B", "C"]
         );
+    }
+
+    #[test]
+    fn slug_from_name_is_stable_and_unique() {
+        assert_eq!(slug_from_name("Frontend Reviewer"), "frontend-reviewer");
+        assert_eq!(slug_from_name("  !!  "), "role");
+    }
+
+    #[test]
+    fn duplicate_names_get_numeric_suffix() {
+        let existing = vec!["frontend-reviewer".to_string()];
+        assert_eq!(
+            unique_slug(&existing, "frontend-reviewer"),
+            "frontend-reviewer-2"
+        );
+        assert_eq!(unique_slug(&existing, "other"), "other");
+    }
+
+    #[test]
+    fn save_loads_back_what_was_saved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let role = AgentRole {
+            slug: "frontend-reviewer".to_string(),
+            name: "Frontend Reviewer".to_string(),
+            base: CLIAgent::Claude,
+            description: "Reviews frontend PRs".to_string(),
+            launch: "claude --model opus".to_string(),
+            instructions: "Be terse.".to_string(),
+            starters: vec![RoleStarter {
+                label: "Review a PR".to_string(),
+                prompt: "Review the open PR.".to_string(),
+            }],
+        };
+        save_role(dir.path(), &role).unwrap();
+        let roles = load_roles(dir.path());
+        assert_eq!(roles, vec![role]);
+    }
+
+    #[test]
+    fn saving_a_bad_slug_fails_and_deleting_a_ghost_succeeds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bad = AgentRole {
+            slug: "Nope!!".to_string(),
+            name: "Nope".to_string(),
+            base: CLIAgent::Claude,
+            description: String::new(),
+            launch: "claude".to_string(),
+            instructions: String::new(),
+            starters: vec![],
+        };
+        assert!(save_role(dir.path(), &bad).is_err());
+        assert!(delete_role(dir.path(), "ghost").is_ok());
     }
 }

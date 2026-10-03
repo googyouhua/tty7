@@ -7619,6 +7619,7 @@ impl Tty7App {
             ssh_filter,
             ssh_collapsed_groups: std::collections::HashSet::new(),
             onekey_form: None,
+            role_form: None,
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
             agent_hooks_states: crate::ui::settings::AgentHooksView::Loading,
             agent_hooks_seq: 0,
