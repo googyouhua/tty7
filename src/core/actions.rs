@@ -171,3 +171,11 @@ actions!(
 pub struct LaunchAgent {
     pub agent: tty7_core::core::cli_agent::CLIAgent,
 }
+
+/// Open a new tab running one particular agent role. The keymap names one of
+/// these per role on disk (`LaunchRole:<slug>`, …); see `ui::agent_launch`.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = tty7, no_json)]
+pub struct LaunchRole {
+    pub slug: String,
+}

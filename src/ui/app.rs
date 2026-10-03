@@ -6569,6 +6569,23 @@ impl Tty7App {
                 .in_section(new_terminal.clone()),
             );
         }
+        // Beside the agents', under the same section: one row per role whose
+        // launch program is on this computer's `PATH`, wearing its base
+        // agent's avatar so a tab reads the same in both places.
+        for role in self.offered_roles_here(cx) {
+            out.push(
+                Item::new(
+                    format!("Role: {}", role.name),
+                    CommandKind::LaunchRole(role.slug.clone()),
+                )
+                .with_subtitle(crate::ui::agent_launch::role_launch_line(&role))
+                .with_avatar(Avatar {
+                    agent: Some(role.base),
+                    ..Avatar::default()
+                })
+                .in_section(new_terminal.clone()),
+            );
+        }
         out
     }
 
@@ -6843,6 +6860,16 @@ impl Tty7App {
                 let at = SpawnWhere::from_modifiers(window.modifiers());
                 self.launch_agent(agent, at, window, cx)
             }
+            // A key bound to `LaunchRole:<slug>` or a `Role: …` row. Either
+            // outlives the file it was built from, so a role deleted since
+            // resolves to nothing and stays quiet apart from this warning.
+            LaunchRole(slug) => match crate::ui::agent_launch::find_role(&slug) {
+                Some(role) => {
+                    let at = SpawnWhere::from_modifiers(window.modifiers());
+                    self.launch_role(role, at, window, cx)
+                }
+                None => log::warn!("role '{slug}' is gone; not launching it"),
+            },
             CopyAgentSessionId => self.copy_agent_session_id(self.active, window, cx),
             RenameWorkspace => self.start_workspace_rename(window, cx),
             OpenSettings => self.toggle_settings(window, cx),
@@ -10205,6 +10232,14 @@ impl Render for Tty7App {
                 )
                 .on_action(cx.listener(|this, action: &LaunchAgent, window, cx| {
                     this.launch_agent(action.agent, SpawnWhere::NewTab, window, cx)
+                }))
+                .on_action(cx.listener(|this, action: &LaunchRole, window, cx| {
+                    match crate::ui::agent_launch::find_role(&action.slug) {
+                        Some(role) => this.launch_role(role, SpawnWhere::NewTab, window, cx),
+                        None => {
+                            log::warn!("role '{}' is gone; not launching it", action.slug)
+                        }
+                    }
                 }))
                 .on_action(cx.listener(|this, _: &SaveAgentLaunchArgs, window, cx| {
                     this.save_agent_launch_args(window, cx)

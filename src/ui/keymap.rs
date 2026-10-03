@@ -408,6 +408,15 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
             .iter()
             .map(|(_, name)| (name.as_str(), "")),
     );
+    // One slot per role on disk, unbound, beside the agents': the palette's
+    // `Role: …` rows are what these run, and each takes a key the same way
+    // any other action does.
+    let role_names = crate::ui::agent_launch::launch_role_action_names();
+    let after_agents = at + crate::ui::agent_launch::launch_action_names().len();
+    bindings.splice(
+        after_agents..after_agents,
+        role_names.iter().map(|name| (*name, "")),
+    );
     bindings
 }
 
@@ -782,6 +791,14 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
                 &[("name", agent.display_name())],
             ),
         ));
+    }
+    if let Some(slug) = action.strip_prefix(crate::ui::agent_launch::LAUNCH_ROLE_PREFIX) {
+        // The role's own name while it is on disk; the slug is what a row
+        // retargeted at a deleted role still shows.
+        let name = crate::ui::agent_launch::find_role(slug)
+            .map(|role| role.name)
+            .unwrap_or_else(|| slug.trim().to_string());
+        return Some((CommandGroup::Agents, format!("Role: {name}")));
     }
     if let Some(n) = action.strip_prefix("SelectWorkspace") {
         return Some((
@@ -1697,6 +1714,22 @@ fn action_context(action: &str) -> Option<&'static str> {
 fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
     if let Some(agent) = crate::ui::agent_launch::agent_for_launch_action(action) {
         return Some(KeyBinding::new(keystroke, LaunchAgent { agent }, None));
+    }
+    // Roles are files, not a fixed set, so any well-formed name dispatches:
+    // the listener resolves it against what is on disk and drops a stale one
+    // (a role deleted after the key was bound) with a warning.
+    if let Some(slug) = action.strip_prefix(crate::ui::agent_launch::LAUNCH_ROLE_PREFIX) {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            return None;
+        }
+        return Some(KeyBinding::new(
+            keystroke,
+            LaunchRole {
+                slug: slug.to_string(),
+            },
+            None,
+        ));
     }
     Some(match action {
         "NewTab" => KeyBinding::new(keystroke, NewTab, None),

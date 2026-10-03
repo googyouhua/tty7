@@ -20,6 +20,7 @@ use std::sync::LazyLock;
 use gpui::{App, Axis, Context, Window};
 use gpui_component::WindowExt as _;
 
+use crate::core::agent_roles::{AgentRole, role_launch_program};
 use crate::core::cli_agent::{CLIAgent, launch_program, program_on_path};
 use crate::core::config::{Config, ProfileUsage, unix_now};
 use crate::core::session::WorkspaceStore;
@@ -53,6 +54,89 @@ pub(crate) fn agent_for_launch_action(action: &str) -> Option<CLIAgent> {
     action
         .strip_prefix(LAUNCH_ACTION_PREFIX)
         .and_then(CLIAgent::from_slug)
+}
+
+/// How the keymap spells "launch this role": `LaunchRole:<slug>`.
+pub(crate) const LAUNCH_ROLE_PREFIX: &str = "LaunchRole:";
+
+/// The keymap action name that launches the role `slug` belongs to.
+pub(crate) fn role_action_name(slug: &str) -> String {
+    format!("{LAUNCH_ROLE_PREFIX}{slug}")
+}
+
+pub(crate) fn role_for_launch_action(action: &str, roles: &[AgentRole]) -> Option<AgentRole> {
+    let slug = action.strip_prefix(LAUNCH_ROLE_PREFIX)?;
+    roles
+        .iter()
+        .find(|r| r.slug.eq_ignore_ascii_case(slug.trim()))
+        .cloned()
+}
+
+pub(crate) fn offered_roles(
+    roles: Vec<AgentRole>,
+    path: &std::ffi::OsStr,
+    seen_bases: Option<&[String]>,
+) -> Vec<AgentRole> {
+    roles
+        .into_iter()
+        .filter(|r| match seen_bases {
+            Some(seen) => seen.iter().any(|s| s.eq_ignore_ascii_case(r.base.slug())),
+            None => role_launch_program(r)
+                .is_some_and(|p| crate::core::cli_agent::program_on_path(&p, path)),
+        })
+        .collect()
+}
+
+pub(crate) fn role_launch_line(role: &AgentRole) -> String {
+    role.launch.trim().to_string()
+}
+
+pub(crate) fn role_resume_line(role: &AgentRole, session_id: &str) -> Option<String> {
+    let argv: Vec<String> = role.launch.split_whitespace().map(str::to_string).collect();
+    role.base.resume_command(session_id, Some(&argv))
+}
+
+/// One keymap action name per role on disk, in slug order
+/// (`LaunchRole:<slug>`) — the slots `default_bindings` offers beside the
+/// agents', so a role takes a key the same way any other action does.
+///
+/// The binding table holds `&'static str`, so the names are cached as leaked
+/// strings: the set is re-read on every call and only re-leaked when it
+/// actually changed, which is how a role added or removed while the app runs
+/// shows up after the next rebuild.
+pub(crate) fn launch_role_action_names() -> Vec<&'static str> {
+    static SLOTS: std::sync::LazyLock<std::sync::Mutex<Vec<&'static str>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+    let fresh: Vec<String> = crate::core::agent_roles::roles_dir()
+        .map(|dir| crate::core::agent_roles::load_roles(&dir))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|role| role_action_name(&role.slug))
+        .collect();
+    let mut slots = SLOTS.lock().expect("role action slots");
+    let same = slots.len() == fresh.len() && slots.iter().zip(fresh.iter()).all(|(a, b)| *a == b);
+    if !same {
+        *slots = fresh
+            .into_iter()
+            .map(|name| &*Box::leak(name.into_boxed_str()) as &str)
+            .collect();
+    }
+    slots.clone()
+}
+
+/// The role `slug` names, if it is still on disk. Keybindings and palette
+/// rows outlive the files they were built from, so both dispatch paths
+/// resolve through here and degrade to a warning when the role is gone.
+pub(crate) fn find_role(slug: &str) -> Option<AgentRole> {
+    let dir = crate::core::agent_roles::roles_dir()?;
+    let roles = crate::core::agent_roles::load_roles(&dir);
+    role_for_launch_action(&role_action_name(slug), &roles)
+}
+
+/// The `agent_frecency` key a role sorts and stamps under. Agent slugs never
+/// contain a colon, so the two families share the map without colliding.
+pub(crate) fn role_frecency_key(slug: &str) -> String {
+    format!("role:{slug}")
 }
 
 /// The agents whose launch program is on `path`, in [`CLIAgent::ALL`] order.
@@ -204,6 +288,79 @@ impl Tty7App {
             ),
         };
         by_frecency(candidates, &cfg.agent_frecency, unix_now())
+    }
+
+    /// The roles this window's quick launch offers, most-used-first — the
+    /// mirror of [`Self::offered_agents`]. On this computer that is the roles
+    /// whose launch program is on `PATH`; on a remote workspace, whose `PATH`
+    /// cannot be asked, the roles whose base agent was seen running there.
+    pub(crate) fn offered_roles_here(&self, cx: &App) -> Vec<AgentRole> {
+        let Some(dir) = crate::core::agent_roles::roles_dir() else {
+            return Vec::new();
+        };
+        let loaded = crate::core::agent_roles::load_roles(&dir);
+        let candidates = match WorkspaceStore::all(cx)
+            .get(self.workspace)
+            .filter(|view| view.is_remote())
+        {
+            Some(view) => offered_roles(loaded, "".as_ref(), Some(&view.seen_agents)),
+            None => offered_roles(loaded, &std::env::var_os("PATH").unwrap_or_default(), None),
+        };
+        let cfg = cx.global::<Config>();
+        let now = unix_now();
+        let score = |role: &AgentRole| {
+            cfg.agent_frecency
+                .get(&role_frecency_key(&role.slug))
+                .map(|u| u.score(now))
+                .unwrap_or(0.0)
+        };
+        let mut candidates = candidates;
+        candidates.sort_by(|a, b| {
+            score(b)
+                .partial_cmp(&score(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates
+    }
+
+    /// Open a new shell for `role` and start its launch line there — the
+    /// mechanical half of launching. Instructions, starters and session
+    /// resume belong to the role launcher this dispatches for.
+    pub(crate) fn launch_role(
+        &mut self,
+        role: AgentRole,
+        at: SpawnWhere,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = role_launch_line(&role);
+        let slot = match at {
+            SpawnWhere::NewTab => {
+                let cwd = self.tabs.get(self.active).and_then(|t| {
+                    t.pane
+                        .focused_or_first(window, cx)
+                        .and_then(|leaf| leaf.read(cx).spawnable_cwd())
+                });
+                self.new_tab_slot(cwd, None, window, cx)
+            }
+            SpawnWhere::Split => {
+                self.split_slot(Axis::Horizontal, Some(SpawnAs::Shell(None)), window, cx)
+            }
+        };
+        // Same failure mode as [`Self::launch_agent`]: nowhere to type into,
+        // and the reason is already on screen.
+        let Some(slot) = slot else {
+            log::warn!("no pane opened for role {}; not launching it", role.slug);
+            return;
+        };
+        run_when_ready(&slot, command, cx);
+        // Recency only, under the role's own key — see `role_frecency_key`.
+        self.update_config(cx, |cfg| {
+            cfg.agent_frecency
+                .entry(role_frecency_key(&role.slug))
+                .or_default()
+                .last_used = unix_now();
+        });
     }
 
     /// Open a new shell for `agent` and start it there.
@@ -511,6 +668,66 @@ mod tests {
         assert_eq!(
             CLIAgent::Claude.launch_command(&cfg.agent_launch),
             "claude --dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn role_action_round_trips_by_slug() {
+        let role = AgentRole {
+            slug: "frontend-reviewer".into(),
+            name: "Frontend Reviewer".into(),
+            base: CLIAgent::Claude,
+            description: String::new(),
+            launch: "claude --model opus".into(),
+            instructions: String::new(),
+            starters: vec![],
+        };
+        let action = format!("{LAUNCH_ROLE_PREFIX}{}", role.slug);
+        assert_eq!(
+            role_for_launch_action(&action, &[role.clone()]).map(|r| r.slug),
+            Some("frontend-reviewer".to_string())
+        );
+        assert!(role_for_launch_action("LaunchRole:nobody", &[role]).is_none());
+    }
+
+    #[test]
+    fn only_roles_whose_launch_program_is_on_path_are_offered() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("cc");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let role = |slug: &str, base: CLIAgent, launch: &str| AgentRole {
+            slug: slug.into(),
+            name: slug.into(),
+            base,
+            description: String::new(),
+            launch: launch.into(),
+            instructions: String::new(),
+            starters: vec![],
+        };
+        let roles = vec![
+            role("good", CLIAgent::Claude, "cc --fast"),
+            role("missing", CLIAgent::Claude, "nope --fast"),
+        ];
+        let offered = offered_roles(roles, dir.path().as_os_str(), None);
+        assert_eq!(
+            offered.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(),
+            vec!["good"]
+        );
+        // A remote workspace cannot answer for its PATH: the roles whose
+        // base agent was seen there are offered instead.
+        let roles = vec![
+            role("seen", CLIAgent::Codex, "nope"),
+            role("unseen", CLIAgent::Claude, "nope"),
+        ];
+        let offered = offered_roles(roles, "".as_ref(), Some(&["codex".to_string()]));
+        assert_eq!(
+            offered.iter().map(|r| r.slug.as_str()).collect::<Vec<_>>(),
+            vec!["seen"]
         );
     }
 
