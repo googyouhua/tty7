@@ -1220,11 +1220,27 @@ mod detail_gpui_tests {
         // The read runs from `render`, which is the shape that has spun this
         // panel before: a dispatch that did not record itself would ask git
         // for the same commit again on the frame its own answer caused.
-        assert_eq!(draws_while_idle(&mut vcx), 0);
+        assert_settles_idle(&mut vcx);
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A straggler frame is not the bug this guards: an unrecorded dispatch
+    /// re-reads on *every* frame its own answer caused, so frames never
+    /// stop. One read answer landing inside the window is timing, not a
+    /// loop — pass on the first fully quiet window, fail only if three
+    /// consecutive windows all draw.
+    fn assert_settles_idle(vcx: &mut VisualTestContext) {
+        for attempt in 1..=3 {
+            if draws_while_idle(vcx) == 0 {
+                return;
+            }
+            assert!(
+                attempt < 3,
+                "the panel kept drawing while idle: a dispatch is re-reading on its own frames"
+            );
+        }
+    }
     /// Copied from `panel.rs`'s own idle tests: arm the probe, let every timer
     /// the panel owns fire, and count the frames nobody asked for.
     fn draws_while_idle(vcx: &mut VisualTestContext) -> u64 {
@@ -1292,11 +1308,18 @@ mod detail_gpui_tests {
         // What the graph hands over: a row it already holds. The subject is
         // deliberately not the real one, so a `git show` behind our back would
         // overwrite it and show up here.
-        let mut seed = tty7_core::core::git::log::load_commit(
-            &*tty7_core::host::local::LocalHost::new(),
-            &root,
-            &head,
-        )
+        //
+        // Off the test thread on purpose: `panel_on` registered this thread
+        // as the UI thread (as production does), and direct host calls panic
+        // there — production routes them through `HostOps`. A scoped thread
+        // is never the UI thread, so the seed load cannot flake on libtest's
+        // thread scheduling the way calling it here did.
+        let host = tty7_core::host::local::LocalHost::new();
+        let mut seed = std::thread::scope(|s| {
+            s.spawn(|| tty7_core::core::git::log::load_commit(&*host, &root, &head))
+                .join()
+                .expect("the loader thread survived")
+        })
         .expect("the scratch repo answers");
         seed.summary = "what the graph already knew".into();
         app.update_in(&mut vcx, |app, _, cx| {

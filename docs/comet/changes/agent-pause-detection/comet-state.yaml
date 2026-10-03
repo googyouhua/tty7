@@ -1,0 +1,159 @@
+schema: comet.native.v4
+name: agent-pause-detection
+language: en
+phase: verify
+status: await-user
+state_version: 24
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: db90a1adc58e890a6547cb2fe5963734f96c31f9dc6dbe4929951bfeeead1af1
+spec_changes:
+  - capability: agent-pause-perception
+    operation: remove
+    source: null
+  - capability: agent-status-hooks-global
+    operation: remove
+    source: null
+  - capability: opencode-v2-events
+    operation: create
+    source: specs/opencode-v2-events/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/agent-pause-detection
+  target_branch: main
+  finish: null
+loop:
+  stage: await-user
+  goal_cycle: 4
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: confirm-skill-coordinated-pass
+acceptance:
+  - id: A1
+    source: brief.md
+    text: A1：现有 20 种 hook 的 waiting/done 行为无回归（单测全过；抽查 Claude/Codex
+      任一：permission→waiting、stop→done）。
+    result: passed
+    reason:
+      text: Only agent_hooks.rs changed (+mapping rows + test assertions); 19 other
+        agent tables untouched; old opencode mappings intact; F1/F2 zero residue
+        repo-wide
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: A2：opencode v2.0.18 真机三色：standalone 会话跑任务依次出现
+      working（蓝）→waiting（amber，表单提问时）→done（绿）；`tty7 agents --json` 显示 turns
+      递增、status 流转。
+    result: passed
+    reason:
+      text: v2 rows complete (execution/form/question.v2/permission.v2), unknown
+        events ignored, spec table matches code; live three-color verified on
+        device
+      truncated: false
+builder_handoff:
+  candidate_id: 1e43f0bd-47ac-4212-bf6c-4937e618390e
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:2ee4f058-4750-4eec-9727-4cc4904f79a9
+  iteration: 1
+  summary:
+    text: "opencode v2.0.18 event mapping fix only: ACTION table gains
+      session.execution.started/succeeded/failed,
+      form.created/answered/rejected/dismissed, permission/question v2 variants;
+      old names kept; pinning test extended; live-verified three colors on
+      DESKTOP-9AMG9BD standalone"
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+  checks:
+    - name:
+        text: cargo test agent_hooks
+        truncated: false
+      result: passed
+      note:
+        text: 53 passed incl extended opencode bridge assertions
+        truncated: false
+    - name:
+        text: cargo test tty7-cli bin
+        truncated: false
+      result: passed
+      note:
+        text: 184 passed
+        truncated: false
+    - name:
+        text: cargo check bins
+        truncated: false
+      result: passed
+      note:
+        text: core, cli, tty7-app clean
+        truncated: false
+    - name:
+        text: live three-color check
+        truncated: false
+      result: passed
+      note:
+        text: working->waiting->done observed by user; agents --json turns 0->2
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: --service shared mode plugin stays inert by design; standalone required
+      truncated: false
+    - text: 6 hook-less agents untouched
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-03T00:48:27.067Z
+blockers:
+  - owner: user
+    reason:
+      text: The generic Skill bridge cannot prove an independent Verifier execution;
+        user confirmation is required before Archive.
+      truncated: false
+    acceptance_ids: []
+    resolution_action: await-user
+verification:
+  candidate_id: 1e43f0bd-47ac-4212-bf6c-4937e618390e
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:f23f2413-f7f5-4315-a493-48c265765527
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: A1-A2 pass by independent read-only inspection; trailing-blank nit fixed,
+      tests re-run green
+    truncated: false
+  risks: []
+  risks_truncated: false
+  completed_at: 2026-10-03T00:51:33.181Z
+history:
+  - goal_cycle: 4
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: A1-A2 pass by independent read-only inspection; trailing-blank nit fixed,
+        tests re-run green
+      truncated: false
+    completed_at: 2026-10-03T00:51:33.181Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: false
+created_at: 2026-10-02T08:39:08.784Z

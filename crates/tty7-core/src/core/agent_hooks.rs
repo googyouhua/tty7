@@ -2093,8 +2093,27 @@ function presence() {
     "session.status.busy": "prompt-submit",
     "session.status.idle": "stop",
     "session.idle": "stop",
+    // opencode v2.0.18 reports turn boundaries as execution events; the
+    // older session.status pair is kept for earlier 2.x builds.
+    "session.execution.started": "prompt-submit",
+    "session.execution.succeeded": "stop",
+    "session.execution.failed": "stop",
     "permission.asked": "permission-request",
     "permission.replied": "prompt-submit",
+    "permission.v2.asked": "permission-request",
+    "permission.v2.replied": "prompt-submit",
+    "question.asked": "question-asked",
+    "question.replied": "prompt-submit",
+    "question.rejected": "prompt-submit",
+    "question.v2.asked": "question-asked",
+    "question.v2.replied": "prompt-submit",
+    "question.v2.rejected": "prompt-submit",
+    // opencode v2.0.18 renders interactive questions as a form; the TUI
+    // emits form.created with no counterpart in the published SDK types.
+    "form.created": "question-asked",
+    "form.answered": "prompt-submit",
+    "form.rejected": "prompt-submit",
+    "form.dismissed": "prompt-submit",
   }
   // `fields` is 1.x's `event.properties` or 2.x's `event.data`.
   const observe = async (type, fields) => {
@@ -3824,6 +3843,34 @@ mod tests {
             (
                 r#""permission.asked": "permission-request""#,
                 "opencode 2.x reports its permission.asked event as a permission request",
+            ),
+            (
+                r#""session.execution.started": "prompt-submit""#,
+                "opencode v2.0.18 starts a turn with session.execution.started",
+            ),
+            (
+                r#""session.execution.succeeded": "stop""#,
+                "opencode v2.0.18 ends a turn with session.execution.succeeded",
+            ),
+            (
+                r#""session.execution.failed": "stop""#,
+                "a failed execution still ends the turn",
+            ),
+            (
+                r#""question.asked": "question-asked""#,
+                "opencode 2.x asks the user with question.asked",
+            ),
+            (
+                r#""permission.v2.asked": "permission-request""#,
+                "opencode v2.0.18 reports v2 permission prompts",
+            ),
+            (
+                r#""question.v2.asked": "question-asked""#,
+                "opencode v2.0.18 asks the user with question.v2.asked",
+            ),
+            (
+                r#""form.created": "question-asked""#,
+                "opencode v2.0.18 renders interactive questions as a form",
             ),
             (
                 r#""permission.ask": async"#,
