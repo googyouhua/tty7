@@ -624,6 +624,16 @@ fn opencode_sessions(roots: &Roots) -> Vec<PastSession> {
         out.extend(sessions.iter().cloned());
         cache.insert(db, (stamp, sessions));
     }
+    // Shared history: `opencode` and `opencode2` read the same databases,
+    // so every session is listed under both bases and resumable by either.
+    let mirror: Vec<PastSession> = out
+        .iter()
+        .map(|s| PastSession {
+            agent: CLIAgent::OpenCode2,
+            ..s.clone()
+        })
+        .collect();
+    out.extend(mirror);
     out
 }
 
@@ -1950,7 +1960,13 @@ mod tests {
                     "ses_default".into(),
                     "add dark mode".into()
                 ),
+                (
+                    CLIAgent::OpenCode2,
+                    "ses_default".into(),
+                    "add dark mode".into()
+                ),
                 (CLIAgent::OpenCode, "ses_named".into(), "Fix login".into()),
+                (CLIAgent::OpenCode2, "ses_named".into(), "Fix login".into()),
                 (CLIAgent::Kimi, "session_k".into(), "hi kimi".into()),
                 (CLIAgent::Qwen, "w1".into(), "hi qwen".into()),
             ]

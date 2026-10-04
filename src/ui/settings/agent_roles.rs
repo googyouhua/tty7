@@ -500,19 +500,30 @@ impl Tty7App {
             true => t(L10nKey::SettingsRoleEdit),
             false => t(L10nKey::SettingsRoleNew),
         };
-        let base_names: Vec<&str> = CLIAgent::ALL.iter().map(|a| a.display_name()).collect();
+        // Searchable like the model dropdown below: 27 bases no longer
+        // fit the plain popover, which cannot scroll.
+        let base_options = std::rc::Rc::new(
+            CLIAgent::ALL
+                .iter()
+                .map(|a| SearchOption {
+                    label: SharedString::from(a.display_name()),
+                    font: None,
+                })
+                .collect::<Vec<_>>(),
+        );
         let base_selected = CLIAgent::ALL
             .iter()
             .position(|a| *a == form.base)
             .unwrap_or(0);
-        let base_choice = self.settings_choice(
+        let base_choice = self.settings_search_dropdown(
             "role-base",
-            &base_names,
-            base_selected,
-            cx,
-            |this, ix, _w, cx| {
+            base_options[base_selected].label.clone(),
+            base_options,
+            Some(base_selected),
+            std::rc::Rc::new(move |this, ix, _w, cx| {
                 this.set_role_base(ix, cx);
-            },
+            }),
+            cx,
         );
         // Model options: "launch line only" first, then whatever the base
         // offers; a saved model the list no longer names stays selectable

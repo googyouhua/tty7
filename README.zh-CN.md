@@ -47,7 +47,7 @@ tty7 的做法很简单：shell 归后台的 server 管，窗口只负责显示�
 现在很多人同时开好几个 agent，在好几个仓库里干活，然后就在窗口之间来回切，看哪个跑完了，
 哪个在等你回话。这种事不应该由人来做。
 
-tty7 能认出 26 个编程 CLI（Claude Code、Codex、Gemini、Cursor、OpenCode 等），把它们的状态、
+tty7 能认出 27 个编程 CLI（Claude Code、Codex、Gemini、Cursor、OpenCode、OpenCode2 等），把它们的状态、
 通知、分支和 diff 放在同一个侧边栏里。哪个需要你，一眼就知道。
 
 再往前走一步：既然状态能用命令查到，那调度 agent 的就不一定是人，也可以是另一个 agent。

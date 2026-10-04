@@ -1,0 +1,251 @@
+schema: comet.native.v4
+name: base-agent-opencode2
+language: en
+phase: archive
+status: done
+state_version: 21
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 907e107a517725630805ccb5a3a9ba957d8aa4edcce689786df354e273db835a
+spec_changes:
+  - capability: base-agent-opencode2
+    operation: create
+    source: specs/base-agent-opencode2/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/base-agent-opencode2
+  target_branch: main
+  finish: push
+loop:
+  stage: done
+  goal_cycle: 3
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "A1: Role 表单 Base 下拉同时出现 `OpenCode` 与 `OpenCode2`，选择 `opencode2` 可保存并回显。"
+    result: passed
+    reason:
+      text: OpenCode2 immediately after OpenCode in ALL; base dropdown now
+        searchable+scrollable settings_search_dropdown with index-faithful
+        set_role_base; slug round-trip unchanged. User confirmed
+        visible/selectable on hardware.
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: `base=opencode2` 且 launch 为空时实际启动 `opencode2`；`base=opencode` 仍启动
+      `opencode`（`role_launch_argv` / `role_launch_program` 级别可验证）。"
+    result: passed
+    reason:
+      text: Empty-launch role resolves per-base binary (opencode2 vs opencode);
+        role-level launch/resume tests pass.
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: `opencode2 --session s-1` 被检测为 opencode2；resume/fork 生成 `opencode2
+      --session <id>` / `--fork` 形式。"
+    result: passed
+    reason:
+      text: opencode2 alias detection, resume/fork forms and shared stale flags hold;
+        cli_agent tests pass.
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "A4: opencode2 与 opencode 共享 composer 输入区定位、粘贴、hooks 映射与模型列表行为（单测覆盖）。"
+    result: passed
+    reason:
+      text: Composer/hooks/models parity arms intact plus shared history mirror;
+        parity tests pass; Runtime checks green (core 144, app 94).
+      truncated: false
+builder_handoff:
+  candidate_id: f804ccce-8ba7-48e2-aa49-9360c6a7a6d3
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:27d534e5-2a85-4a42-8827-65caae8ca547
+  iteration: 1
+  summary:
+    text: "Iteration 2 on top of accepted opencode2 base: (1) CLIAgent::ALL order
+      places OpenCode2 right after OpenCode (enum discriminant still last)
+      because the old plain base popover cannot scroll; (2) base dropdown
+      switched to searchable+scrollable settings_search_dropdown, same widget as
+      model dropdown. User manually verified on snic box: OpenCode2
+      visible/selectable, model refresh works."
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+  checks:
+    - name:
+        text: cargo test -p tty7-core (cli_agent/agent_roles/agent_hooks/agent_history)
+        truncated: false
+      result: not-run
+      note:
+        text: "dev run before handoff: 144 passed"
+        truncated: false
+    - name:
+        text: cargo test -p tty7 (agent_launch/composer/assets/settings)
+        truncated: false
+      result: not-run
+      note:
+        text: "dev run before handoff: 153 passed, incl. new opencode2 tests"
+        truncated: false
+    - name:
+        text: manual GUI check on snic box
+        truncated: false
+      result: not-run
+      note:
+        text: "user confirmed: OpenCode2 visible in searchable base dropdown, model
+          refresh updates list"
+        truncated: false
+  checks_truncated: false
+  known_limits: []
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-04T07:19:37.996Z
+blockers: []
+verification:
+  candidate_id: f804ccce-8ba7-48e2-aa49-9360c6a7a6d3
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:aa903c5b-9722-4465-9f7b-40ac2c28809b
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: core-tests
+      name:
+        text: core focused tests
+        truncated: false
+      argv_display:
+        - text: test
+          truncated: false
+        - text: -p
+          truncated: false
+        - text: "[REDACTED]"
+          truncated: false
+        - text: --
+          truncated: false
+        - text: core::cli_agent
+          truncated: false
+        - text: core::agent_roles
+          truncated: false
+        - text: core::agent_hooks
+          truncated: false
+        - text: core::agent_history
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 5027
+    - id: app-tests
+      name:
+        text: app focused tests
+        truncated: false
+      argv_display:
+        - text: test
+          truncated: false
+        - text: -p
+          truncated: false
+        - text: "[REDACTED]"
+          truncated: false
+        - text: --
+          truncated: false
+        - text: agent_launch
+          truncated: false
+        - text: composer
+          truncated: false
+        - text: assets
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 25676
+  summary:
+    text: "Iteration 2 verified: searchable base dropdown with OpenCode2
+      discoverable, all prior parity intact, Runtime checks green, user
+      confirmed on device."
+    truncated: false
+  risks:
+    - text: Stale code comment at cli_agent.rs ALL (mentions non-scrollable popover)
+        left as-is to avoid invalidating candidate; suggest follow-up cleanup.
+      truncated: false
+    - text: Manual hardware verification taken as reported evidence for dropdown
+        widget swap.
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-04T07:23:36.249Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native Shape artifacts changed
+      truncated: false
+    completed_at: 2026-10-04T05:55:06.944Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: OpenCode2 base mirrors OpenCode in every confirmed dimension with its own
+        binary; independent verification passes all four acceptance items with
+        Runtime checks green.
+      truncated: false
+    completed_at: 2026-10-04T06:10:28.906Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: User requested base dropdown also searchable+scrollable like model; return
+        to Build for implementation revision
+      truncated: false
+    completed_at: 2026-10-04T07:08:59.318Z
+  - goal_cycle: 2
+    iteration: 2
+    attempt: 0
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: Native Shape artifacts changed
+      truncated: false
+    completed_at: 2026-10-04T07:17:43.307Z
+  - goal_cycle: 3
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: "Iteration 2 verified: searchable base dropdown with OpenCode2
+        discoverable, all prior parity intact, Runtime checks green, user
+        confirmed on device."
+      truncated: false
+    completed_at: 2026-10-04T07:23:36.249Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-04T05:35:13.730Z

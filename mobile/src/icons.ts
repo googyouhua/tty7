@@ -59,6 +59,7 @@ const AGENTS: Record<string, { name: string; field: string; ink?: string; mark?:
   aider: { name: "Aider", field: "#14B014", mark: "" },
   amp: { name: "Amp", field: "#F34E3F" },
   opencode: { name: "OpenCode", field: "#6E56CF" },
+  opencode2: { name: "OpenCode2", field: "#6E56CF" },
   copilot: { name: "Copilot", field: "#8957E5" },
   cursor: { name: "Cursor", field: "#9AA0A6" },
   goose: { name: "Goose", field: "#3ECC5F" },

@@ -211,7 +211,7 @@ pub fn model_flag(base: CLIAgent) -> Option<&'static str> {
         CLIAgent::Claude => "--model",
         CLIAgent::Codex => "--model",
         CLIAgent::Gemini => "--model",
-        CLIAgent::OpenCode => "--model",
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => "--model",
         CLIAgent::Cursor => "--model",
         CLIAgent::Copilot => "--model",
         CLIAgent::Qwen => "--model",
@@ -287,7 +287,9 @@ fn builtin_models(base: CLIAgent) -> &'static [&'static str] {
         CLIAgent::Claude => &["opus", "sonnet", "haiku"],
         CLIAgent::Codex => &["gpt-5.1", "gpt-5-mini"],
         CLIAgent::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
-        CLIAgent::OpenCode => &["opencode/gpt-5", "opencode/claude-sonnet-4-5"],
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => {
+            &["opencode/gpt-5", "opencode/claude-sonnet-4-5"]
+        }
         _ => &[],
     }
 }
@@ -325,7 +327,7 @@ pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 /// for this base — it keeps the local/config/built-in chain untouched.
 pub fn models_dev_providers(base: CLIAgent) -> &'static [&'static str] {
     match base {
-        CLIAgent::OpenCode => &["opencode", "opencode-go"],
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => &["opencode", "opencode-go"],
         CLIAgent::Claude => &["anthropic"],
         CLIAgent::Codex => &["openai"],
         CLIAgent::Gemini => &["google"],
@@ -437,7 +439,7 @@ fn fetch_models(base: CLIAgent) -> Vec<String> {
 /// themselves. Anything failing reads as empty.
 fn fetch_models_local(base: CLIAgent) -> Vec<String> {
     match base {
-        CLIAgent::OpenCode => fetch_opencode_models(),
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => fetch_opencode_models(),
         CLIAgent::Claude => read_claude_catalog_models(),
         _ => Vec::new(),
     }
@@ -1166,6 +1168,16 @@ mod tests {
     }
 
     #[test]
+    fn opencode2_shares_opencodes_model_table() {
+        assert_eq!(model_flag(CLIAgent::OpenCode2), Some("--model"));
+        assert!(!model_choices_fast(CLIAgent::OpenCode2).is_empty());
+        assert_eq!(
+            model_choices_fast(CLIAgent::OpenCode2),
+            model_choices_fast(CLIAgent::OpenCode)
+        );
+    }
+
+    #[test]
     fn opencode_prefers_v2_binary_name() {
         assert_eq!(opencode_program_names(), ["opencode2", "opencode"]);
     }
@@ -1188,6 +1200,10 @@ mod tests {
         assert_eq!(
             models_dev_providers(CLIAgent::OpenCode),
             &["opencode", "opencode-go"]
+        );
+        assert_eq!(
+            models_dev_providers(CLIAgent::OpenCode2),
+            models_dev_providers(CLIAgent::OpenCode)
         );
         assert!(!models_dev_providers(CLIAgent::Claude).is_empty());
         assert!(!models_dev_providers(CLIAgent::Codex).is_empty());

@@ -219,9 +219,57 @@ impl Tty7App {
                                     .child(
                                         Button::new(("panel-review-draft-send", i))
                                             .label("Send to new agent")
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.review_send_edit(window, cx);
-                                            })),
+                                            .dropdown_caret(true)
+                                            .dropdown_menu({
+                                                let app = cx.entity().downgrade();
+                                                move |menu, _window, cx| {
+                                                    let (targets, default_key) = app
+                                                        .update(cx, |this, cx| {
+                                                            let targets =
+                                                                this.review_new_targets(cx);
+                                                            let def = this
+                                                                .review_default_target(cx)
+                                                                .map(|t| t.frecency_key());
+                                                            (targets, def)
+                                                        })
+                                                        .unwrap_or_default();
+                                                    let mut menu = menu;
+                                                    if targets.is_empty() {
+                                                        return menu.item(
+                                                            PopupMenuItem::label(
+                                                                "No agents or roles available",
+                                                            ),
+                                                        );
+                                                    }
+                                                    for target in targets {
+                                                        let label = target.menu_label();
+                                                        let checked = Some(target.frecency_key())
+                                                            == default_key;
+                                                        let owned = target.clone();
+                                                        let app = app.clone();
+                                                        menu = menu.item(
+                                                            PopupMenuItem::new(label)
+                                                                .checked(checked)
+                                                                .on_click(
+                                                                    move |_, window, cx| {
+                                                                        let _ = app.update(
+                                                                            cx,
+                                                                            |this, cx| {
+                                                                                let _ = this
+                                                                                    .review_send_edit_to_target(
+                                                                                        &owned,
+                                                                                        window,
+                                                                                        cx,
+                                                                                    );
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                ),
+                                                        );
+                                                    }
+                                                    menu
+                                                }
+                                            }),
                                     ),
                             ),
                     );
