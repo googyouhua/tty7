@@ -471,7 +471,8 @@ pub struct TerminalView {
     /// shell cannot report (a far `su` to root, a frozen probe). Session
     /// state, never persisted: clearing it hands the pane back to tracking.
     manual_cwd: Option<std::path::PathBuf>,
-    /// The Info panel's follow switch for this pane (default off). Display
+    /// The Info panel's follow switch for this pane (default on; =off
+    /// freezes). Display
     /// state only; the daemon holds the enforcing flag, fed by
     /// [`RemoteTerminal::set_follow_nested`].
     follow_nested_ui: bool,
