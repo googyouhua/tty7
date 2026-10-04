@@ -720,6 +720,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRoleRefresh => "Refresh",
         L10nKey::SettingsRoleModelsSource => "Model source",
         L10nKey::SettingsRoleModelsSourceDesc => "URL list or local JSON file.",
+        L10nKey::SettingsRoleModelsFileHint => {
+            "JSON: {flag, models[]} or a models.dev document — see docs/agents/models-load-file.md."
+        }
         L10nKey::SettingsRoleDescription => "Description",
         L10nKey::SettingsRoleDescriptionDesc => "Display only; never sent to the agent.",
         L10nKey::SettingsRoleInstructions => "Instructions",

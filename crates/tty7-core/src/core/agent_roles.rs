@@ -191,7 +191,9 @@ pub fn role_launch_argv(role: &AgentRole) -> Vec<String> {
     let model = role.model.trim();
     if !model.is_empty()
         && let Some(flag) = model_flag(role.base)
-        && !argv.iter().any(|t| t == flag || t.starts_with(&format!("{flag}=")))
+        && !argv
+            .iter()
+            .any(|t| t == flag || t.starts_with(&format!("{flag}=")))
     {
         argv.push(flag.to_string());
         argv.push(model.to_string());
@@ -376,10 +378,7 @@ pub fn source_from_parts(from_file: bool, text: &str) -> Option<ModelLoadSource>
 /// Best-effort live model lists for `base` from `source`, then the local
 /// CLI/catalog fetch. Anything failing reads as an error describing the
 /// first failure; the caller keeps its old list.
-pub fn fetch_live_models(
-    base: CLIAgent,
-    source: &ModelLoadSource,
-) -> Result<Vec<String>, String> {
+pub fn fetch_live_models(base: CLIAgent, source: &ModelLoadSource) -> Result<Vec<String>, String> {
     let mut first_err: Option<String> = None;
     let mut failed = |e: String| {
         if first_err.is_none() {
@@ -403,8 +402,7 @@ pub fn fetch_live_models(
         ModelLoadSource::Url(url) => {
             // An unmapped base against the default URL would only ever fetch
             // megabytes to learn nothing: skip the HTTP and go local.
-            let skip_http =
-                models_dev_providers(base).is_empty() && url == MODELS_DEV_URL;
+            let skip_http = models_dev_providers(base).is_empty() && url == MODELS_DEV_URL;
             if !skip_http {
                 match fetch_models_dev(url, base) {
                     Ok(models) => {
@@ -432,11 +430,7 @@ pub fn fetch_live_models(
 /// Best-effort live model lists. No network beyond what the CLIs do
 /// themselves; anything failing reads as empty (bounded by a timeout).
 fn fetch_models(base: CLIAgent) -> Vec<String> {
-    fetch_live_models(
-        base,
-        &ModelLoadSource::Url(MODELS_DEV_URL.to_string()),
-    )
-    .unwrap_or_default()
+    fetch_live_models(base, &ModelLoadSource::Url(MODELS_DEV_URL.to_string())).unwrap_or_default()
 }
 
 /// The local half of the live chain: what the installed CLIs report
@@ -578,15 +572,12 @@ pub fn load_models_file(path: &Path, base: CLIAgent) -> Result<Vec<String>, Stri
             ));
         }
     }
-    let models = v
-        .get("models")
-        .and_then(|m| m.as_array())
-        .ok_or_else(|| {
-            format!(
-                "model file {} needs a `models` string array (see docs/agents/models-load-file.md)",
-                path.display()
-            )
-        })?;
+    let models = v.get("models").and_then(|m| m.as_array()).ok_or_else(|| {
+        format!(
+            "model file {} needs a `models` string array (see docs/agents/models-load-file.md)",
+            path.display()
+        )
+    })?;
     if models.len() > MAX_FILE_MODELS {
         return Err(format!(
             "model file {} lists more than {MAX_FILE_MODELS} models",
@@ -1256,7 +1247,10 @@ mod tests {
         );
         let no_flag = dir.path().join("noflag.json");
         std::fs::write(&no_flag, r#"{"models": ["m"]}"#).unwrap();
-        assert_eq!(load_models_file(&no_flag, CLIAgent::Qwen).unwrap(), vec!["m".to_string()]);
+        assert_eq!(
+            load_models_file(&no_flag, CLIAgent::Qwen).unwrap(),
+            vec!["m".to_string()]
+        );
         for (name, body) in [
             ("no-models.json", r#"{"flag": "--model"}"#),
             ("empty.json", r#"{"models": []}"#),
@@ -1266,9 +1260,14 @@ mod tests {
         ] {
             let p = dir.path().join(name);
             std::fs::write(&p, body).unwrap();
-            assert!(load_models_file(&p, CLIAgent::Qwen).is_err(), "{name} should fail");
+            assert!(
+                load_models_file(&p, CLIAgent::Qwen).is_err(),
+                "{name} should fail"
+            );
         }
-        assert!(load_models_file(dir.path().join("missing.json").as_path(), CLIAgent::Qwen).is_err());
+        assert!(
+            load_models_file(dir.path().join("missing.json").as_path(), CLIAgent::Qwen).is_err()
+        );
     }
 
     #[test]
@@ -1305,19 +1304,16 @@ mod tests {
     }
 
     #[test]
-    fn models_cache_roundtrips_only_for_its_source() {        let dir = tempfile::TempDir::new().unwrap();
+    fn models_cache_roundtrips_only_for_its_source() {
+        let dir = tempfile::TempDir::new().unwrap();
         let models = vec!["a".to_string(), "b".to_string()];
         write_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://x", &models);
         assert_eq!(
             read_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://x"),
             models
         );
-        assert!(
-            read_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://y").is_empty()
-        );
-        assert!(
-            read_models_cache_in(dir.path(), CLIAgent::Claude, "url:https://x").is_empty()
-        );
+        assert!(read_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://y").is_empty());
+        assert!(read_models_cache_in(dir.path(), CLIAgent::Claude, "url:https://x").is_empty());
         write_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://x", &[]);
         assert_eq!(
             read_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://x"),

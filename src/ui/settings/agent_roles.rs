@@ -6,10 +6,9 @@ use super::shell::SearchOption;
 use super::*;
 
 use crate::core::agent_roles::{
-    AgentRole, RoleStarter, delete_role, fetch_live_models, load_roles,
+    AgentRole, MODELS_DEV_URL, RoleStarter, delete_role, fetch_live_models, load_roles,
     model_choices_fast, models_dev_providers, read_last_models_source, read_models_cache,
-    roles_dir, save_role, slug_from_name, source_from_parts, unique_slug,
-    write_last_models_source, MODELS_DEV_URL,
+    roles_dir, save_role, slug_from_name, source_from_parts, unique_slug, write_last_models_source,
 };
 use crate::core::cli_agent::CLIAgent;
 
@@ -119,8 +118,8 @@ impl Tty7App {
         // Restore the last-used source for this base so a reopen keeps the
         // file-loaded list (via the cache seed below) instead of resetting
         // to the default URL.
-        let (from_file, last_text) = read_last_models_source(base)
-            .unwrap_or((false, MODELS_DEV_URL.to_string()));
+        let (from_file, last_text) =
+            read_last_models_source(base).unwrap_or((false, MODELS_DEV_URL.to_string()));
         let models_source = seed(&last_text, &mut subs);
         let source_opt = source_from_parts(from_file, &last_text);
         // Fast path first so opening the form never blocks on a hung
@@ -133,8 +132,8 @@ impl Tty7App {
                 initial = cached;
             }
         }
-        let auto_load = source_opt.is_some()
-            && Self::models_should_load(base, from_file, &last_text);
+        let auto_load =
+            source_opt.is_some() && Self::models_should_load(base, from_file, &last_text);
         let form = AgentRoleForm {
             editing: editing.map(|r| r.slug.clone()),
             base,
@@ -546,7 +545,8 @@ impl Tty7App {
                 .into_iter()
                 .map(|label| SearchOption { label, font: None })
                 .collect::<Vec<_>>(),
-        );        let model_values = std::rc::Rc::new(model_values);
+        );
+        let model_values = std::rc::Rc::new(model_values);
         let model_choice = self.settings_search_dropdown(
             "role-model",
             model_options[model_selected].label.clone(),
@@ -654,6 +654,19 @@ impl Tty7App {
             )
             .into_any_element(),
         ];
+        if form.models_from_file {
+            let tk = Tk::of(cx);
+            // Directly under the source row (Name, Base, Model, Source),
+            // next to the path input it documents.
+            rows.insert(
+                4,
+                div()
+                    .text_size(fs(12.))
+                    .text_color(tk.k5)
+                    .child(t(L10nKey::SettingsRoleModelsFileHint))
+                    .into_any_element(),
+            );
+        }
         for i in 0..3 {
             rows.push(
                 self.settings_row(
