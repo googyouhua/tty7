@@ -248,6 +248,44 @@ fn fits(path: &str) -> bool {
     path.len() <= MAX_SOCKET_PATH_BYTES
 }
 
+/// The local instance a new remote link reuses: the name of the config
+/// directory this process runs on, or `None` for the default instance (whose
+/// links keep today's behavior byte for byte).
+///
+/// A link carries no username of its own, so without this a GUI opened as
+/// `alice` lands its remote links on whatever the far shell resolves — the
+/// far `$TTY7_CONFIG_DIR` or its default instance — and mirrors somebody
+/// else's whole listing.
+pub fn local_reuse_instance() -> Option<String> {
+    let dir = crate::core::config::config_dir_path()?;
+    let name = crate::core::instance::memory_name_for(&dir)?;
+    (name != crate::core::instance::DEFAULT_SENTINEL).then_some(name)
+}
+
+/// The remote config directory for `name` under the probed remote home.
+/// The remote root is always the default one; a far `TTY7_AS_ROOT` is not
+/// followed.
+pub fn instance_remote_dir(home: &str, name: &str) -> String {
+    posix_join(&posix_join(home, ".config"), &format!("tty7-{name}"))
+}
+
+/// Append `--config-dir <dir>` to a server command, POSIX-quoted. Instance
+/// names are `[a-z0-9-]` by construction, but the home they join can hold
+/// spaces and quotes.
+pub fn append_config_dir_arg(base: &str, dir: &str) -> String {
+    format!("{base} --config-dir {}", super::install::shell_quote(dir))
+}
+
+/// The probed environment retargeted at `name`'s instance directory: an
+/// explicit far `$TTY7_CONFIG_DIR` or `$TTY7_CONTROL_SOCK` must not win over
+/// the reused instance, or the link lands wherever the far shell points.
+pub fn env_for_instance(env: &RemoteEnv, home: &str, name: &str) -> RemoteEnv {
+    let mut out = env.clone();
+    out.config_dir = Some(instance_remote_dir(home, name));
+    out.control_sock = None;
+    out
+}
+
 impl AsyncRead for RemoteLink {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -508,5 +546,63 @@ mod tests {
             tmpdir: Some(deep),
         };
         assert_eq!(remote_control_socket(&hopeless), None);
+    }
+
+    #[test]
+    fn instance_dirs_hang_beside_the_default_under_the_remote_home() {
+        assert_eq!(
+            instance_remote_dir("/home/me", "alice"),
+            "/home/me/.config/tty7-alice"
+        );
+        assert_eq!(
+            instance_remote_dir("/home/me/", "mca"),
+            "/home/me/.config/tty7-mca"
+        );
+    }
+
+    #[test]
+    fn the_server_command_carries_the_instance_config_dir_quoted() {
+        assert_eq!(
+            append_config_dir_arg("tty7-server --stdio", "/home/me/.config/tty7-alice"),
+            "tty7-server --stdio --config-dir '/home/me/.config/tty7-alice'"
+        );
+        // Homes with spaces and quotes stay one argv word.
+        assert_eq!(
+            append_config_dir_arg("'tty7-server' --stdio", "/home/a b/.config/tty7-alice"),
+            "'tty7-server' --stdio --config-dir '/home/a b/.config/tty7-alice'"
+        );
+    }
+
+    #[test]
+    fn instance_retargeting_beats_the_far_shell_environment() {
+        let env = RemoteEnv {
+            // A box-wide export pointing at somebody else's instance.
+            control_sock: Some("/home/me/.config/tty7-mca/control.sock".into()),
+            config_dir: Some("/home/me/.config/tty7-mca".into()),
+            home: Some("/home/me".into()),
+            ..RemoteEnv::default()
+        };
+        let retargeted = env_for_instance(&env, "/home/me", "alice");
+        assert_eq!(
+            remote_control_socket(&retargeted).as_deref(),
+            Some("/home/me/.config/tty7-alice/control.sock"),
+            "neither TTY7_CONTROL_SOCK nor TTY7_CONFIG_DIR may win over reuse"
+        );
+    }
+
+    #[test]
+    fn instance_sockets_follow_the_same_fallback_rule() {
+        let deep_home = format!("/home/{}", "nested/".repeat(12));
+        let env = RemoteEnv {
+            home: Some(deep_home.clone()),
+            tmpdir: Some("/tmp".into()),
+            ..RemoteEnv::default()
+        };
+        let retargeted = env_for_instance(&env, &deep_home, "alice");
+        let socket = remote_control_socket(&retargeted).expect("tmp fallback fits");
+        assert!(
+            socket.starts_with("/tmp/tty7-") && socket.ends_with("-control.sock"),
+            "unexpected fallback: {socket}"
+        );
     }
 }

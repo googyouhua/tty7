@@ -31,6 +31,11 @@ pub enum SessionPane {
         agent_session_id: Option<String>,
         #[serde(default)]
         agent_launch_argv: Option<Vec<String>>,
+        /// The custom role slug the pane runs under, if any. Kept beside the
+        /// agent facts so a reboot restores the tag with the session; a slug
+        /// whose role file is gone falls back to the base agent.
+        #[serde(default)]
+        role: Option<String>,
     },
     Split {
         axis: SessionAxis,

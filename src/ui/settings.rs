@@ -32,6 +32,7 @@ use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::presets;
 use tty7_core::core::onekey::{OneKeyEntry, OneKeyKind};
 
+mod agent_roles;
 mod agents;
 mod editor;
 mod hosts;
@@ -195,7 +196,7 @@ fn window_overrides_active(config: &Config, backdrop_is_local: bool) -> bool {
         || (backdrop_is_local && config.window_backdrop != WindowBackdrop::Auto)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
     General,
     Appearance,
@@ -204,12 +205,13 @@ pub(crate) enum SettingsSection {
     Ssh,
     Mobile,
     Agents,
+    AgentRoles,
     Keybindings,
     About,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 8] = [
+    pub(crate) const ALL: [SettingsSection; 9] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Terminal,
@@ -217,6 +219,7 @@ impl SettingsSection {
         SettingsSection::Ssh,
         SettingsSection::Mobile,
         SettingsSection::Agents,
+        SettingsSection::AgentRoles,
         SettingsSection::About,
     ];
 
@@ -236,6 +239,7 @@ impl SettingsSection {
             Self::Ssh => L10nKey::SettingsNavSsh,
             Self::Mobile => L10nKey::SettingsNavMobile,
             Self::Agents => L10nKey::SettingsNavAgents,
+            Self::AgentRoles => L10nKey::SettingsNavAgentRoles,
             Self::Keybindings => L10nKey::SettingsNavKeybindings,
             Self::About => L10nKey::SettingsNavAbout,
         }
@@ -250,6 +254,7 @@ impl SettingsSection {
             Self::Ssh => "icons/settings/ssh.svg",
             Self::Mobile => "icons/settings/mobile.svg",
             Self::Agents => "icons/settings/integrations.svg",
+            Self::AgentRoles => "icons/settings/integrations.svg",
             Self::About => "icons/settings/about.svg",
         }
     }
@@ -263,6 +268,7 @@ impl SettingsSection {
             SettingsSection::Ssh => "settings:ssh",
             SettingsSection::Mobile => "settings:mobile",
             SettingsSection::Agents => "settings:agents",
+            SettingsSection::AgentRoles => "settings:agent-roles",
             SettingsSection::Keybindings => "settings:keybindings",
             SettingsSection::About => "settings:about",
         }
@@ -654,6 +660,16 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Agents,
             title: SettingsAgentAntigravity,
             keywords: SettingsSearchAntigravityKeywords,
+        },
+        SearchEntry {
+            section: AgentRoles,
+            title: SettingsRolesIntro,
+            keywords: SettingsRoleSearchKeywords,
+        },
+        SearchEntry {
+            section: AgentRoles,
+            title: SettingsRoleNew,
+            keywords: SettingsRoleSearchKeywords,
         },
         SearchEntry {
             section: General,
@@ -1272,6 +1288,8 @@ pub(crate) struct SettingsState {
     pub(crate) ssh_collapsed_groups: std::collections::HashSet<String>,
     /// The OneKey add/edit form (None when closed).
     pub(crate) onekey_form: Option<OneKeyForm>,
+    /// The custom-role add/edit form (None when the list is showing).
+    pub(crate) role_form: Option<agent_roles::AgentRoleForm>,
     pub(crate) agent_hooks_host: HostId,
     pub(crate) agent_hooks_states: AgentHooksView,
     pub(crate) agent_hooks_seq: u64,
@@ -3090,7 +3108,7 @@ mod tests {
             );
             assert!(SettingsSection::ALL.contains(&entry.section));
         }
-        assert_eq!(SettingsSection::ALL.len(), 8);
+        assert_eq!(SettingsSection::ALL.len(), 9);
         assert!(!SettingsSection::ALL.contains(&SettingsSection::Keybindings));
     }
 
@@ -3671,6 +3689,17 @@ mod tests {
     }
 
     #[test]
+    fn role_rows_are_in_the_search_index() {
+        for title in [L10nKey::SettingsRolesIntro, L10nKey::SettingsRoleNew] {
+            assert!(
+                settings_search_entries()
+                    .iter()
+                    .any(|e| e.section == SettingsSection::AgentRoles && e.title == title),
+                "no Agents index entry for {title:?}",
+            );
+        }
+    }
+    #[test]
     fn humanize_action_splits_on_capitals() {
         assert_eq!(humanize_action("NewTab"), "New Tab");
         assert_eq!(
@@ -4153,6 +4182,102 @@ mod gpui_tests {
             assert_eq!(cx.global::<Config>().notify_threshold_secs, 73);
         });
         vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn agent_roles_page_adds_edits_and_deletes(cx: &mut TestAppContext) {
+        use crate::core::agent_roles::{delete_role, load_roles, roles_dir};
+        use crate::core::cli_agent::CLIAgent;
+        crate::core::config::pin_test_config_dir();
+        // Unique to this test; the pinned config dir is shared process-wide.
+        const SLUG: &str = "settings-ui-probe";
+        // Scrub residue from an earlier interrupted run before starting.
+        if let Some(dir) = roles_dir() {
+            let _ = delete_role(&dir, SLUG);
+        }
+        let (app, mut vcx) = harness(cx);
+        // Open the page and draw the empty list: exercises the list render.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::AgentRoles, window, cx);
+            assert_eq!(
+                app.active_settings().unwrap().section,
+                SettingsSection::AgentRoles
+            );
+        });
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        // Fill the add form and save: the slug is minted from the name.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_role_add(window, cx);
+            let s = app.active_settings().unwrap();
+            let f = s.role_form.as_ref().expect("add form is open");
+            let inputs = (
+                f.name.clone(),
+                f.launch.clone(),
+                f.description.clone(),
+                f.instructions.clone(),
+                f.starter_labels.clone(),
+                f.starter_prompts.clone(),
+            );
+            inputs
+                .0
+                .update(cx, |i, cx| i.set_value("Settings UI Probe", window, cx));
+            inputs
+                .1
+                .update(cx, |i, cx| i.set_value("claude --model opus", window, cx));
+            inputs
+                .2
+                .update(cx, |i, cx| i.set_value("probe", window, cx));
+            inputs
+                .3
+                .update(cx, |i, cx| i.set_value("Be terse.", window, cx));
+            inputs.4[0].update(cx, |i, cx| i.set_value("Review a PR", window, cx));
+            inputs.5[0].update(cx, |i, cx| i.set_value("Review it.", window, cx));
+            app.set_role_base(0, cx);
+            app.save_role_form(cx);
+            assert!(
+                app.active_settings().unwrap().role_form.is_none(),
+                "a valid save closes the form"
+            );
+        });
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        let role = load_roles(&roles_dir().unwrap())
+            .into_iter()
+            .find(|r| r.slug == SLUG)
+            .expect("saved role on disk");
+        assert_eq!(role.name, "Settings UI Probe");
+        assert_eq!(role.base, CLIAgent::ALL[0]);
+        assert_eq!(role.starters.len(), 1);
+        // Edit the description through the form.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_role_edit(SLUG, window, cx);
+            let s = app.active_settings().unwrap();
+            let description = s
+                .role_form
+                .as_ref()
+                .expect("edit form is open")
+                .description
+                .clone();
+            description.update(cx, |i, cx| i.set_value("edited", window, cx));
+            app.save_role_form(cx);
+        });
+        vcx.run_until_parked();
+        let edited = load_roles(&roles_dir().unwrap())
+            .into_iter()
+            .find(|r| r.slug == SLUG)
+            .unwrap();
+        assert_eq!(edited.description, "edited");
+        // Delete removes the file.
+        app.update_in(&mut vcx, |app, _window, cx| {
+            app.remove_agent_role(SLUG, cx);
+        });
+        vcx.run_until_parked();
+        assert!(
+            load_roles(&roles_dir().unwrap())
+                .iter()
+                .all(|r| r.slug != SLUG)
+        );
     }
 
     #[gpui::test]

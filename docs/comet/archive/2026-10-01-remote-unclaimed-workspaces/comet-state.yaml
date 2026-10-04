@@ -1,0 +1,267 @@
+schema: comet.native.v4
+name: remote-unclaimed-workspaces
+language: zh-CN
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 0c46c38990cacf24b063f044a085c3289ecf85d2bb168114422bde9128167529
+spec_changes:
+  - capability: remote-switcher-listing
+    operation: create
+    source: specs/remote-switcher-listing/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: A1：CLI 在已连接远端新建 workspace → 切换器该机器分组出现同名行，无需重连或手动刷新。
+    result: passed
+    reason:
+      text: "New gpui test
+        a_cli_made_remote_workspace_reaches_the_switcher_without_reconnect
+        passes (ran: 1 passed). Code path corroborated:
+        tree_sync::on_layout_delta -> MachineMirrors::apply_delta -> apply()
+        handles WorkspaceCreated by inserting into mirror; switcher_groups reads
+        MachineMirrors::machine + rows_from_machine per frame, so no reconnect
+        needed."
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: A2：点击该行 → 走现有 adopt/open 流程正常打开，tab/pane 与远端一致且可交互。
+    result: passed
+    reason:
+      text: "No new control path added: Group::merge stamps adopt=Some +
+        remote_id=Some on mirror rows, and unchanged switcher_open routes adopt
+        rows to open_remote_workspace (claim_remote + enter). New test asserts
+        adopt.is_some and remote_id match."
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: A3：CLI 重命名远端 workspace → 切换器行名同步更新。
+    result: passed
+    reason:
+      text: "Same live-mirror mechanism: apply() handles WorkspaceRenamed by updating
+        ws.name, rows_from_machine re-derives the name each frame via
+        display_name_of. Rename unit coverage exists in machine_mirror tests."
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: A4：CLI 删除远端 workspace → 切换器对应行消失，不残留 adopt 行。
+    result: passed
+    reason:
+      text: apply() handles WorkspaceDeleted via retain-remove so the mirror row
+        vanishes; CLI-made rows have no snapshot row to resurrect them. Existing
+        test a_deleted_remote_workspace_leaves_the_switcher still passes within
+        the green 47-test switcher suite.
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: A5：回归：本地 unclaimed 行、已打开/已保存的远端行、离线快照行行为不变；相关 `switcher` /
+      `machine_mirror` 单测全过。
+    result: passed
+    reason:
+      text: "git diff --stat shows only src/ui/switcher.rs (+65). Ran: switcher suite
+        47/47 pass, machine_mirror 16/16 pass, new A1 test passes. No
+        daemon/protocol/event changes; snapshot and local-unclaimed paths
+        untouched."
+      truncated: false
+builder_handoff:
+  candidate_id: cb5bd4a6-0b48-44e8-9ab2-b6bea959437c
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:9f06c578-a84d-420e-830e-8d9640a56ba1
+  iteration: 1
+  summary:
+    text: "switcher_groups: after the per-connect snapshot merge, also merge
+      rows_from_machine(live mirror) for each remote group; dedup via existing
+      Group::merge. New gpui test proves a CLI-made remote workspace appears as
+      an adopt row without reconnect."
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+  checks:
+    - name:
+        text: cargo check -p tty7
+        truncated: false
+      result: passed
+      note:
+        text: only pre-existing warnings
+        truncated: false
+    - name:
+        text: cargo test switcher (47, incl. new regression test)
+        truncated: false
+      result: passed
+      note:
+        text: new test
+          a_cli_made_remote_workspace_reaches_the_switcher_without_reconnect
+          green
+        truncated: false
+    - name:
+        text: cargo test machine_mirror (16)
+        truncated: false
+      result: passed
+      note: null
+    - name:
+        text: cargo test remote_* (112)
+        truncated: false
+      result: passed
+      note: null
+    - name:
+        text: cargo fmt -p tty7
+        truncated: false
+      result: passed
+      note:
+        text: applied, re-ran new test green
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: "No live-GUI check: needs the user's connected GUI to eyeball A1-A4
+        against a real remote daemon; unit + existing suites cover the logic."
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-01T09:43:25.821Z
+blockers: []
+verification:
+  candidate_id: cb5bd4a6-0b48-44e8-9ab2-b6bea959437c
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:6456a014-9a83-48bf-a03d-fc385a77be50
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: switcher-tests
+      name:
+        text: switcher tests incl. new regression test
+        truncated: false
+      argv_display:
+        - text: test
+          truncated: false
+        - text: -p
+          truncated: false
+        - text: "[REDACTED]"
+          truncated: false
+        - text: --bin
+          truncated: false
+        - text: tty7-app
+          truncated: false
+        - text: "switcher::"
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 30781
+    - id: mirror-tests
+      name:
+        text: machine_mirror tests
+        truncated: false
+      argv_display:
+        - text: test
+          truncated: false
+        - text: -p
+          truncated: false
+        - text: "[REDACTED]"
+          truncated: false
+        - text: --bin
+          truncated: false
+        - text: tty7-app
+          truncated: false
+        - text: machine_mirror
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 4059
+    - id: remote-tests
+      name:
+        text: remote_workspace and remote_connect tests
+        truncated: false
+      argv_display:
+        - text: test
+          truncated: false
+        - text: -p
+          truncated: false
+        - text: "[REDACTED]"
+          truncated: false
+        - text: --bin
+          truncated: false
+        - text: tty7-app
+          truncated: false
+        - text: remote_
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 3990
+  summary:
+    text: "Candidate passes A1-A5: 8-line switcher_groups hunk merges live-mirror
+      rows per remote group with existing Group::merge dedup (store > snapshot >
+      mirror), plus one gpui test. Suites green (switcher 47, machine_mirror
+      16). Noted risks are pre-existing-scope edge cases, none blocking."
+    truncated: false
+  risks:
+    - text: Mirror is never cleared on disconnect (no machines.remove in
+        machine_mirror.rs; RemoteLinks::disconnect only drops
+        RemoteLinks/HostLinks state), so a stale mirror can show ghost adopt
+        rows in an offline/parked group until a fresh pull replaces data.
+      truncated: false
+    - text: Adopt rows from the mirror hardcode live Liveness::Stopped (same as
+        snapshot rows) even while connected.
+      truncated: false
+    - text: New A1 test seeds the mirror via MachineMirrors::install rather than
+        driving a live WorkspaceCreated delta; the delta path itself is covered
+        by existing machine_mirror apply() unit tests, and no live-GUI check was
+        performed.
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-01T09:46:29.725Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: "Candidate passes A1-A5: 8-line switcher_groups hunk merges live-mirror
+        rows per remote group with existing Group::merge dedup (store > snapshot
+        > mirror), plus one gpui test. Suites green (switcher 47, machine_mirror
+        16). Noted risks are pre-existing-scope edge cases, none blocking."
+      truncated: false
+    completed_at: 2026-10-01T09:46:29.725Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-01T09:34:54.218Z

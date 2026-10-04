@@ -184,6 +184,7 @@ mod tests {
             agent: CLIAgent::Claude,
             session_id: None,
             launch_argv: None,
+            role: None,
             status: Some(CoreStatus::Working),
         });
         let machine = Machine {

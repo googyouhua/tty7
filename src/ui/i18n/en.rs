@@ -266,6 +266,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNavInput => "Keyboard & Mouse",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "Integrations",
+        L10nKey::SettingsNavAgentRoles => "Agents",
         L10nKey::SettingsNavKeybindings => "Keyboard shortcuts",
         L10nKey::SettingsNavAbout => "About",
         L10nKey::SettingsHeader => "SETTINGS",
@@ -693,6 +694,43 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentsIntroDesc => {
             "Hooks show each agent's status — working, waiting, done — in the tab bar."
         }
+        L10nKey::SettingsRolesIntro => "Custom agent roles",
+        L10nKey::SettingsRolesIntroDesc => {
+            "Name a job, bind it to one of the built-in agents, and launch it with its own command and opening prompt."
+        }
+        L10nKey::SettingsRolesEmpty => "No custom roles yet.",
+        L10nKey::SettingsRoleNew => "New role",
+        L10nKey::SettingsRoleEdit => "Edit role",
+        L10nKey::SettingsRoleEditAction => "Edit",
+        L10nKey::SettingsRoleName => "Name",
+        L10nKey::SettingsRoleNameDesc => {
+            "Shown in Search and the launch rows; the slug is minted from it once."
+        }
+        L10nKey::SettingsRoleBase => "Base agent",
+        L10nKey::SettingsRoleBaseDesc => "Detection, status and resume all follow this agent.",
+        L10nKey::SettingsRoleLaunch => "Launch command",
+        L10nKey::SettingsRoleLaunchDesc => {
+            "Typed into a fresh shell. Empty means the bare base binary."
+        }
+        L10nKey::SettingsRoleModel => "Model",
+        L10nKey::SettingsRoleModelDesc => {
+            "Appended after the launch command. Empty means the launch line decides."
+        }
+        L10nKey::SettingsRoleModelNone => "Launch line only",
+        L10nKey::SettingsRoleRefresh => "Refresh",
+        L10nKey::SettingsRoleDescription => "Description",
+        L10nKey::SettingsRoleDescriptionDesc => "Display only; never sent to the agent.",
+        L10nKey::SettingsRoleInstructions => "Instructions",
+        L10nKey::SettingsRoleInstructionsDesc => "Sent first on every fresh launch.",
+        L10nKey::SettingsRoleStarters => "Conversation starters",
+        L10nKey::SettingsRoleStartersDesc => "Up to three; pick one from the pane menu to send it.",
+        L10nKey::SettingsRoleNameRequired => "Give the role a name.",
+        L10nKey::SettingsRoleFollowupMissed => {
+            "The agent never came up, so the role's instructions were skipped. Send one from the pane menu if needed."
+        }
+        L10nKey::SettingsRoleSearchKeywords => {
+            "role roles agent starter instructions launch custom"
+        }
         L10nKey::SettingsReadingAgentConfig => "Reading this machine's agent config…",
         L10nKey::SettingsStatusNotInstalled => "Not installed",
         L10nKey::SettingsStatusInstalled => "Installed",
@@ -765,6 +803,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::NotifyModeNever => "Never",
         L10nKey::NotifyModeUnfocused => "When unfocused",
         L10nKey::NotifyModeAlways => "Always",
+        L10nKey::ProgramNotesDropped => "More notifications from this pane weren't shown",
         L10nKey::SettingsStartupNormal => "Normal",
         L10nKey::SettingsStartupMaximized => "Maximized",
         L10nKey::SettingsStartupFullscreen => "Fullscreen",
@@ -1365,6 +1404,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelFilesTitle => "Files",
         L10nKey::PanelSearchTitle => "Search",
         L10nKey::PanelGitHubTitle => "GitHub",
+        L10nKey::PanelReviewTitle => "Review",
         L10nKey::PanelNoSession => "No active session.",
         L10nKey::PanelNoSessionHint => {
             "Open a tab to see its shell, directory, and processes here."
@@ -1378,6 +1418,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelNoChangesHint => "The working tree is clean.",
         L10nKey::PanelSessionSubtitle => "Session",
         L10nKey::PanelProcessesSubtitle => "Processes",
+        L10nKey::PanelProcessesTotal => "Total",
         L10nKey::PanelPortsSubtitle => "Ports",
         L10nKey::PanelPortsUnsupported => "That machine's tty7-server is too old to list ports.",
         L10nKey::PanelPortsProbeFailed => "Couldn't check what this pane is listening on.",
@@ -1544,6 +1585,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffViewSplit => "Side by Side",
         L10nKey::DiffViewUnified => "Unified",
         L10nKey::DiffCopySelection => "Copy Selected Lines",
+        L10nKey::DiffReviewInNewAgent => "Review in new agent…",
+        L10nKey::DiffReviewAttach => "Attach to agent…",
         L10nKey::PendingConnecting => "Connecting to {machine}…",
         L10nKey::PendingUnreachable => "Could not reach {machine}",
         L10nKey::WorktreePromptNeedsName => "The worktree needs a name",
@@ -1681,6 +1724,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::InstancePickerDefault => "Default",
         L10nKey::InstancePickerNewPlaceholder => "New username…",
         L10nKey::InstancePickerEnter => "Enter",
+        L10nKey::InstancePickerClose => "Close",
+        L10nKey::InstanceBadgeWelcome => "Hi {name}",
         L10nKey::InstancePickerInvalid => "Usernames use [a-z0-9-].",
         L10nKey::InstancePickerRelaunchFailed => "Could not start tty7 — try again.",
         L10nKey::SwitcherStartingServer => "Starting tty7's server…",
@@ -1824,6 +1869,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdRightPanelFiles => "Right Panel: Files",
         L10nKey::CmdRightPanelSearch => "Right Panel: Search",
         L10nKey::CmdRightPanelGitHub => "Right Panel: GitHub",
+        L10nKey::CmdRightPanelReview => "Right Panel: Review",
         L10nKey::CmdChangeTheme => "Change Theme…",
         L10nKey::CmdResetFontSize => "Reset Font Size",
         L10nKey::CmdEnterFullScreen => "Enter Full Screen",
@@ -1859,6 +1905,29 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdGitToggleGraph => "Git: Toggle Commit History",
         L10nKey::CmdClearScrollback => "Clear Scrollback",
         L10nKey::CmdFindInTerminal => "Find in Terminal…",
+        L10nKey::CmdToggleComposer => "Toggle Message Composer",
+        L10nKey::ComposerModeDefault => "Ask before edits",
+        L10nKey::ComposerModeAcceptEdits => "Accept edits",
+        L10nKey::ComposerModePlan => "Plan mode",
+        L10nKey::ComposerModeBypass => "Bypass permissions",
+        L10nKey::ComposerModeAuto => "Auto mode",
+        L10nKey::ComposerModeTip => "Permission mode  ·  Shift+Tab to cycle",
+        L10nKey::ComposerModel => "Model",
+        L10nKey::ComposerModelTip => "Switch model",
+        L10nKey::ComposerModelDefault => "Default (recommended)",
+        L10nKey::ComposerEffort => "Effort",
+        L10nKey::ComposerEffortTip => "Reasoning effort  ·  click to change",
+        L10nKey::ComposerPlaceholder => "Message {agent}   ·   @ files   / commands",
+        L10nKey::ComposerPlaceholderFiles => "Message {agent}   ·   @ files",
+        L10nKey::ComposerSendTip => "Send (Enter)  ·  Shift+Enter for a new line",
+        L10nKey::ComposerAttach => "Attach files or images",
+        L10nKey::ComposerMenuCommands => "Commands",
+        L10nKey::ComposerMenuFiles => "Files",
+        L10nKey::ComposerCmdProject => "Project command",
+        L10nKey::ComposerCmdUser => "User command",
+        L10nKey::ComposerAgentAsking => {
+            "{agent} is asking something. Answer it in the terminal, then send."
+        }
         L10nKey::CmdFindNext => "Find Next",
         L10nKey::CmdFindPrevious => "Find Previous",
         L10nKey::CmdCopy => "Copy",
@@ -1984,6 +2053,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
         L10nKey::AppNoAgentOnPath => "No coding agent was found on this machine's PATH",
+        L10nKey::ReviewAgentTimeout => "The new agent did not start in time — try again.",
         L10nKey::AppNoAgentSeenHere => {
             "No coding agent has run in this workspace yet — start one by hand once and it will be offered here"
         }
@@ -2151,6 +2221,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuCopySessionId => "Copy Session ID",
         L10nKey::AppMenuForkSession => "Fork Session",
         L10nKey::AppMenuSaveAgentLaunchArgs => "Set Current Launch Args as Default",
+        L10nKey::AppMenuOpenRoleAgent => "Open role agent…",
         L10nKey::AppMenuClosePaneTab => "Close",
         L10nKey::AppMenuCloseOtherTabs => "Close Other Tabs",
         L10nKey::AppMenuCloseTabsRight => "Close Tabs to the Right",
@@ -2218,6 +2289,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarUngroupedGroup => "Ungrouped",
         L10nKey::SidebarMoveToGroup => "Move to Group",
         L10nKey::SidebarNewGroup => "New Group…",
+        L10nKey::SidebarRemoveFromGroup => "Remove from Group",
         L10nKey::SidebarNewGroupName => "New Group",
         L10nKey::SidebarRenameGroup => "Rename Group",
         L10nKey::SidebarPinGroup => "Pin Group",

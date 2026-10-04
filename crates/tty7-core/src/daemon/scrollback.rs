@@ -347,8 +347,21 @@ mod tests {
         crate::core::config::set_config_dir(dir);
     }
 
+    /// The tests below share that one directory (and one pid), so a sweep in
+    /// one test deletes whatever snapshot files exist — including another
+    /// test's, mid-flight. Serialize the tests that touch the scrollback
+    /// directory; the pure encode/decode tests need no lock.
+    static FS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_fs() -> std::sync::MutexGuard<'static, ()> {
+        FS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn a_stored_screen_comes_back_and_can_be_dropped() {
+        let _fs = lock_fs();
         pin_config_dir();
         let pane = 90_001;
         save(pane, &[seg(80, b"what the pane had on it")], None);
@@ -367,6 +380,7 @@ mod tests {
 
     #[test]
     fn saving_twice_replaces_rather_than_appends() {
+        let _fs = lock_fs();
         pin_config_dir();
         let pane = 90_002;
         save(pane, &[seg(80, b"first")], None);
@@ -381,6 +395,7 @@ mod tests {
 
     #[test]
     fn the_sweep_keeps_only_panes_something_can_still_ask_for() {
+        let _fs = lock_fs();
         pin_config_dir();
         let (kept, dropped) = (90_003, 90_004);
         save(kept, &[seg(80, b"in a workspace")], None);
@@ -400,6 +415,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_stored_screen_is_not_readable_by_anyone_else() {
+        let _fs = lock_fs();
         use std::os::unix::fs::PermissionsExt as _;
         pin_config_dir();
         let pane = 90_005;

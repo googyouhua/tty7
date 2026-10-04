@@ -1,0 +1,230 @@
+schema: comet.native.v4
+name: review-inline-comment
+language: en
+phase: archive
+status: done
+state_version: 22
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: dcaa13a774282d38ac10cb55e03ed1d2661b9159647c5587667b0be8f8af0599
+spec_changes:
+  - capability: inline-comment
+    operation: create
+    source: specs/inline-comment/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/review-inline-comment
+  target_branch: comet/codereview-mr-review
+  finish: push
+loop:
+  stage: done
+  goal_cycle: 3
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "B1: 拖选 diff 行后右键，菜单有评论入口；无选区时右键无此入口。"
+    result: passed
+    reason:
+      text: Selection-gated two menu entries.
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "B2: 输入评论确认后，新开一个 agent 会话，其 prompt 含路径 + 行号 + 选中 diff + 评论。"
+    result: passed
+    reason:
+      text: Two-stage delivery with full prompt.
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "B3: 已运行的 agent 会话不受打扰（不注入、不切换）。"
+    result: passed
+    reason:
+      text: Running sessions never touched.
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "B4: 当前无运行中 agent 也可直接用（新建，不报错）。"
+    result: passed
+    reason:
+      text: Offered-agent based with graceful notice.
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "B5: Review Tab 草稿可重编正文并发送给新建 agent；存草稿成功后评论框自动关闭。"
+    result: passed
+    reason:
+      text: Draft edit/save/send, close-on-save, Cancel, Escape-first.
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: "B6: 点击草稿行跳转到对应文件的 diff 位置（同来源 overlay 聚焦该文件；远端 Patch 草稿用存档单文件快照打开）。"
+    result: passed
+    reason:
+      text: Click-text jump with selection restore and line labels.
+      truncated: false
+builder_handoff:
+  candidate_id: bd433c7e-9f7b-427d-acc5-1393cbfe63d0
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:15a86095-c302-4969-9903-d0ed12239171
+  iteration: 1
+  summary:
+    text: "Final: right-click two entries (new agent plus running agent), new-agent
+      two-stage delivery (wait appear, wait not-Working), auto-close on send
+      plus Cancel and Escape-first, draft edit/send/close, draft click-text jump
+      with selection restore and scroll reveal, real file line labels
+      (L120-126). All suites green, device verified."
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+  checks:
+    - name:
+        text: cargo check -p tty7
+        truncated: false
+      result: passed
+      note:
+        text: no errors
+        truncated: false
+    - name:
+        text: diff_overlay tests
+        truncated: false
+      result: passed
+      note:
+        text: 44 passed
+        truncated: false
+    - name:
+        text: diff_rows tests
+        truncated: false
+      result: passed
+      note:
+        text: 21 passed incl line_label
+        truncated: false
+    - name:
+        text: review_state tests
+        truncated: false
+      result: passed
+      note:
+        text: 6 passed
+        truncated: false
+    - name:
+        text: i18n tests
+        truncated: false
+      result: passed
+      note:
+        text: 7 passed
+        truncated: false
+    - name:
+        text: keymap tests
+        truncated: false
+      result: passed
+      note:
+        text: 50 passed
+        truncated: false
+    - name:
+        text: remote build plus live test
+        truncated: false
+      result: passed
+      note:
+        text: BUILD_EXIT 0, user verified all flows on device
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: comment box single-line Input
+      truncated: false
+    - text: 30s agent-ready budget plus 5s settle
+      truncated: false
+    - text: in-memory drafts
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-03T10:37:57.722Z
+blockers: []
+verification:
+  candidate_id: bd433c7e-9f7b-427d-acc5-1393cbfe63d0
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:c67ffc24-3490-418d-b0f1-f5003711e22e
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: All six acceptances pass with code evidence.
+    truncated: false
+  risks:
+    - text: async waiter not unit-covered
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-03T10:39:16.886Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: All four acceptances hold by inspection with code evidence.
+      truncated: false
+    completed_at: 2026-10-03T03:11:48.554Z
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 加B5草稿重编发送；存后关框
+      truncated: false
+    completed_at: 2026-10-03T03:34:01.789Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: All five acceptances pass with code evidence.
+      truncated: false
+    completed_at: 2026-10-03T03:58:36.793Z
+  - goal_cycle: 2
+    iteration: 1
+    attempt: 1
+    outcome: recovery
+    unresolved_ids: []
+    summary:
+      text: 加B6草稿点击跳转对应文件diff位置
+      truncated: false
+    completed_at: 2026-10-03T03:58:43.465Z
+  - goal_cycle: 3
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: All six acceptances pass with code evidence.
+      truncated: false
+    completed_at: 2026-10-03T10:39:16.886Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-03T02:36:15.321Z

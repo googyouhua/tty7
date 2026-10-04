@@ -34,6 +34,26 @@ If `tty7 doctor` says the server is unreachable, stop and tell the user — do
 not run `tty7 server start` on your own initiative. Starting a server they
 didn't ask for changes what their GUI attaches to.
 
+## Shared box, per-user instances
+
+Several people can share one OS user (all root, say). Each person then gets
+an independent instance — own server, socket, workspaces and panes — and a
+pane id from one instance means nothing in another:
+
+```bash
+tty7 --as alice ls      # alice's instance, not the shared default
+tty7 --as alice new ~/code/api
+```
+
+`--as <name>` (`[a-z0-9-]+`) selects config dir `tty7-<name>` and overrides
+`TTY7_CONFIG_DIR`. Match the instance before anything else: a workspace you
+create on the wrong instance never appears in a GUI attached to another
+one, and it reads exactly like a sync bug. If `tty7 ls` does not show what
+the user sees, stop and ask which instance they mean.
+
+On a shared box, `pane close --orphans` and `server stop` without `--as`
+act on the default instance, not yours — always qualify them.
+
 ## What are you here to do?
 
 Four jobs, four shapes:

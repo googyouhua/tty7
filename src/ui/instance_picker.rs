@@ -334,12 +334,21 @@ impl Render for InstancePicker {
                 )
             })
             .child(
-                h_flex().justify_end().child(
-                    Button::new("instance-picker-enter")
-                        .label(t(L10nKey::InstancePickerEnter))
-                        .primary()
-                        .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                ),
+                h_flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("instance-picker-close")
+                            .label(t(L10nKey::InstancePickerClose))
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                    )
+                    .child(
+                        Button::new("instance-picker-enter")
+                            .label(t(L10nKey::InstancePickerEnter))
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    ),
             )
             .track_focus(&self.focus)
     }
