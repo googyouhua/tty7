@@ -281,7 +281,9 @@ fn builtin_models(base: CLIAgent) -> &'static [&'static str] {
         CLIAgent::Claude => &["opus", "sonnet", "haiku"],
         CLIAgent::Codex => &["gpt-5.1", "gpt-5-mini"],
         CLIAgent::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
-        CLIAgent::OpenCode | CLIAgent::OpenCode2 => &["opencode/gpt-5", "opencode/claude-sonnet-4-5"],
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => {
+            &["opencode/gpt-5", "opencode/claude-sonnet-4-5"]
+        }
         _ => &[],
     }
 }

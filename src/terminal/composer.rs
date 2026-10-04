@@ -306,7 +306,10 @@ pub(super) fn compose_message(
 /// image, and leave a path that follows the message's text as words — the
 /// image never reaches the model.
 fn attaches_pasted_paths(agent: CLIAgent) -> bool {
-    matches!(agent, CLIAgent::OpenCode | CLIAgent::OpenCode2 | CLIAgent::Amp)
+    matches!(
+        agent,
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 | CLIAgent::Amp
+    )
 }
 
 /// The writes that send `text` with `attached` — [`compose_message`] handed
@@ -1281,22 +1284,24 @@ fn held_lines(agent: CLIAgent, rows: &[String], width: usize) -> usize {
                     .collect(),
             )
         }),
-        CLIAgent::OpenCode | CLIAgent::OpenCode2 => opencode_input_top(rows, floor).map_or(0, |top| {
-            let block: Vec<&str> = rows[top..]
-                .iter()
-                .take_while(|r| r.trim_start().starts_with('┃'))
-                .map(|r| r.trim().trim_start_matches('┃').trim())
-                .collect();
-            // The last line names the agent and model.
-            let lines = block[..block.len().saturating_sub(1)]
-                .iter()
-                .map(|l| match l.starts_with("Ask anything...") {
-                    true => "",
-                    false => l,
-                })
-                .collect();
-            count(lines)
-        }),
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => {
+            opencode_input_top(rows, floor).map_or(0, |top| {
+                let block: Vec<&str> = rows[top..]
+                    .iter()
+                    .take_while(|r| r.trim_start().starts_with('┃'))
+                    .map(|r| r.trim().trim_start_matches('┃').trim())
+                    .collect();
+                // The last line names the agent and model.
+                let lines = block[..block.len().saturating_sub(1)]
+                    .iter()
+                    .map(|l| match l.starts_with("Ask anything...") {
+                        true => "",
+                        false => l,
+                    })
+                    .collect();
+                count(lines)
+            })
+        }
         CLIAgent::QoderCLI | CLIAgent::QoderCLICn => {
             qoder_input(rows, floor, width).map_or(0, |q| {
                 count(
@@ -2894,13 +2899,12 @@ impl TerminalView {
         }
         let shell = self.shell_program();
         // Where OpenCode's mentions are looked up, to be picked from its list.
-        let mentions_from =
-            match matches!(agent, CLIAgent::OpenCode | CLIAgent::OpenCode2)
-                && self.host_id().is_local()
-            {
-                true => self.files_cwd(),
-                false => None,
-            };
+        let mentions_from = match matches!(agent, CLIAgent::OpenCode | CLIAgent::OpenCode2)
+            && self.host_id().is_local()
+        {
+            true => self.files_cwd(),
+            false => None,
+        };
         let Some(c) = self.composer.as_mut() else {
             return;
         };
@@ -3911,10 +3915,7 @@ mod tests {
             builtin_commands(CLIAgent::OpenCode)
         );
         assert!(attaches_pasted_paths(CLIAgent::OpenCode2));
-        assert_eq!(
-            covers(CLIAgent::OpenCode2),
-            covers(CLIAgent::OpenCode)
-        );
+        assert_eq!(covers(CLIAgent::OpenCode2), covers(CLIAgent::OpenCode));
     }
 
     #[test]

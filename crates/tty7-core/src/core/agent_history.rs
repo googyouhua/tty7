@@ -1966,11 +1966,7 @@ mod tests {
                     "add dark mode".into()
                 ),
                 (CLIAgent::OpenCode, "ses_named".into(), "Fix login".into()),
-                (
-                    CLIAgent::OpenCode2,
-                    "ses_named".into(),
-                    "Fix login".into()
-                ),
+                (CLIAgent::OpenCode2, "ses_named".into(), "Fix login".into()),
                 (CLIAgent::Kimi, "session_k".into(), "hi kimi".into()),
                 (CLIAgent::Qwen, "w1".into(), "hi qwen".into()),
             ]

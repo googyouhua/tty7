@@ -506,7 +506,9 @@ impl CLIAgent {
             ],
             CLIAgent::Vibe => &["--resume", "--continue", "-c"],
             CLIAgent::Antigravity => &["--conversation", "--continue", "-c"],
-            CLIAgent::OpenCode | CLIAgent::OpenCode2 => &["--session", "-s", "--continue", "-c", "--fork"],
+            CLIAgent::OpenCode | CLIAgent::OpenCode2 => {
+                &["--session", "-s", "--continue", "-c", "--fork"]
+            }
             CLIAgent::Codex => &["--last"],
             CLIAgent::TraeCode => &["--last", "--resume", "--session-id"],
             CLIAgent::Pi => &[
