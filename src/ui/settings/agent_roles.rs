@@ -6,8 +6,8 @@ use super::shell::SearchOption;
 use super::*;
 
 use crate::core::agent_roles::{
-    AgentRole, RoleStarter, delete_role, load_roles, model_choices, roles_dir, save_role,
-    slug_from_name, unique_slug,
+    AgentRole, RoleStarter, delete_role, fetch_opencode_models_with_error, load_roles,
+    model_choices_fast, roles_dir, save_role, slug_from_name, unique_slug,
 };
 use crate::core::cli_agent::CLIAgent;
 
@@ -27,6 +27,13 @@ pub(crate) struct AgentRoleForm {
     /// alongside so a refresh never loses the typed value.
     model: String,
     models: Vec<String>,
+    /// Last refresh failure, if any. The old list is kept; this only
+    /// explains why it did not update.
+    models_error: Option<String>,
+    /// A refresh is running off the UI thread.
+    models_loading: bool,
+    /// Guards overlapping refreshes; only the latest generation applies.
+    models_generation: u64,
     error: Option<String>,
     _subs: Vec<Subscription>,
 }
@@ -99,11 +106,17 @@ impl Tty7App {
                 &mut subs,
             )
         });
+        let base = editing.map(|r| r.base).unwrap_or(CLIAgent::Claude);
         let form = AgentRoleForm {
             editing: editing.map(|r| r.slug.clone()),
-            base: editing.map(|r| r.base).unwrap_or(CLIAgent::Claude),
+            base,
             model: editing.map(|r| r.model.clone()).unwrap_or_default(),
-            models: model_choices(editing.map(|r| r.base).unwrap_or(CLIAgent::Claude)),
+            // Fast path first so opening the form never blocks on a hung
+            // CLI; the live list fills in on a background task below.
+            models: model_choices_fast(base),
+            models_error: None,
+            models_loading: matches!(base, CLIAgent::OpenCode),
+            models_generation: 0,
             name,
             launch,
             description,
@@ -117,6 +130,12 @@ impl Tty7App {
             s.role_form = Some(form);
         }
         cx.notify();
+        // Live fill for bases with a fetch (currently only OpenCode):
+        // success replaces the fast list, failure keeps it and records
+        // the reason instead of silently showing stale data.
+        if matches!(base, CLIAgent::OpenCode) {
+            self.spawn_live_models(0, cx);
+        }
     }
 
     /// Open a blank add form.
@@ -146,23 +165,87 @@ impl Tty7App {
 
     pub(crate) fn set_role_base(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(base) = CLIAgent::ALL.get(index) {
-            if let Some(form) = self.role_form_mut() {
+            let generation = if let Some(form) = self.role_form_mut() {
                 form.base = *base;
                 // A new base means a new model list; the old pick rarely
                 // survives the switch, so reset rather than keep a stale one.
                 form.model.clear();
-                form.models = model_choices(*base);
+                form.models = model_choices_fast(*base);
+                form.models_error = None;
+                form.models_loading = matches!(*base, CLIAgent::OpenCode);
+                form.models_generation = form.models_generation.wrapping_add(1);
+                form.models_generation
+            } else {
+                return;
+            };
+            if matches!(*base, CLIAgent::OpenCode) {
+                self.spawn_live_models(generation, cx);
             }
         }
         cx.notify();
     }
 
     /// Re-run the model fetch for the form's base (the dropdown's refresh).
+    /// Never blocks the UI: the old list stays until the background fetch
+    /// completes; a failure keeps the list and records the reason.
     pub(crate) fn refresh_role_models(&mut self, cx: &mut Context<Self>) {
-        if let Some(form) = self.role_form_mut() {
-            form.models = model_choices(form.base);
-        }
+        let generation = if let Some(form) = self.role_form_mut() {
+            form.models_generation = form.models_generation.wrapping_add(1);
+            form.models_loading = true;
+            form.models_error = None;
+            form.models_generation
+        } else {
+            return;
+        };
         cx.notify();
+        self.spawn_live_models(generation, cx);
+    }
+
+    /// Background `opencode2`/`opencode models` fetch for the form's current
+    /// base. Only `generation` applies, so rapid base switches or refresh clicks
+    /// cannot let a stale slow fetch overwrite a newer one.
+    fn spawn_live_models(&mut self, generation: u64, cx: &mut Context<Self>) {
+        let base = match self.role_form_mut() {
+            Some(form) => form.base,
+            None => return,
+        };
+        if !matches!(base, CLIAgent::OpenCode) {
+            if let Some(form) = self.role_form_mut() {
+                form.models_loading = false;
+            }
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { fetch_opencode_models_with_error() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(form) = this.role_form_mut() else {
+                    return;
+                };
+                if form.models_generation != generation || form.base != base {
+                    return;
+                }
+                form.models_loading = false;
+                match result {
+                    Ok(models) => {
+                        form.models = models;
+                        form.models_error = None;
+                    }
+                    Err(e) => {
+                        // Keep the old (fast/fallback) list; surface why it
+                        // did not update instead of silently going stale.
+                        if form.models.is_empty() {
+                            form.models = model_choices_fast(form.base);
+                        }
+                        form.models_error = Some(e);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Validate the open form and write it to `roles/<slug>/role.json`.
@@ -407,6 +490,8 @@ impl Tty7App {
             cx,
         );
         const W: f32 = 320.;
+        let models_loading = form.models_loading;
+        let models_error = form.models_error.clone();
         let mut rows: Vec<AnyElement> = vec![
             self.settings_row(
                 t(L10nKey::SettingsRoleName),
@@ -432,7 +517,10 @@ impl Tty7App {
                     .child(
                         kit::button(
                             "role-models-refresh",
-                            t(L10nKey::SettingsRoleRefresh),
+                            match models_loading {
+                                true => format!("{}…", t(L10nKey::SettingsRoleRefresh)),
+                                false => t(L10nKey::SettingsRoleRefresh).to_string(),
+                            },
                             BtnKind::Link,
                         )
                         .on_click(cx.listener(
@@ -492,6 +580,16 @@ impl Tty7App {
                     .text_size(fs(12.))
                     .text_color(tk.danger)
                     .child(error.clone())
+                    .into_any_element(),
+            );
+        }
+        if let Some(error) = models_error.as_ref() {
+            let tk = Tk::of(cx);
+            rows.push(
+                div()
+                    .text_size(fs(12.))
+                    .text_color(tk.danger)
+                    .child(format!("Models refresh failed: {error}"))
                     .into_any_element(),
             );
         }

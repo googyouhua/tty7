@@ -286,6 +286,17 @@ fn builtin_models(base: CLIAgent) -> &'static [&'static str] {
     }
 }
 
+/// Models known without a live fetch: `models.json`, then the built-in
+/// table. Used to seed the form immediately; the live fetch fills in
+/// afterwards on a background task so a hung CLI never freezes the UI.
+pub fn model_choices_fast(base: CLIAgent) -> Vec<String> {
+    let out = models_file_models(base);
+    if !out.is_empty() {
+        return out;
+    }
+    builtin_models(base).iter().map(|s| s.to_string()).collect()
+}
+
 /// Models known right now for `base`: a live fetch first, then
 /// `models.json`, then the built-in table. Empty means the caller falls
 /// back to free text (or hides the picker).
@@ -301,7 +312,7 @@ pub fn model_choices(base: CLIAgent) -> Vec<String> {
 }
 
 /// Best-effort live model lists. No network beyond what the CLIs do
-/// themselves; anything slow or failing reads as empty in under a second.
+/// themselves; anything failing reads as empty (bounded by a timeout).
 fn fetch_models(base: CLIAgent) -> Vec<String> {
     match base {
         CLIAgent::OpenCode => fetch_opencode_models(),
@@ -313,25 +324,177 @@ fn fetch_models(base: CLIAgent) -> Vec<String> {
 /// `opencode models`, one `provider/model` per line. Runs synchronously —
 /// callers only invoke it on base change or explicit refresh, never per
 /// frame. Anything failing reads as empty.
+///
+/// v2 renamed the binary to `opencode2`; both names are tried in order so a
+/// v2 install refreshes instead of silently falling back to the stale
+/// built-in table.
 fn fetch_opencode_models() -> Vec<String> {
-    let program = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|dir| dir.join("opencode"))
-        .find(|p| p.is_file());
-    let Some(program) = program else {
-        return Vec::new();
+    fetch_opencode_models_with_error().unwrap_or_default()
+}
+
+/// Same fetch with the failure reason kept, so the settings refresh button
+/// can keep the old list *and* tell the user why it did not update.
+pub fn fetch_opencode_models_with_error() -> Result<Vec<String>, String> {
+    let Some(program) = find_opencode_program() else {
+        return Err("no `opencode2` or `opencode` binary found on PATH".to_string());
     };
-    let Ok(out) = std::process::Command::new(&program).arg("models").output() else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
+    run_models_command(&program)
+}
+
+/// Binary candidates in preference order: v2 first, then v1.
+fn opencode_program_names() -> [&'static str; 2] {
+    ["opencode2", "opencode"]
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            for candidate in [
+                dir.join(format!("{name}.exe")),
+                dir.join(name),
+            ] {
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let candidate = dir.join(name);
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
     }
-    String::from_utf8_lossy(&out.stdout)
+    None
+}
+
+/// First `opencode2`/`opencode` executable on `PATH`, else well-known install
+/// locations (GUI launches often miss shell `PATH` entries). v2 first.
+fn find_opencode_program() -> Option<PathBuf> {
+    for name in opencode_program_names() {
+        if let Some(found) = find_on_path(name) {
+            return Some(found);
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    if let Some(home) = home {
+        for name in opencode_program_names() {
+            for candidate in [
+                home.join(".opencode").join("bin").join(name),
+                home.join(".local").join("bin").join(name),
+            ] {
+                #[cfg(windows)]
+                let candidate = candidate.with_extension("exe");
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    for name in opencode_program_names() {
+        for candidate in [
+            PathBuf::from("/usr/local/bin").join(name),
+            PathBuf::from("/opt/homebrew/bin").join(name),
+        ] {
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn parse_models_output(stdout: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Run `<program> models` with a bounded wait so a hung CLI never freezes
+/// the caller. `try_wait` polling is std-only (no extra dependency).
+fn run_models_command(program: &std::path::Path) -> Result<Vec<String>, String> {
+    let mut child = std::process::Command::new(program)
+        .arg("models")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run `{}`: {e}", program.display()))?;
+    let timeout = std::time::Duration::from_secs(8);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = child.wait_with_output().map_err(|e| {
+                    format!("cannot read `{}` output: {e}", program.display())
+                })?;
+                if !status.success() {
+                    let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    if detail.is_empty() {
+                        return Err(format!(
+                            "`{}` exited with {status}",
+                            program.display()
+                        ));
+                    }
+                    return Err(format!(
+                        "`{}` failed: {detail}",
+                        program.display()
+                    ));
+                }
+                let models = parse_models_output(&out.stdout);
+                if models.is_empty() {
+                    return Err(format!(
+                        "`{}` returned no models",
+                        program.display()
+                    ));
+                }
+                return Ok(models);
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "`{}` timed out after {}s",
+                        program.display(),
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!(
+                    "cannot wait for `{}`: {e}",
+                    program.display()
+                ));
+            }
+        }
+    }
 }
 
 /// Claude Code's local model-catalog cache (`$CLAUDE_CONFIG_DIR`, else
@@ -639,5 +802,49 @@ mod tests {
         };
         assert!(save_role(dir.path(), &bad).is_err());
         assert!(delete_role(dir.path(), "ghost").is_ok());
+    }
+
+    #[test]
+    fn opencode_prefers_v2_binary_name() {
+        assert_eq!(opencode_program_names(), ["opencode2", "opencode"]);
+    }
+
+    #[test]
+    fn models_output_parses_one_per_line() {
+        let out = b"opencode/gpt-5\n\n  opencode/claude-sonnet-4-5  \n";
+        assert_eq!(
+            parse_models_output(out),
+            vec![
+                "opencode/gpt-5".to_string(),
+                "opencode/claude-sonnet-4-5".to_string()
+            ]
+        );
+        assert!(parse_models_output(b"\n   \n").is_empty());
+    }
+
+    #[test]
+    fn live_opencode_fetch_returns_models_when_cli_exists() {
+        // Best-effort against the real CLI: skip when neither binary is
+        // installed so CI without opencode stays green. Retry once: a cold
+        // background service can transiently report an empty list.
+        if find_opencode_program().is_none() {
+            return;
+        }
+        let mut last = String::new();
+        for _ in 0..2 {
+            match fetch_opencode_models_with_error() {
+                Ok(models) if !models.is_empty() => {
+                    assert!(
+                        models.iter().all(|m| m.contains('/')),
+                        "expected provider/model entries, got {models:?}"
+                    );
+                    return;
+                }
+                Ok(models) => last = format!("empty list ({} entries)", models.len()),
+                Err(e) => last = e,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        panic!("installed opencode CLI should list models: {last}");
     }
 }
