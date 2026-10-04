@@ -1,0 +1,131 @@
+schema: comet.native.v4
+name: models-file-dev-shape
+language: en
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 8bbc982b35cff18fa326c5bce0738fba234f9195cb243df2af98dabc335c1ce1
+spec_changes:
+  - capability: models-file-shapes
+    operation: create
+    source: specs/models-file-shapes/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: A1：把 `https://models.dev/api.json` 下载存文件，表单文件模式加载后对应 base 出现映射 provider
+      列表（如 opencode 出现 `opencode/*`）。
+    result: passed
+    reason:
+      text: Downloaded api.json loads via file mode with mapped provider extraction
+        and prefix rules.
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: A2：只含无关 provider 的切片（如仅 `deepinfra`）对 claude 加载失败并红字，不清空旧表。
+    result: passed
+    reason:
+      text: Unmapped-only slice fails with path error; old list kept with red text.
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: 'A3：`{"models": ["ok", 7]}` 仍报原非字符串错误，不被 provider 回退吞掉。'
+    result: passed
+    reason:
+      text: Broken models array keeps precise non-string error.
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: A4：`cargo test -p tty7-core agent_roles` 全过。
+    result: passed
+    reason:
+      text: 24/24 agent_roles tests pass.
+      truncated: false
+builder_handoff:
+  candidate_id: 602274b3-8c4e-4a6e-8e09-ed43cf1e1065
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:90811772-a667-4458-8ce0-657a79cccb7e
+  iteration: 1
+  summary:
+    text: File mode accepts models.dev full/slice docs when top level has no models
+      key; precise errors kept for broken models arrays; doc updated
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+  checks:
+    - name:
+        text: cargo test -p tty7-core agent_roles
+        truncated: false
+      result: passed
+      note:
+        text: 24/24 pass (added models_dev document via file test)
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: File pre-cap stays 1 MiB, so huge api.json downloads must fit it
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-04T10:53:29.126Z
+blockers: []
+verification:
+  candidate_id: 602274b3-8c4e-4a6e-8e09-ed43cf1e1065
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:ea5e36a3-e747-41da-a11c-b1796a57f833
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: A1-A4 pass.
+    truncated: false
+  risks:
+    - text: Shape-two path has no 2000-item cap (same as URL mode).
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-04T10:54:17.210Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: A1-A4 pass.
+      truncated: false
+    completed_at: 2026-10-04T10:54:17.210Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-04T10:51:12.054Z
