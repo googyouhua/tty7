@@ -566,9 +566,7 @@ impl Tty7App {
                     let (targets, default_key) = app
                         .update(cx, |this, cx| {
                             let targets = this.review_new_targets(cx);
-                            let def = this
-                                .review_default_target(cx)
-                                .map(|t| t.frecency_key());
+                            let def = this.review_default_target(cx).map(|t| t.frecency_key());
                             (targets, def)
                         })
                         .unwrap_or_default();
@@ -581,21 +579,19 @@ impl Tty7App {
                         let checked = Some(target.frecency_key()) == default_key;
                         let owned = target.clone();
                         let app = app.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(label).checked(checked).on_click(
-                                move |_, window, cx| {
-                                    let _ = app.update(cx, |this, cx| {
-                                        let comment = this.review_box_text(cx);
-                                        if this
-                                            .review_send_to_new_target(&comment, &owned, window, cx)
-                                            .is_ok()
-                                        {
-                                            this.close_review_box(cx);
-                                        }
-                                    });
-                                },
-                            ),
-                        );
+                        menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                            move |_, window, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    let comment = this.review_box_text(cx);
+                                    if this
+                                        .review_send_to_new_target(&comment, &owned, window, cx)
+                                        .is_ok()
+                                    {
+                                        this.close_review_box(cx);
+                                    }
+                                });
+                            },
+                        ));
                     }
                     menu
                 })

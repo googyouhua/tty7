@@ -31,8 +31,7 @@ impl ReviewNewTarget {
     pub(crate) fn frecency_key(&self) -> String {
         match self {
             ReviewNewTarget::Agent(agent) => agent.slug().to_string(),
-            ReviewNewTarget::Role(role) =>
-                crate::ui::agent_launch::role_frecency_key(&role.slug),
+            ReviewNewTarget::Role(role) => crate::ui::agent_launch::role_frecency_key(&role.slug),
         }
     }
 }
@@ -398,7 +397,16 @@ impl Tty7App {
         };
         // The default target is agent-only when no role exists; with roles
         // present it may be a role — both flow through the same waiter.
-        self.deliver_review_to_target(&target, path, lines, prompt, comment_len, source_label, window, cx)
+        self.deliver_review_to_target(
+            &target,
+            path,
+            lines,
+            prompt,
+            comment_len,
+            source_label,
+            window,
+            cx,
+        )
     }
 
     /// Every target the "Send to new agent" menu offers, roles first: added
@@ -423,9 +431,8 @@ impl Tty7App {
             return None;
         }
         let frecency = &cx.global::<crate::core::config::Config>().agent_frecency;
-        let last_used = |t: &ReviewNewTarget| {
-            frecency.get(&t.frecency_key()).map_or(0, |u| u.last_used)
-        };
+        let last_used =
+            |t: &ReviewNewTarget| frecency.get(&t.frecency_key()).map_or(0, |u| u.last_used);
         targets
             .iter()
             .cloned()
@@ -448,7 +455,16 @@ impl Tty7App {
         else {
             return Err("no-selection");
         };
-        self.deliver_review_to_target(target, &path, &lines, &prompt, comment_len, &label, window, cx)
+        self.deliver_review_to_target(
+            target,
+            &path,
+            &lines,
+            &prompt,
+            comment_len,
+            &label,
+            window,
+            cx,
+        )
     }
 
     /// Send the Review tab editor text with its draft's diff to an explicit
@@ -540,7 +556,9 @@ impl Tty7App {
             _ => 5,
         };
         match target.clone() {
-            ReviewNewTarget::Agent(agent) => self.launch_agent(agent, SpawnWhere::NewTab, window, cx),
+            ReviewNewTarget::Agent(agent) => {
+                self.launch_agent(agent, SpawnWhere::NewTab, window, cx)
+            }
             ReviewNewTarget::Role(role) => self.launch_role(role, SpawnWhere::NewTab, window, cx),
         }
         let tab_idx = self.active;
@@ -579,8 +597,7 @@ impl Tty7App {
             // settle grace so a fresh idle agent never waits forever. Roles
             // with a TwoPhase followup settle longer so instructions land
             // before the review prompt.
-            let settled = std::time::Instant::now()
-                + std::time::Duration::from_secs(settle_secs);
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(settle_secs);
             loop {
                 let status = this
                     .update(cx, |_, cx| leaf.read(cx).agent_session().map(|s| s.status))

@@ -368,10 +368,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
         }
         #[cfg(windows)]
         {
-            for candidate in [
-                dir.join(format!("{name}.exe")),
-                dir.join(name),
-            ] {
+            for candidate in [dir.join(format!("{name}.exe")), dir.join(name)] {
                 if is_executable(&candidate) {
                     return Some(candidate);
                 }
@@ -449,28 +446,19 @@ fn run_models_command(program: &std::path::Path) -> Result<Vec<String>, String> 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = child.wait_with_output().map_err(|e| {
-                    format!("cannot read `{}` output: {e}", program.display())
-                })?;
+                let out = child
+                    .wait_with_output()
+                    .map_err(|e| format!("cannot read `{}` output: {e}", program.display()))?;
                 if !status.success() {
                     let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
                     if detail.is_empty() {
-                        return Err(format!(
-                            "`{}` exited with {status}",
-                            program.display()
-                        ));
+                        return Err(format!("`{}` exited with {status}", program.display()));
                     }
-                    return Err(format!(
-                        "`{}` failed: {detail}",
-                        program.display()
-                    ));
+                    return Err(format!("`{}` failed: {detail}", program.display()));
                 }
                 let models = parse_models_output(&out.stdout);
                 if models.is_empty() {
-                    return Err(format!(
-                        "`{}` returned no models",
-                        program.display()
-                    ));
+                    return Err(format!("`{}` returned no models", program.display()));
                 }
                 return Ok(models);
             }
@@ -488,10 +476,7 @@ fn run_models_command(program: &std::path::Path) -> Result<Vec<String>, String> 
             }
             Err(e) => {
                 let _ = child.kill();
-                return Err(format!(
-                    "cannot wait for `{}`: {e}",
-                    program.display()
-                ));
+                return Err(format!("cannot wait for `{}`: {e}", program.display()));
             }
         }
     }
