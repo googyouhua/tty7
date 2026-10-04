@@ -506,14 +506,19 @@ if [[ $- == *i* ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
   # Freeze the composed chain into one string, hide it behind a function call
   # whose absence is silent, and let a self-contained reporter carry OSC 7
   # where nothing else can. Outer behavior is unchanged: the same commands in
-  # the same order (the DEBUG-trap arming inside is untouched — the reporter
-  # line is itself a PROMPT_COMMAND entry, so `__bp_in_prompt_command` still
-  # excuses it), plus a duplicate cwd report the daemon deduplicates. In a
+  # the same order, plus a duplicate cwd report the daemon deduplicates. In a
   # nested shell the chain call fails silent and the reporter — builtins and
   # shell-maintained variables only — still reports precisely.
+  #
+  # `__bp_interactive_mode` must keep the last word: it arms preexec for the
+  # next command, and anything running after it (like the reporter) trips the
+  # DEBUG trap while armed and disarms it again — the next typed command
+  # would then run with no `133;C`. Re-arming it here is a harmless second
+  # run outwardly (a bare flag set) and silent inwardly (missing function,
+  # swallowed, `|| true` normalizing the status).
   __TTY7_SAVED_PROMPT_COMMAND="$(IFS=$'\n'; printf '%s' "${PROMPT_COMMAND[*]}")"
   __tty7_outer_chain() { eval "$__TTY7_SAVED_PROMPT_COMMAND"; }
-  export PROMPT_COMMAND=$'__tty7_outer_chain 2>/dev/null\nbuiltin printf \'\\e]7;file://%s%s\\a\' "${HOSTNAME:-localhost}" "${PWD//\\%/%25}"'
+  export PROMPT_COMMAND=$'__tty7_outer_chain 2>/dev/null\nbuiltin printf \'\\e]7;file://%s%s\\a\' "${HOSTNAME:-localhost}" "${PWD//\\%/%25}"\n__bp_interactive_mode 2>/dev/null || true'
 fi
 # --- end tty7 shell integration ---
 "#;
@@ -1905,9 +1910,14 @@ fi
                 "missing-function calls must stay silent: {line}"
             );
             assert!(line.contains("builtin printf"), "{line}");
+            // `__bp_interactive_mode` keeps the last word: it arms preexec
+            // for the next typed command, and the reporter running after the
+            // chain would otherwise disarm it via the DEBUG trap (no 133;C).
+            let rearm = "__bp_interactive_mode 2>/dev/null || true";
+            assert!(line.contains(rearm), "preexec must stay armed: {line}");
             assert!(
-                rc.contains("__TTY7_SAVED_PROMPT_COMMAND"),
-                "frozen chain missing"
+                line.find("builtin printf").unwrap() < line.find(rearm).unwrap(),
+                "the re-arm runs after the reporter: {line}"
             );
             // Self-contained means exactly that: the tail (past the literal
             // `\n` inside the `$'...'`) forks nothing and calls no function
