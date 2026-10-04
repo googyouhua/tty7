@@ -886,6 +886,26 @@ mod tests {
     }
 
     #[test]
+    fn opencode2_roles_launch_and_resume_their_own_binary() {
+        let role = |base: CLIAgent| AgentRole {
+            slug: "b".into(),
+            name: "B".into(),
+            base,
+            description: String::new(),
+            launch: String::new(),
+            model: String::new(),
+            instructions: String::new(),
+            starters: vec![],
+        };
+        assert_eq!(role_launch_line(&role(CLIAgent::OpenCode2)), "opencode2");
+        assert_eq!(role_launch_line(&role(CLIAgent::OpenCode)), "opencode");
+        assert_eq!(
+            role_resume_line(&role(CLIAgent::OpenCode2), "sess-1").as_deref(),
+            Some("opencode2 --session sess-1")
+        );
+    }
+
+    #[test]
     fn only_roles_whose_launch_program_is_on_path_are_offered() {
         let dir = tempfile::TempDir::new().unwrap();
         let bin = dir.path().join("cc");

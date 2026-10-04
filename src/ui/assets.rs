@@ -90,6 +90,8 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/gemini.svg" => include_bytes!("../../assets/icons/agents/gemini.svg"),
         "icons/agents/amp.svg" => include_bytes!("../../assets/icons/agents/amp.svg"),
         "icons/agents/opencode.svg" => include_bytes!("../../assets/icons/agents/opencode.svg"),
+        // Same mark as opencode, under the v2 slug the icon convention expects.
+        "icons/agents/opencode2.svg" => include_bytes!("../../assets/icons/agents/opencode2.svg"),
         "icons/agents/copilot.svg" => include_bytes!("../../assets/icons/agents/copilot.svg"),
         "icons/agents/cursor.svg" => include_bytes!("../../assets/icons/agents/cursor.svg"),
         "icons/agents/goose.svg" => include_bytes!("../../assets/icons/agents/goose.svg"),

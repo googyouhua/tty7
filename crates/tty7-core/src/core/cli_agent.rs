@@ -32,10 +32,11 @@ pub enum CLIAgent {
     Empryo,
     PrimeAgent,
     QoderCLICn,
+    OpenCode2,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 26] = [
+    pub const ALL: [CLIAgent; 27] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -43,6 +44,9 @@ impl CLIAgent {
         CLIAgent::Aider,
         CLIAgent::Amp,
         CLIAgent::OpenCode,
+        // Sibling first: the base dropdown is a plain popover that cannot
+        // scroll, so a v2 entry trailing at the end would be unreachable.
+        CLIAgent::OpenCode2,
         CLIAgent::Copilot,
         CLIAgent::Cursor,
         CLIAgent::Goose,
@@ -73,6 +77,7 @@ impl CLIAgent {
             CLIAgent::Aider => &["aider", "aider-chat"],
             CLIAgent::Amp => &["amp"],
             CLIAgent::OpenCode => &["opencode"],
+            CLIAgent::OpenCode2 => &["opencode2"],
             CLIAgent::Copilot => &["copilot"],
             CLIAgent::Cursor => &["cursor-agent"],
             CLIAgent::Goose => &["goose"],
@@ -132,6 +137,7 @@ impl CLIAgent {
             CLIAgent::Aider => "aider",
             CLIAgent::Amp => "amp",
             CLIAgent::OpenCode => "opencode",
+            CLIAgent::OpenCode2 => "opencode2",
             CLIAgent::Copilot => "copilot",
             CLIAgent::Cursor => "cursor",
             CLIAgent::Goose => "goose",
@@ -168,6 +174,7 @@ impl CLIAgent {
             CLIAgent::Aider => "Aider",
             CLIAgent::Amp => "Amp",
             CLIAgent::OpenCode => "OpenCode",
+            CLIAgent::OpenCode2 => "OpenCode2",
             CLIAgent::Copilot => "Copilot",
             CLIAgent::Cursor => "Cursor",
             CLIAgent::Goose => "Goose",
@@ -205,6 +212,7 @@ impl CLIAgent {
             CLIAgent::TraeCode => Some(format!("traecli resume {session_id}{flags}")),
             CLIAgent::Gemini => Some(format!("gemini{flags} --resume {session_id}")),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id}")),
+            CLIAgent::OpenCode2 => Some(format!("opencode2{flags} --session {session_id}")),
             CLIAgent::Amp => Some(format!("amp threads continue {session_id}{flags}")),
             CLIAgent::Auggie => Some(format!("auggie{flags} --resume {session_id}")),
             CLIAgent::Hermes => Some(format!("hermes chat{flags} --resume {session_id}")),
@@ -274,6 +282,7 @@ impl CLIAgent {
                 "codebuddy{flags} --resume {session_id} --fork-session"
             )),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id} --fork")),
+            CLIAgent::OpenCode2 => Some(format!("opencode2{flags} --session {session_id} --fork")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --fork {session_id}")),
             CLIAgent::PrimeAgent => Some(format!("prime-agent{flags} --fork {session_id}")),
             // Droid forks with a standalone flag rather than resume-plus-a-switch.
@@ -297,6 +306,7 @@ impl CLIAgent {
             | CLIAgent::TraeCode
             | CLIAgent::Grok
             | CLIAgent::OpenCode
+            | CLIAgent::OpenCode2
             | CLIAgent::OhMyPi
             | CLIAgent::PrimeAgent
             | CLIAgent::Droid
@@ -496,7 +506,7 @@ impl CLIAgent {
             ],
             CLIAgent::Vibe => &["--resume", "--continue", "-c"],
             CLIAgent::Antigravity => &["--conversation", "--continue", "-c"],
-            CLIAgent::OpenCode => &["--session", "-s", "--continue", "-c", "--fork"],
+            CLIAgent::OpenCode | CLIAgent::OpenCode2 => &["--session", "-s", "--continue", "-c", "--fork"],
             CLIAgent::Codex => &["--last"],
             CLIAgent::TraeCode => &["--last", "--resume", "--session-id"],
             CLIAgent::Pi => &[
@@ -614,6 +624,7 @@ impl CLIAgent {
             CLIAgent::Aider => 0x14B014,
             CLIAgent::Amp => 0xF34E3F,
             CLIAgent::OpenCode => 0x6E56CF,
+            CLIAgent::OpenCode2 => 0x6E56CF,
             CLIAgent::Copilot => 0x8957E5,
             CLIAgent::Cursor => 0x9AA0A6,
             CLIAgent::Goose => 0x3ECC5F,
@@ -669,6 +680,8 @@ impl CLIAgent {
             CLIAgent::Gemini => "icons/agents/gemini.svg",
             CLIAgent::Amp => "icons/agents/amp.svg",
             CLIAgent::OpenCode => "icons/agents/opencode.svg",
+            // v2 wears the same mark under its own file, like qoderclicn.
+            CLIAgent::OpenCode2 => "icons/agents/opencode2.svg",
             CLIAgent::Copilot => "icons/agents/copilot.svg",
             CLIAgent::Cursor => "icons/agents/cursor.svg",
             CLIAgent::Goose => "icons/agents/goose.svg",
@@ -2723,6 +2736,55 @@ mod tests {
                 )
                 .as_deref(),
             Some("opencode --session s-2")
+        );
+        assert_eq!(
+            CLIAgent::OpenCode2
+                .resume_command(
+                    "s-2",
+                    Some(&argv(&["opencode2", "--session", "s-1", "--fork"]))
+                )
+                .as_deref(),
+            Some("opencode2 --session s-2")
+        );
+        assert_eq!(
+            CLIAgent::OpenCode2
+                .fork_command(
+                    "s-2",
+                    Some(&argv(&["opencode2", "--session", "s-1", "--fork"]))
+                )
+                .as_deref(),
+            Some("opencode2 --session s-2 --fork")
+        );
+    }
+
+    #[test]
+    fn opencode2_mirrors_opencode_with_its_own_binary() {
+        assert_eq!(CLIAgent::OpenCode2.binary(), "opencode2");
+        assert_eq!(CLIAgent::OpenCode.binary(), "opencode");
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["opencode2", "--session", "s-1"])),
+            Some(CLIAgent::OpenCode2)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["opencode", "--session", "s-1"])),
+            Some(CLIAgent::OpenCode)
+        );
+        assert_eq!(
+            CLIAgent::OpenCode2.resume_command("s-1", None).as_deref(),
+            Some("opencode2 --session s-1")
+        );
+        assert_eq!(
+            CLIAgent::OpenCode2.fork_command("s-1", None).as_deref(),
+            Some("opencode2 --session s-1 --fork")
+        );
+        assert_eq!(
+            CLIAgent::OpenCode2.launch_argv_for_default(&argv(&[
+                "opencode2",
+                "--session",
+                "s-1",
+                "--fork"
+            ])),
+            Some(argv(&["opencode2"]))
         );
     }
 
