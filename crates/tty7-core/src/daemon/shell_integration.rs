@@ -1905,7 +1905,10 @@ fi
                 "missing-function calls must stay silent: {line}"
             );
             assert!(line.contains("builtin printf"), "{line}");
-            assert!(rc.contains("__TTY7_SAVED_PROMPT_COMMAND"), "frozen chain missing");
+            assert!(
+                rc.contains("__TTY7_SAVED_PROMPT_COMMAND"),
+                "frozen chain missing"
+            );
             // Self-contained means exactly that: the tail (past the literal
             // `\n` inside the `$'...'`) forks nothing and calls no function
             // an inner shell never defined.
@@ -1918,9 +1921,7 @@ fi
             assert!(rc.contains(
                 "__TTY7_SAVED_PROMPT_COMMAND=\"$(IFS=$'\\n'; printf '%s' \"${PROMPT_COMMAND[*]}\")\""
             ));
-            assert!(rc.contains(
-                "__tty7_outer_chain() { eval \"$__TTY7_SAVED_PROMPT_COMMAND\"; }"
-            ));
+            assert!(rc.contains("__tty7_outer_chain() { eval \"$__TTY7_SAVED_PROMPT_COMMAND\"; }"));
         }
 
         /// The inner-shell path, without needing a password: a bash with an

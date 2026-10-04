@@ -4065,17 +4065,9 @@ fn foreground_cwd(
 /// Linux reads `/proc/<pid>/cwd`; macOS reads the vnode path. Either way the
 /// order is what keeps a stale shell from shadowing, so one shared helper.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn probe_candidates(
-    fg: Option<i32>,
-    shell_pid: Option<u32>,
-    resolved: Option<i32>,
-) -> Vec<i32> {
+fn probe_candidates(fg: Option<i32>, shell_pid: Option<u32>, resolved: Option<i32>) -> Vec<i32> {
     let mut out = Vec::with_capacity(3);
-    for pid in [
-        resolved,
-        fg,
-        shell_pid.map(|p| p as i32),
-    ] {
+    for pid in [resolved, fg, shell_pid.map(|p| p as i32)] {
         if let Some(pid) = pid
             && pid > 0
             && !out.contains(&pid)
@@ -6688,7 +6680,10 @@ mod tests {
             parse_title_cwd("alice@web1:/home/alice"),
             Some(PathBuf::from("/home/alice"))
         );
-        assert_eq!(parse_title_cwd("root@web1: ~"), Some(PathBuf::from("/root")));
+        assert_eq!(
+            parse_title_cwd("root@web1: ~"),
+            Some(PathBuf::from("/root"))
+        );
         assert_eq!(
             parse_title_cwd("root@web1: ~/pg"),
             Some(PathBuf::from("/root/pg"))
@@ -6728,8 +6723,7 @@ mod tests {
         let now = std::time::Instant::now();
         let mut st = remote_state();
         st.cwd = Some(PathBuf::from(dir));
-        st.cwd_reported_at =
-            Some(now - TITLE_CWD_STALE_AFTER - std::time::Duration::from_secs(1));
+        st.cwd_reported_at = Some(now - TITLE_CWD_STALE_AFTER - std::time::Duration::from_secs(1));
         st.osc_title = Some(title.to_string());
         st.title_reported_at = Some(now);
         let (tx, _) = mpsc::channel();

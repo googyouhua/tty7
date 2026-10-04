@@ -1978,8 +1978,7 @@ impl RemoteTerminal {
     /// follow stale titles regardless; this only arms local ones.
     pub fn set_follow_nested(&self, on: bool) {
         if self.follow_nested_supported() {
-            self.link
-                .send(ClientMsg::SetFollowNested(on));
+            self.link.send(ClientMsg::SetFollowNested(on));
         }
     }
 

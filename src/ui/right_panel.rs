@@ -980,18 +980,14 @@ impl Tty7App {
                     // Remote panes follow stale titles regardless (no switch
                     // needed); an older daemon would drop the frame, so the
                     // row stays hidden there instead of promising anything.
-                    if view.remote_context().is_none()
-                        && view.terminal.follow_nested_supported()
-                    {
+                    if view.remote_context().is_none() && view.terminal.follow_nested_supported() {
                         let on = view.follow_nested_ui();
                         rows.push(InfoRow {
                             label: t(L10nKey::PanelFollowNested),
-                            value: InfoValue::Text(
-                                match on {
-                                    true => t(L10nKey::SettingsValueOn).to_string(),
-                                    false => t(L10nKey::SettingsValueOff).to_string(),
-                                },
-                            ),
+                            value: InfoValue::Text(match on {
+                                true => t(L10nKey::SettingsValueOn).to_string(),
+                                false => t(L10nKey::SettingsValueOff).to_string(),
+                            }),
                             copy: None,
                             reveal: None,
                             edit_cwd: false,
@@ -1139,7 +1135,10 @@ impl Tty7App {
         // A hand-typed override in flight for this pane replaces the value
         // with the field, twin of Source Control's inline branch rows.
         let editing = row.edit_cwd.then(|| {
-            self.right_panel.cwd_edit.as_ref().filter(|e| Some(e.pane_id) == pane_id)
+            self.right_panel
+                .cwd_edit
+                .as_ref()
+                .filter(|e| Some(e.pane_id) == pane_id)
         });
         let editing = editing.flatten().map(|e| e.input.clone());
         let is_editing = editing.is_some();
@@ -1184,11 +1183,14 @@ impl Tty7App {
                 .text_color(cx.theme().foreground)
                 .child(v)
                 .into_any_element(),
-            (None, InfoValue::Diff {
-                added,
-                removed,
-                open,
-            }) => {
+            (
+                None,
+                InfoValue::Diff {
+                    added,
+                    removed,
+                    open,
+                },
+            ) => {
                 let clean = added == 0 && removed == 0;
                 // Sized to the two numbers, not to the row: `flex_1` here made
                 // the whole rest of the line a button, so a click on the empty
@@ -1334,15 +1336,15 @@ impl Tty7App {
             .child(value)
             .children(actions)
             .when(is_editing, |this| {
-                this.on_key_down(cx.listener(
-                    move |this, ev: &gpui::KeyDownEvent, window, cx| {
+                this.on_key_down(
+                    cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
                         match ev.keystroke.key.as_str() {
                             "escape" => this.cancel_cwd_edit(cx),
                             "enter" => this.commit_cwd_edit(window, cx),
                             _ => {}
                         }
-                    },
-                ))
+                    }),
+                )
             })
             .into_any_element()
     }
@@ -1391,9 +1393,7 @@ impl Tty7App {
             gpui_component::input::InputState::new(window, cx)
                 .placeholder(t(L10nKey::PanelCwdEditHint))
         });
-        input.update(cx, |state, cx| {
-            state.set_value(prefill, window, cx)
-        });
+        input.update(cx, |state, cx| state.set_value(prefill, window, cx));
         crate::ui::prefill::select_all_when_drawn(&input, window, cx);
         window.focus(&input.read(cx).focus_handle(cx), cx);
         self.right_panel.cwd_edit = Some(CwdEdit {

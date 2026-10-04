@@ -200,11 +200,7 @@ pub(crate) fn foreground_pid(shell_pid: u32, fg_pgid: i32) -> Option<u32> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn foreground_pid_in(
-    table: &HashMap<u32, Row>,
-    shell_pid: u32,
-    fg_pgid: u32,
-) -> Option<u32> {
+fn foreground_pid_in(table: &HashMap<u32, Row>, shell_pid: u32, fg_pgid: u32) -> Option<u32> {
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     for (pid, row) in table {
         children.entry(row.ppid).or_default().push(*pid);
@@ -1463,8 +1459,9 @@ mod tests {
             uid: ME,
             name: "x".to_string(),
         };
-        let table: HashMap<u32, Row> =
-            [(100, member(1, 100)), (200, member(100, 200))].into_iter().collect();
+        let table: HashMap<u32, Row> = [(100, member(1, 100)), (200, member(100, 200))]
+            .into_iter()
+            .collect();
         assert_eq!(foreground_pid_in(&table, 100, 100), Some(100));
         assert_eq!(foreground_pid_in(&table, 100, 999), None);
         assert_eq!(foreground_pid_in(&table, 404, 100), None);

@@ -7872,11 +7872,7 @@ pub(crate) fn parse_manual_cwd(text: &str) -> Option<Option<std::path::PathBuf>>
 /// Whether a hand-pinned directory has been reached by tracking: exact match
 /// always, canonical match only where paths are this machine's (resolving a
 /// remote path locally would answer about the wrong filesystem).
-fn manual_cwd_reached(
-    pinned: &std::path::Path,
-    tracked: &std::path::Path,
-    local: bool,
-) -> bool {
+fn manual_cwd_reached(pinned: &std::path::Path, tracked: &std::path::Path, local: bool) -> bool {
     pinned == tracked
         || (local
             && match (pinned.canonicalize(), tracked.canonicalize()) {
@@ -12237,8 +12233,7 @@ mod gpui_tests {
     fn a_pin_holds_while_tracking_is_elsewhere(cx: &mut TestAppContext) {
         use std::io::Write as _;
         let dir = std::env::temp_dir().join(format!("tty7-view-hold-{}", std::process::id()));
-        let elsewhere =
-            std::env::temp_dir().join(format!("tty7-view-else-{}", std::process::id()));
+        let elsewhere = std::env::temp_dir().join(format!("tty7-view-else-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create dir");
         std::fs::create_dir_all(&elsewhere).expect("create dir");
         let (window, mut daemon) = harness(cx);
@@ -12247,7 +12242,9 @@ mod gpui_tests {
                 view.set_manual_cwd(Some(dir.clone()));
             })
             .unwrap();
-        DaemonMsg::Cwd(elsewhere.clone()).encode(&mut daemon).unwrap();
+        DaemonMsg::Cwd(elsewhere.clone())
+            .encode(&mut daemon)
+            .unwrap();
         daemon.flush().unwrap();
         for _ in 0..200 {
             let tracked = window
