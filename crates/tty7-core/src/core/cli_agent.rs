@@ -44,8 +44,8 @@ impl CLIAgent {
         CLIAgent::Aider,
         CLIAgent::Amp,
         CLIAgent::OpenCode,
-        // Sibling first: the base dropdown is a plain popover that cannot
-        // scroll, so a v2 entry trailing at the end would be unreachable.
+        // Sibling first for discoverability: the v2 entry stays next to
+        // OpenCode in every agent listing.
         CLIAgent::OpenCode2,
         CLIAgent::Copilot,
         CLIAgent::Cursor,
