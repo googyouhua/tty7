@@ -1341,6 +1341,12 @@ fn run_stream(
                     }
                     pane.resize(size);
                 }
+                ClientMsg::SetFollowNested(on) => {
+                    if !pane.controls(epoch) {
+                        break 'conn;
+                    }
+                    pane.set_follow_nested(on);
+                }
                 ClientMsg::Lease(request) => {
                     if !pane.controls(epoch) {
                         break 'conn;

@@ -179,6 +179,60 @@ fn current_uid() -> u32 {
     0
 }
 
+/// The foreground process behind a pty's foreground process *group*.
+///
+/// `tcgetpgrp` answers with a pgid, and the group leader's own cwd is the
+/// wrong proxy for it whenever the leader never chdir'd: `sudo -s` leaves the
+/// `sudo` parent holding the outer directory while the inner shell `cd`s
+/// elsewhere in the same group. Walk the shell's tree instead and take the
+/// deepest process still in that group — the inner shell under its `sudo`,
+/// the `vim` under the shell — so `/proc/<pid>/cwd` is read off the process
+/// that actually moved. Ties break toward the larger pid, the newer process.
+///
+/// Linux and macOS: the pane's cwd probe is the sole caller (Windows has no
+/// foreground process group to resolve).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn foreground_pid(shell_pid: u32, fg_pgid: i32) -> Option<u32> {
+    if fg_pgid <= 0 {
+        return None;
+    }
+    foreground_pid_in(&process_table(), shell_pid, fg_pgid as u32)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn foreground_pid_in(
+    table: &HashMap<u32, Row>,
+    shell_pid: u32,
+    fg_pgid: u32,
+) -> Option<u32> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, row) in table {
+        children.entry(row.ppid).or_default().push(*pid);
+    }
+    let mut best: Option<(u8, u32)> = None;
+    let mut stack = vec![(shell_pid, 0u8)];
+    while let Some((pid, depth)) = stack.pop() {
+        let Some(row) = table.get(&pid) else {
+            continue;
+        };
+        if row.pgid == fg_pgid
+            && best.is_none_or(|(best_depth, best_pid)| {
+                depth > best_depth || (depth == best_depth && pid > best_pid)
+            })
+        {
+            best = Some((depth, pid));
+        }
+        if depth == u8::MAX {
+            continue;
+        }
+        if let Some(kids) = children.get(&pid) {
+            for kid in kids {
+                stack.push((*kid, depth + 1));
+            }
+        }
+    }
+    best.map(|(_, pid)| pid)
+}
 struct Row {
     ppid: u32,
     pgid: u32,
@@ -1376,6 +1430,44 @@ mod tests {
         assert_eq!(parse_listen_addr("[::1]:5173"), Some(("[::1]", 5173)));
         assert_eq!(parse_listen_addr("*:5432 (LISTEN)"), Some(("*", 5432)));
         assert_eq!(parse_listen_addr("/tmp/some.sock"), None);
+    }
+
+    /// Nested shells (`sudo -s`): the group leader is the `sudo` parent holding
+    /// the outer directory, while the inner shell moved. The probe must read
+    /// the deepest process in the foreground group, not the leader.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn foreground_pid_prefers_the_inner_shell_over_the_group_leader() {
+        let member = |ppid: u32, pgid: u32| Row {
+            ppid,
+            pgid,
+            uid: ME,
+            name: "x".to_string(),
+        };
+        let table: HashMap<u32, Row> = [
+            (100, member(1, 100)),   // outer shell, owns the terminal at prompt
+            (200, member(100, 200)), // sudo parent, group leader, outer dir
+            (201, member(200, 200)), // inner shell, moved to /tmp
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(foreground_pid_in(&table, 100, 200), Some(201));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn foreground_pid_is_the_shell_itself_at_a_prompt() {
+        let member = |ppid: u32, pgid: u32| Row {
+            ppid,
+            pgid,
+            uid: ME,
+            name: "x".to_string(),
+        };
+        let table: HashMap<u32, Row> =
+            [(100, member(1, 100)), (200, member(100, 200))].into_iter().collect();
+        assert_eq!(foreground_pid_in(&table, 100, 100), Some(100));
+        assert_eq!(foreground_pid_in(&table, 100, 999), None);
+        assert_eq!(foreground_pid_in(&table, 404, 100), None);
     }
 
     #[test]

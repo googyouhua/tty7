@@ -1493,6 +1493,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelPortsEmpty => "転送中のポートはありません",
         L10nKey::PortAutoForwarded => "リモートの :{port} は http://localhost:{local} で開けます",
         L10nKey::PanelCwd => "作業ディレクトリ",
+        L10nKey::PanelCwdEditHint => "パスを入力して Enter で固定",
+        L10nKey::PanelFollowNested => "追従",
         L10nKey::PanelShell => "シェル",
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "ブランチ",
