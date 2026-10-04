@@ -3,13 +3,39 @@
 //! Both reuse the overlay's line-granular `DiffSelection`; the comment text
 //! comes from the caller (overlay comment box or Review tab editor).
 
-use gpui::{AppContext as _, Context, Window};
+use gpui::{App, AppContext as _, Context, Window};
 
+use crate::core::agent_roles::AgentRole;
+use crate::core::cli_agent::CLIAgent;
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::Tty7App;
 use crate::ui::diff_overlay::DiffLoad;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::review_state::{ReviewDraft, ReviewSend};
+
+/// Where a review "Send to new agent" goes: a plain agent or an added role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewNewTarget {
+    Agent(CLIAgent),
+    Role(AgentRole),
+}
+
+impl ReviewNewTarget {
+    pub(crate) fn menu_label(&self) -> String {
+        match self {
+            ReviewNewTarget::Agent(agent) => agent.display_name().to_string(),
+            ReviewNewTarget::Role(role) => format!("Role: {}", role.name),
+        }
+    }
+
+    pub(crate) fn frecency_key(&self) -> String {
+        match self {
+            ReviewNewTarget::Agent(agent) => agent.slug().to_string(),
+            ReviewNewTarget::Role(role) =>
+                crate::ui::agent_launch::role_frecency_key(&role.slug),
+        }
+    }
+}
 
 fn source_tag(source: &DiffSource) -> String {
     source.tag()
@@ -345,25 +371,19 @@ impl Tty7App {
 
     /// Deliver already-built review content to a NEW agent tab. Shared by the
     /// overlay selection flow and the Review tab draft editor.
+    ///
+    /// Keeps the previous default: the most recently used offered agent.
     pub(crate) fn deliver_review_to_new_agent(
         &mut self,
         path: &str,
         lines: &str,
         prompt: &str,
         comment_len: usize,
-        _source_label: &str,
+        source_label: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        use crate::ui::agent_launch::most_recent;
-        use crate::ui::app::SpawnWhere;
-
-        let offered = self.offered_agents(cx);
-        let agent_frecency = cx
-            .global::<crate::core::config::Config>()
-            .agent_frecency
-            .clone();
-        let Some(agent) = most_recent(&offered, &agent_frecency) else {
+        let Some(target) = self.review_default_target(cx) else {
             let remote =
                 crate::core::session::WorkspaceStore::remote_ref(cx, self.workspace).is_some();
             crate::terminal::notify_desktop(
@@ -376,7 +396,153 @@ impl Tty7App {
             );
             return Err("no-agent-offered");
         };
-        self.launch_agent(agent, SpawnWhere::NewTab, window, cx);
+        // The default target is agent-only when no role exists; with roles
+        // present it may be a role — both flow through the same waiter.
+        self.deliver_review_to_target(&target, path, lines, prompt, comment_len, source_label, window, cx)
+    }
+
+    /// Every target the "Send to new agent" menu offers, roles first: added
+    /// roles (`offered_roles_here`, already frecency-ordered) then offered
+    /// agents (already frecency-ordered). Read at menu-open time.
+    pub(crate) fn review_new_targets(&self, cx: &App) -> Vec<ReviewNewTarget> {
+        let mut out = Vec::new();
+        for role in self.offered_roles_here(cx) {
+            out.push(ReviewNewTarget::Role(role));
+        }
+        for agent in self.offered_agents(cx) {
+            out.push(ReviewNewTarget::Agent(agent));
+        }
+        out
+    }
+
+    /// The menu's default highlight: whichever target (role or agent) was
+    /// used most recently; the first offered target when nothing was used.
+    pub(crate) fn review_default_target(&self, cx: &App) -> Option<ReviewNewTarget> {
+        let targets = self.review_new_targets(cx);
+        if targets.is_empty() {
+            return None;
+        }
+        let frecency = &cx.global::<crate::core::config::Config>().agent_frecency;
+        let last_used = |t: &ReviewNewTarget| {
+            frecency.get(&t.frecency_key()).map_or(0, |u| u.last_used)
+        };
+        targets
+            .iter()
+            .cloned()
+            .filter(|t| last_used(t) > 0)
+            .rev()
+            .max_by_key(last_used)
+            .or_else(|| targets.into_iter().next())
+    }
+
+    /// Send the overlay's current selection plus comment to an explicit menu
+    /// target (role or agent).
+    pub(crate) fn review_send_to_new_target(
+        &mut self,
+        comment: &str,
+        target: &ReviewNewTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let Some((path, lines, prompt, comment_len, label)) = self.review_selection_prompt(comment)
+        else {
+            return Err("no-selection");
+        };
+        self.deliver_review_to_target(target, &path, &lines, &prompt, comment_len, &label, window, cx)
+    }
+
+    /// Send the Review tab editor text with its draft's diff to an explicit
+    /// menu target (role or agent).
+    pub(crate) fn review_send_edit_to_target(
+        &mut self,
+        target: &ReviewNewTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let (Some(key), Some(box_entity)) = (self.review.editing_key(), self.review.edit_box())
+        else {
+            return Err("no-selection");
+        };
+        let comment = box_entity.read(cx).value().trim().to_string();
+        let draft = self.review.draft(&key.0, &key.1, &key.2).cloned();
+        let Some(draft) = draft else {
+            return Err("no-selection");
+        };
+        if draft.diff.trim().is_empty() {
+            return Err("no-selection");
+        }
+        let prompt = crate::core::agent_prompt::build_review_attach_prompt(
+            &draft.path,
+            &draft.lines,
+            &draft.diff,
+            &comment,
+            Some(&draft.source_label),
+        )
+        .ok_or("no-selection")?;
+        self.review
+            .update_draft_comment(&key.0, &key.1, &key.2, comment.clone());
+        let r = self.deliver_review_to_target(
+            target,
+            &draft.path,
+            &draft.lines,
+            &prompt,
+            comment.len(),
+            &draft.source_label,
+            window,
+            cx,
+        );
+        if r.is_ok() {
+            self.review.end_edit();
+        }
+        r
+    }
+
+    /// Deliver already-built review content to a NEW tab running `target`.
+    /// Roles go through `launch_role` so their instructions still land;
+    /// agents keep the previous `launch_agent` path.
+    pub(crate) fn deliver_review_to_target(
+        &mut self,
+        target: &ReviewNewTarget,
+        path: &str,
+        lines: &str,
+        prompt: &str,
+        comment_len: usize,
+        _source_label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        use crate::ui::app::SpawnWhere;
+
+        if self.review_new_targets(cx).is_empty() {
+            let remote =
+                crate::core::session::WorkspaceStore::remote_ref(cx, self.workspace).is_some();
+            crate::terminal::notify_desktop(
+                Some("tty7"),
+                t(if remote {
+                    L10nKey::AppNoAgentSeenHere
+                } else {
+                    L10nKey::AppNoAgentOnPath
+                }),
+            );
+            return Err("no-agent-offered");
+        }
+        // A role whose instructions need a second paste gets a longer settle
+        // so the review prompt lands after the instructions, not before.
+        let settle_secs = match target {
+            ReviewNewTarget::Role(role)
+                if matches!(
+                    crate::ui::agent_launch::plan_role_first_send(role),
+                    Some(crate::ui::agent_launch::RoleFirstSend::TwoPhase { .. })
+                ) =>
+            {
+                9
+            }
+            _ => 5,
+        };
+        match target.clone() {
+            ReviewNewTarget::Agent(agent) => self.launch_agent(agent, SpawnWhere::NewTab, window, cx),
+            ReviewNewTarget::Role(role) => self.launch_role(role, SpawnWhere::NewTab, window, cx),
+        }
         let tab_idx = self.active;
         let (path, lines, prompt) = (path.to_string(), lines.to_string(), prompt.to_string());
         cx.spawn(async move |this, cx| {
@@ -410,8 +576,11 @@ impl Tty7App {
             };
             // Stage 2: don't type into a still-booting TUI — its startup
             // output eats the paste. Send once it stops Working, or after a
-            // short settle grace so a fresh idle agent never waits forever.
-            let settled = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            // settle grace so a fresh idle agent never waits forever. Roles
+            // with a TwoPhase followup settle longer so instructions land
+            // before the review prompt.
+            let settled = std::time::Instant::now()
+                + std::time::Duration::from_secs(settle_secs);
             loop {
                 let status = this
                     .update(cx, |_, cx| leaf.read(cx).agent_session().map(|s| s.status))

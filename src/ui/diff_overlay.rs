@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::core::config::{Config, DiffViewMode};
@@ -557,6 +557,58 @@ impl Tty7App {
         let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
         let input = overlay.review_box.clone()?;
         let to_new = overlay.review_to_new;
+        let app = cx.entity().downgrade();
+        let send_button: AnyElement = if to_new {
+            Button::new("diff-review-send")
+                .label("Send to new agent")
+                .dropdown_caret(true)
+                .dropdown_menu(move |menu, _window, cx| {
+                    let (targets, default_key) = app
+                        .update(cx, |this, cx| {
+                            let targets = this.review_new_targets(cx);
+                            let def = this
+                                .review_default_target(cx)
+                                .map(|t| t.frecency_key());
+                            (targets, def)
+                        })
+                        .unwrap_or_default();
+                    let mut menu = menu;
+                    if targets.is_empty() {
+                        return menu.item(PopupMenuItem::label("No agents or roles available"));
+                    }
+                    for target in targets {
+                        let label = target.menu_label();
+                        let checked = Some(target.frecency_key()) == default_key;
+                        let owned = target.clone();
+                        let app = app.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(label).checked(checked).on_click(
+                                move |_, window, cx| {
+                                    let _ = app.update(cx, |this, cx| {
+                                        let comment = this.review_box_text(cx);
+                                        if this
+                                            .review_send_to_new_target(&comment, &owned, window, cx)
+                                            .is_ok()
+                                        {
+                                            this.close_review_box(cx);
+                                        }
+                                    });
+                                },
+                            ),
+                        );
+                    }
+                    menu
+                })
+                .into_any_element()
+        } else {
+            Button::new("diff-review-send")
+                .label("Attach to agent")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let comment = this.review_box_text(cx);
+                    let _ = this.review_send_selection_to_agent(&comment, window, cx);
+                }))
+                .into_any_element()
+        };
         Some(
             v_flex()
                 .flex_shrink_0()
@@ -582,25 +634,7 @@ impl Tty7App {
                                 this.close_review_box(cx);
                             }),
                         ))
-                        .child(
-                            Button::new("diff-review-send")
-                                .label(if to_new {
-                                    "Send to new agent"
-                                } else {
-                                    "Attach to agent"
-                                })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    let comment = this.review_box_text(cx);
-                                    let sent = if to_new {
-                                        this.review_send_to_new_agent(&comment, window, cx)
-                                    } else {
-                                        this.review_send_selection_to_agent(&comment, window, cx)
-                                    };
-                                    if sent.is_ok() && to_new {
-                                        this.close_review_box(cx);
-                                    }
-                                })),
-                        ),
+                        .child(send_button),
                 )
                 .into_any_element(),
         )
