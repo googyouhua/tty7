@@ -1,0 +1,183 @@
+schema: comet.native.v4
+name: review-send-role-select
+language: en
+phase: archive
+status: done
+state_version: 11
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 4055941955b6ec43f41b675113a87ec029055cafab465de257568f852d16442b
+spec_changes:
+  - capability: review-send-role-select
+    operation: create
+    source: specs/review-send-role-select/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/review-send-role-select
+  target_branch: main
+  finish: push
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: A1（overlay 菜单）：在 diff overlay 选中 diff 行块打开评论框，点“Send to new
+      agent”弹出菜单，列出已添加角色与可用 agent。
+    result: passed
+    reason:
+      text: overlay
+        Send按钮为menu-open时构建的dropdown，列出角色+agent，空时非操作提示，点击读取最新评论并经review_send_to_new_target发送，成功才关框
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: A2（Review Tab 菜单）：在 Review Tab 草稿点 Edit 再点“Send to new agent”，同样弹出角色/agent
+      选择菜单。
+    result: passed
+    reason:
+      text: Review Tab采用相同菜单模式，逐项调用review_send_edit_to_target，成功才结束编辑
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: A3（发给指定角色）：选中任一角色后，新 tab 启动该角色的 launch line，待其 ready 后 review prompt（含
+      path + lines + diff + comment + source）出现在该 pane 并被记录为一次 send；角色自带
+      instructions 不丢失（PromptArg 合并 / TwoPhase 先后顺序正确）。
+    result: passed
+    reason:
+      text: 角色走launch_role保留instructions（PromptArg随行/TwoPhase延后粘贴），agent走launch_agent；同一30s等待+TwoPhase
+        9s/其他5s settle后发送review prompt并record_send
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: A4（无角色回退）：未添加任何角色时，菜单仅列 agent 或直接走现有 most_recent 路径，发送成功；无 agent 也无 role
+      时给出已有提示且不崩溃。
+    result: passed
+    reason:
+      text: 无目标时返回no-agent-offered并沿用已有桌面提示，不开tab不记录；空diff返回no-selection；空菜单为非操作提示，不崩溃
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: A5（记住选择）：发送成功后下次打开菜单时上次所选角色/agent 为默认高亮项。
+    result: passed
+    reason:
+      text: launch时分别更新agent与role:<slug>的frecency last_used；默认目标取最大last_used，菜单高亮该项
+      truncated: false
+builder_handoff:
+  candidate_id: e68d4766-fb68-4ea3-8950-85d4e5036dd3
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:8a187298-302d-476e-919e-b8ee96aa679f
+  iteration: 1
+  summary:
+    text: review Send to new agent可选已添加角色：overlay评论框与Review
+      Tab草稿的Send按钮改为点击弹菜单（offered_roles_here角色在前+offered_agents在后，现取frecency排序，上次选择默认高亮）；选角色走launch_role新tab（TwoPhase角色settle延长至9s保证instructions先于review
+      prompt），选agent保持launch_agent；空目标沿用已有桌面提示；frecency记忆下次默认。改动：review_actions.rs新增ReviewNewTarget/菜单目标查询/默认目标/显式目标发送与投递，diff_overlay.rs与panel_review.rs的Send按钮改为dropdown_menu。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+  checks:
+    - name:
+        text: cargo check
+        truncated: false
+      result: passed
+      note:
+        text: clean, only pre-existing style warnings plus 1 new dead_code warning for
+          kept fallback wrappers
+        truncated: false
+    - name:
+        text: cargo test -p tty7-core --lib agent
+        truncated: false
+      result: passed
+      note:
+        text: 159 passed
+        truncated: false
+    - name:
+        text: cargo test -p tty7-core --lib review
+        truncated: false
+      result: passed
+      note:
+        text: 4 passed
+        truncated: false
+    - name:
+        text: cargo test -p tty7-core --lib role
+        truncated: false
+      result: passed
+      note:
+        text: 15 passed
+        truncated: false
+    - name:
+        text: cargo test -p tty7-core --lib (full)
+        truncated: false
+      result: failed
+      note:
+        text: 6 failures in daemon spawn/singleton/shell_integration (seat/pipe/signal
+          env-sensitive), unrelated to review/role paths
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: daemon 6项失败为环境相关（seat/pipe/signal），与本次review/role路径无关
+      truncated: false
+    - text: TwoPhase角色review prompt顺序依赖settle时序（9s），极端慢启动下仍可能交错
+      truncated: false
+    - text: 一次只选一个目标，不支持批量发送
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-04T05:51:29.255Z
+blockers: []
+verification:
+  candidate_id: e68d4766-fb68-4ea3-8950-85d4e5036dd3
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:bd6db1ff-cdb9-4ce3-b8ff-7203c35dbd08
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: 5/5 passed：双入口菜单、指定角色投递与instructions保留、无目标回退、frecency记忆均符合验收；残留为时序与展示细节风险
+    truncated: false
+  risks:
+    - text: TwoPhase角色instructions(6s延后粘贴)与review prompt为时序保证非强制排序，快启动下可能交错
+      truncated: false
+    - text: 零目标时UI显示inline提示，桌面通知仅在deliver路径触发
+      truncated: false
+    - text: 菜单行仅显示名称，未显示launch命令明细
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-04T05:53:21.323Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: 5/5 passed：双入口菜单、指定角色投递与instructions保留、无目标回退、frecency记忆均符合验收；残留为时序与展示细节风险
+      truncated: false
+    completed_at: 2026-10-04T05:53:21.323Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-04T05:29:45.972Z
