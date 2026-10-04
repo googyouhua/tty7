@@ -2377,6 +2377,32 @@ impl TerminalView {
     pub fn set_follow_nested_ui(&mut self, on: bool) {
         self.follow_nested_ui = on;
     }
+
+    /// Whether a hand-pinned directory has been reached by tracking: exact
+    /// match anywhere, canonical match only through the pane's own host (a
+    /// remote path resolved locally would answer about the wrong machine —
+    /// see the host-boundary guard). Canonicalization runs only while a pin
+    /// stands unmatched, and stops the moment it rejoins.
+    fn manual_cwd_rejoins(
+        &self,
+        pinned: &std::path::Path,
+        tracked: &std::path::Path,
+        cx: &gpui::App,
+    ) -> bool {
+        if pinned == tracked {
+            return true;
+        }
+        if !self.paths_are_local() {
+            return false;
+        }
+        let Some(host) = self.host(cx) else {
+            return false;
+        };
+        match (host.canonicalize(pinned), host.canonicalize(tracked)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
     /// The directory the Files panel roots its tree at — see [`files_cwd`].
     ///
     /// Follows a coding agent the way [`Self::effective_cwd`] does. A WSL
@@ -4254,7 +4280,7 @@ impl TerminalView {
         // either way), and from then on the shell drives again. Without this
         // a pin is a roach motel — set once, stuck until explicitly cleared.
         if let (Some(pinned), Some(tracked)) = (self.manual_cwd.clone(), self.cwd())
-            && manual_cwd_reached(&pinned, &tracked, self.paths_are_local())
+            && self.manual_cwd_rejoins(&pinned, &tracked, cx)
         {
             self.manual_cwd = None;
             cx.notify();
@@ -7865,20 +7891,25 @@ pub(crate) fn parse_manual_cwd(text: &str) -> Option<Option<std::path::PathBuf>>
     if trimmed.bytes().any(|b| b == 0) {
         return None;
     }
-    let path = std::path::PathBuf::from(trimmed);
-    path.is_absolute().then_some(Some(path))
+    // Lexical on purpose: `Path::is_absolute` answers for this machine's
+    // spelling, so a unix path typed for a remote pane would read false on a
+    // Windows client. Either platform's absolute shape pins.
+    if !is_absolute_path(trimmed) {
+        return None;
+    }
+    Some(Some(std::path::PathBuf::from(trimmed)))
 }
 
-/// Whether a hand-pinned directory has been reached by tracking: exact match
-/// always, canonical match only where paths are this machine's (resolving a
-/// remote path locally would answer about the wrong filesystem).
-fn manual_cwd_reached(pinned: &std::path::Path, tracked: &std::path::Path, local: bool) -> bool {
-    pinned == tracked
-        || (local
-            && match (pinned.canonicalize(), tracked.canonicalize()) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => false,
-            })
+/// Either platform's absolute-path shape: `/x` or a drive spelling.
+/// Hand-typed text has no host to ask, and asking this machine would answer
+/// for the wrong one exactly when it matters (a unix path from a Windows
+/// client, or the reverse).
+fn is_absolute_path(text: &str) -> bool {
+    let b = text.as_bytes();
+    if b.first() == Some(&b'/') {
+        return true;
+    }
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
 }
 
 fn typeahead_boundary(key: &str, modifiers: &Modifiers) -> Option<RawInput<'static>> {
@@ -12169,6 +12200,13 @@ mod gpui_tests {
         );
         assert_eq!(parse_manual_cwd("relative/dir"), None);
         assert_eq!(parse_manual_cwd("~/project"), None);
+        // Either platform's absolute shape pins, regardless of which machine
+        // this client runs on — a unix path typed for a remote pane included.
+        assert_eq!(
+            parse_manual_cwd("C:\\proj"),
+            Some(Some(PathBuf::from("C:\\proj")))
+        );
+        assert_eq!(parse_manual_cwd("C:proj"), None);
     }
 
     #[gpui::test]
