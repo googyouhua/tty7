@@ -467,6 +467,15 @@ pub struct TerminalView {
     /// first move is where a rebuilt view consults [`AgentReadMarks`].
     agent_status_seen: bool,
     git_status_cwd: Option<std::path::PathBuf>,
+    /// A directory the user typed over the tracked one, for panes whose
+    /// shell cannot report (a far `su` to root, a frozen probe). Session
+    /// state, never persisted: clearing it hands the pane back to tracking.
+    manual_cwd: Option<std::path::PathBuf>,
+    /// The Info panel's follow switch for this pane (default on; =off
+    /// freezes). Display
+    /// state only; the daemon holds the enforcing flag, fed by
+    /// [`RemoteTerminal::set_follow_nested`].
+    follow_nested_ui: bool,
     last_agent_activity: u64,
     cmd: CmdEditor,
     /// Mirrors `Config::prompt_editor`. Cached rather than read from the global
@@ -1936,6 +1945,8 @@ impl TerminalView {
             keep_unread_on_focus: false,
             agent_status_seen: false,
             git_status_cwd: None,
+            manual_cwd: None,
+            follow_nested_ui: true,
             last_agent_activity: 0,
             cmd: CmdEditor::new(),
             prompt_editor,
@@ -2329,15 +2340,69 @@ impl TerminalView {
     /// host, so the fallback here is what decides that: this one takes any
     /// cwd, [`Self::effective_host_cwd`] takes only one the host can resolve.
     pub fn effective_cwd(&self) -> Option<std::path::PathBuf> {
-        self.git_status_cwd.clone().or_else(|| self.cwd())
+        self.manual_cwd
+            .clone()
+            .or_else(|| self.git_status_cwd.clone())
+            .or_else(|| self.cwd())
     }
 
     /// [`Self::effective_cwd`], restricted to paths the pane's host can act
     /// on — for callers that will hand the result to a `Host` call.
     pub fn effective_host_cwd(&self) -> Option<std::path::PathBuf> {
-        self.git_status_cwd.clone().or_else(|| self.host_cwd())
+        self.manual_cwd
+            .clone()
+            .or_else(|| self.git_status_cwd.clone())
+            .or_else(|| self.host_cwd())
     }
 
+    /// What the user typed over the tracked directory, if anything.
+    pub fn manual_cwd(&self) -> Option<&std::path::Path> {
+        self.manual_cwd.as_deref()
+    }
+
+    /// Pin the pane's directory by hand; `None` (an empty submission) clears
+    /// the pin and hands the pane back to tracking.
+    pub fn set_manual_cwd(&mut self, cwd: Option<std::path::PathBuf>) {
+        self.manual_cwd = cwd;
+    }
+
+    /// Whether this pane's follow switch stands on (Info panel). Display
+    /// state; the daemon enforces.
+    pub fn follow_nested_ui(&self) -> bool {
+        self.follow_nested_ui
+    }
+
+    /// Set [`Self::follow_nested_ui`]; use
+    /// [`RemoteTerminal::set_follow_nested`] alongside so the daemon enforces it.
+    pub fn set_follow_nested_ui(&mut self, on: bool) {
+        self.follow_nested_ui = on;
+    }
+
+    /// Whether a hand-pinned directory has been reached by tracking: exact
+    /// match anywhere, canonical match only through the pane's own host (a
+    /// remote path resolved locally would answer about the wrong machine —
+    /// see the host-boundary guard). Canonicalization runs only while a pin
+    /// stands unmatched, and stops the moment it rejoins.
+    fn manual_cwd_rejoins(
+        &self,
+        pinned: &std::path::Path,
+        tracked: &std::path::Path,
+        cx: &gpui::App,
+    ) -> bool {
+        if pinned == tracked {
+            return true;
+        }
+        if !self.paths_are_local() {
+            return false;
+        }
+        let Some(host) = self.host(cx) else {
+            return false;
+        };
+        match (host.canonicalize(pinned), host.canonicalize(tracked)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
     /// The directory the Files panel roots its tree at — see [`files_cwd`].
     ///
     /// Follows a coding agent the way [`Self::effective_cwd`] does. A WSL
@@ -4208,6 +4273,17 @@ impl TerminalView {
             && self.ranked_cwd.as_ref() != Some(&cwd)
         {
             self.rerank_history(Some(&cwd));
+        }
+
+        // A hand-pinned directory rejoins tracking the moment the tracked
+        // one arrives there on its own: the display never moves (same value
+        // either way), and from then on the shell drives again. Without this
+        // a pin is a roach motel — set once, stuck until explicitly cleared.
+        if let (Some(pinned), Some(tracked)) = (self.manual_cwd.clone(), self.cwd())
+            && self.manual_cwd_rejoins(&pinned, &tracked, cx)
+        {
+            self.manual_cwd = None;
+            cx.notify();
         }
 
         if self.integration_notice.is_some() && self.terminal.shell_active() {
@@ -7799,6 +7875,41 @@ impl TerminalView {
             TokenKind::Arg | TokenKind::Whitespace => theme.foreground,
         }
     }
+}
+
+/// Read a hand-typed directory the way the Info panel's cwd editor means it.
+///
+/// `Some(None)` is an empty submission: clear the pin. `Some(Some)` is an
+/// absolute path to pin. `None` is a relative path or otherwise unusable
+/// text, which the editor leaves in place for the user to fix rather than
+/// pinning a directory no panel could resolve.
+pub(crate) fn parse_manual_cwd(text: &str) -> Option<Option<std::path::PathBuf>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some(None);
+    }
+    if trimmed.bytes().any(|b| b == 0) {
+        return None;
+    }
+    // Lexical on purpose: `Path::is_absolute` answers for this machine's
+    // spelling, so a unix path typed for a remote pane would read false on a
+    // Windows client. Either platform's absolute shape pins.
+    if !is_absolute_path(trimmed) {
+        return None;
+    }
+    Some(Some(std::path::PathBuf::from(trimmed)))
+}
+
+/// Either platform's absolute-path shape: `/x` or a drive spelling.
+/// Hand-typed text has no host to ask, and asking this machine would answer
+/// for the wrong one exactly when it matters (a unix path from a Windows
+/// client, or the reverse).
+fn is_absolute_path(text: &str) -> bool {
+    let b = text.as_bytes();
+    if b.first() == Some(&b'/') {
+        return true;
+    }
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
 }
 
 fn typeahead_boundary(key: &str, modifiers: &Modifiers) -> Option<RawInput<'static>> {
@@ -12072,6 +12183,127 @@ mod gpui_tests {
             placement: 0,
             painted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn manual_cwd_text_is_only_an_absolute_path_or_a_clear() {
+        use std::path::PathBuf;
+        assert_eq!(parse_manual_cwd(""), Some(None));
+        assert_eq!(parse_manual_cwd("   "), Some(None));
+        assert_eq!(
+            parse_manual_cwd("/tmp/project"),
+            Some(Some(PathBuf::from("/tmp/project")))
+        );
+        assert_eq!(
+            parse_manual_cwd("  /tmp/spaced dir  "),
+            Some(Some(PathBuf::from("/tmp/spaced dir")))
+        );
+        assert_eq!(parse_manual_cwd("relative/dir"), None);
+        assert_eq!(parse_manual_cwd("~/project"), None);
+        // Either platform's absolute shape pins, regardless of which machine
+        // this client runs on — a unix path typed for a remote pane included.
+        assert_eq!(
+            parse_manual_cwd("C:\\proj"),
+            Some(Some(PathBuf::from("C:\\proj")))
+        );
+        assert_eq!(parse_manual_cwd("C:proj"), None);
+    }
+
+    #[gpui::test]
+    fn a_hand_typed_cwd_wins_until_it_is_cleared(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        let pinned = std::path::PathBuf::from("/tmp/pinned");
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.manual_cwd(), None);
+                assert!(
+                    view.follow_nested_ui(),
+                    "the follow switch defaults on; =off freezes"
+                );
+                view.set_manual_cwd(Some(pinned.clone()));
+                assert_eq!(view.manual_cwd(), Some(pinned.as_path()));
+                assert_eq!(view.effective_cwd(), Some(pinned.clone()));
+                assert_eq!(view.effective_host_cwd(), Some(pinned.clone()));
+                view.set_manual_cwd(None);
+                assert_eq!(view.manual_cwd(), None);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_pin_rejoins_tracking_once_tracking_arrives_there(cx: &mut TestAppContext) {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("tty7-view-rejoin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.set_manual_cwd(Some(dir.clone()));
+                assert_eq!(view.effective_cwd(), Some(dir.clone()));
+            })
+            .unwrap();
+        // The shell walks there on its own: the pin dissolves, the display
+        // never moves, and tracking drives from then on.
+        DaemonMsg::Cwd(dir.clone()).encode(&mut daemon).unwrap();
+        daemon.flush().unwrap();
+        for _ in 0..200 {
+            let rejoined = window
+                .update(cx, |view, window, cx| {
+                    view.poll_foreground(window, cx);
+                    view.manual_cwd().is_none()
+                })
+                .unwrap();
+            if rejoined {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.manual_cwd(), None);
+                assert_eq!(view.effective_cwd(), Some(dir.clone()));
+            })
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn a_pin_holds_while_tracking_is_elsewhere(cx: &mut TestAppContext) {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("tty7-view-hold-{}", std::process::id()));
+        let elsewhere = std::env::temp_dir().join(format!("tty7-view-else-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::create_dir_all(&elsewhere).expect("create dir");
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.set_manual_cwd(Some(dir.clone()));
+            })
+            .unwrap();
+        DaemonMsg::Cwd(elsewhere.clone())
+            .encode(&mut daemon)
+            .unwrap();
+        daemon.flush().unwrap();
+        for _ in 0..200 {
+            let tracked = window
+                .update(cx, |view, window, cx| {
+                    view.poll_foreground(window, cx);
+                    view.cwd() == Some(elsewhere.clone())
+                })
+                .unwrap();
+            if tracked {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.manual_cwd(), Some(dir.as_path()));
+                assert_eq!(view.effective_cwd(), Some(dir.clone()));
+            })
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
     }
 
     #[gpui::test]

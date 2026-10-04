@@ -1961,6 +1961,27 @@ impl RemoteTerminal {
         ));
     }
 
+    /// Whether the daemon behind this pane understands the follow switch.
+    /// Local daemons advertise it in their hello; anywhere else (an older
+    /// server, an unroutable route) the switch is hidden rather than sending
+    /// a frame that would drop the link.
+    pub(crate) fn follow_nested_supported(&self) -> bool {
+        match &self.route {
+            PaneRoute::Local => crate::daemon::spawn::local_daemon_supports(
+                crate::daemon::protocol::FEATURE_FOLLOW_NESTED,
+            ),
+            _ => false,
+        }
+    }
+
+    /// Flip the attached pane's follow switch (Info panel). Remote panes
+    /// follow stale titles regardless; this only arms local ones.
+    pub fn set_follow_nested(&self, on: bool) {
+        if self.follow_nested_supported() {
+            self.link.send(ClientMsg::SetFollowNested(on));
+        }
+    }
+
     pub fn resize(&mut self, size: TermSize, cell_w: u16, cell_h: u16) {
         let echoed = self.resize_echoed();
         // The cell size has to be part of the early-out, not just cols/rows: it

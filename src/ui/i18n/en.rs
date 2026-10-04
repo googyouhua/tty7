@@ -1429,6 +1429,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelLatency => "latency",
         L10nKey::PortAutoForwarded => "Remote :{port} is now http://localhost:{local}",
         L10nKey::PanelCwd => "cwd",
+        L10nKey::PanelCwdEditHint => "Type a path, Enter to pin it",
+        L10nKey::PanelFollowNested => "follow",
         L10nKey::PanelShell => "shell",
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "branch",

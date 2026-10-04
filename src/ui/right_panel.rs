@@ -1,4 +1,4 @@
-use gpui::{AnyElement, Context, Window, div, prelude::*, px, rems};
+use gpui::{AnyElement, Context, Focusable as _, Window, div, prelude::*, px, rems};
 use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::{
@@ -228,6 +228,15 @@ pub(crate) fn action_strip(row: &gpui::SharedString, backing: u32) -> gpui::Div 
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 
+/// An in-flight hand-typed directory for the Info panel's cwd row — the
+/// twin of Source Control's inline branch rows, not a dialog: a text input
+/// works the same on Windows and Linux, where the system path picker either
+/// does nothing or offers a folder choice that answers a different question.
+struct CwdEdit {
+    pane_id: u64,
+    input: gpui::Entity<gpui_component::input::InputState>,
+}
+
 /// Height of a bare inline input row — Source Control's new-branch and
 /// checkout rows.
 ///
@@ -293,6 +302,11 @@ pub(crate) struct RightPanelState {
         std::collections::HashMap<crate::ui::app::ForwardOwnerKey, std::collections::HashSet<u16>>,
     pub(crate) scroll: gpui::ScrollHandle,
     pub(crate) tree_scroll: gpui::ScrollHandle,
+    /// A hand-typed directory being composed for the Info panel's cwd row,
+    /// with the pane it belongs to. Cleared on commit or cancel; a pane
+    /// switch merely hides it (the row only draws it for its own pane) until
+    /// a commit finds a different pane in front and drops it.
+    pub(crate) cwd_edit: Option<CwdEdit>,
     /// A path the tree should scroll onto, and how many more renders it may
     /// take to get there. The row is usually not drawn yet when the request is
     /// made — its parents were only just expanded and their listings are still
@@ -396,6 +410,12 @@ struct InfoRow {
     /// Set on the working-directory row when the path is on the machine the
     /// file manager can see, which is the only case Reveal means anything in.
     reveal: Option<PathBuf>,
+    /// Set on the working-directory row: clicking its value opens the
+    /// hand-typed override input instead of a system picker.
+    edit_cwd: bool,
+    /// Set on the follow-switch row below it: clicking flips the pane's
+    /// follow switch.
+    toggle_follow: bool,
 }
 
 impl InfoRow {
@@ -405,6 +425,8 @@ impl InfoRow {
             value: InfoValue::Text(value),
             copy: None,
             reveal: None,
+            edit_cwd: false,
+            toggle_follow: false,
         }
     }
 
@@ -422,6 +444,8 @@ impl InfoRow {
     fn interactive(&self) -> bool {
         self.copy.is_some()
             || self.reveal.is_some()
+            || self.edit_cwd
+            || self.toggle_follow
             || matches!(self.value, InfoValue::Diff { open: Some(_), .. })
     }
 }
@@ -948,7 +972,28 @@ impl Tty7App {
                             false => cwd.display().to_string(),
                         }),
                         reveal: local.then(|| cwd.clone()),
+                        edit_cwd: true,
+                        toggle_follow: false,
                     });
+                    // The follow switch lives directly under the directory it
+                    // acts on, for local panes whose daemon knows the switch.
+                    // Remote panes follow stale titles regardless (no switch
+                    // needed); an older daemon would drop the frame, so the
+                    // row stays hidden there instead of promising anything.
+                    if view.remote_context().is_none() && view.terminal.follow_nested_supported() {
+                        let on = view.follow_nested_ui();
+                        rows.push(InfoRow {
+                            label: t(L10nKey::PanelFollowNested),
+                            value: InfoValue::Text(match on {
+                                true => t(L10nKey::SettingsValueOn).to_string(),
+                                false => t(L10nKey::SettingsValueOff).to_string(),
+                            }),
+                            copy: None,
+                            reveal: None,
+                            edit_cwd: false,
+                            toggle_follow: true,
+                        });
+                    }
                 }
                 // A pane on the default shell runs whatever the server picked,
                 // which is not always the login shell the inventory names: a
@@ -1009,6 +1054,8 @@ impl Tty7App {
                     },
                     copy: None,
                     reveal: None,
+                    edit_cwd: false,
+                    toggle_follow: false,
                 });
             }
         }
@@ -1030,7 +1077,7 @@ impl Tty7App {
         // rows are on, one tab over.
         let mut list = v_flex().px(px(CONTENT_INSET));
         for (i, row) in rows.into_iter().enumerate() {
-            list = list.child(self.info_row(i, row, label_w, cx));
+            list = list.child(self.info_row(i, row, label_w, pane_id, cx));
         }
 
         let inner = v_flex()
@@ -1059,6 +1106,7 @@ impl Tty7App {
         i: usize,
         row: InfoRow,
         label_w: gpui::Pixels,
+        pane_id: Option<u64>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
@@ -1084,13 +1132,32 @@ impl Tty7App {
                 InfoValue::Diff { added, removed, .. } => format!("+{added} −{removed}"),
             }
         );
-        let value = match row.value {
+        // A hand-typed override in flight for this pane replaces the value
+        // with the field, twin of Source Control's inline branch rows.
+        let editing = row.edit_cwd.then(|| {
+            self.right_panel
+                .cwd_edit
+                .as_ref()
+                .filter(|e| Some(e.pane_id) == pane_id)
+        });
+        let editing = editing.flatten().map(|e| e.input.clone());
+        let is_editing = editing.is_some();
+        let editable = row.edit_cwd;
+        let value = match (editing, row.value) {
+            // The field the cwd row is edited in: borderless like the
+            // sidebar's rename, Enter pins and Escape walks away (handled on
+            // the row below, twin of the branch rows).
+            (Some(input), _) => div()
+                .flex_1()
+                .min_w_0()
+                .child(Input::new(&input).appearance(false).xsmall())
+                .into_any_element(),
             // A path identifies a pane by its last segment, and plain
             // truncation eats exactly that: a deep checkout read
             // "/private/tmp/claude-501…" and told you nothing. Let the head
             // absorb the shrinking so the leaf survives, the way a file
             // manager shows a path.
-            InfoValue::Path(v) => {
+            (None, InfoValue::Path(v)) => {
                 let (head, leaf) = crate::ui::path_display::split_path_leaf(&v);
                 h_flex()
                     .flex_1()
@@ -1108,7 +1175,7 @@ impl Tty7App {
                     .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
                     .into_any_element()
             }
-            InfoValue::Text(v) => div()
+            (None, InfoValue::Text(v)) => div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
@@ -1116,11 +1183,14 @@ impl Tty7App {
                 .text_color(cx.theme().foreground)
                 .child(v)
                 .into_any_element(),
-            InfoValue::Diff {
-                added,
-                removed,
-                open,
-            } => {
+            (
+                None,
+                InfoValue::Diff {
+                    added,
+                    removed,
+                    open,
+                },
+            ) => {
                 let clean = added == 0 && removed == 0;
                 // Sized to the two numbers, not to the row: `flex_1` here made
                 // the whole rest of the line a button, so a click on the empty
@@ -1184,13 +1254,28 @@ impl Tty7App {
         // taking it on hover would re-elide the path under the pointer, which
         // is the pixel-shifting the strip is absolutely positioned to avoid.
         let value = h_flex()
+            .id(("panel-info-cwd-value", i))
             .flex_1()
             .min_w_0()
             .items_baseline()
             .when(tiles_wide > 0, |this| {
                 this.pr(px(tiles_wide as f32 * (TILE_SIZE_XS + 1.) + 4.))
             })
-            .child(value);
+            .child(value)
+            // The value is the edit affordance: no separate button, the same
+            // way a sidebar label is its own rename hit area.
+            .when(editable && !is_editing, |this| {
+                this.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.begin_cwd_edit(pane_id, window, cx);
+                    }))
+            })
+            .when(row.toggle_follow, |this| {
+                this.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_follow_nested(pane_id, window, cx);
+                    }))
+            });
 
         let mut tiles = action_strip(&id, sf.hover);
         let mut has_tiles = false;
@@ -1250,6 +1335,17 @@ impl Tty7App {
             )
             .child(value)
             .children(actions)
+            .when(is_editing, |this| {
+                this.on_key_down(
+                    cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
+                        match ev.keystroke.key.as_str() {
+                            "escape" => this.cancel_cwd_edit(cx),
+                            "enter" => this.commit_cwd_edit(window, cx),
+                            _ => {}
+                        }
+                    }),
+                )
+            })
             .into_any_element()
     }
 
@@ -1272,6 +1368,94 @@ impl Tty7App {
         )
         .rounded(px(4.))
         .tooltip(tooltip)
+    }
+
+    /// Open the hand-typed cwd input for the Info panel's cwd row, prefilled
+    /// with the directory the row is showing.
+    pub(crate) fn begin_cwd_edit(
+        &mut self,
+        pane_id: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(want) = pane_id else { return };
+        let Some(prefill) = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.detail_pane(window, cx))
+            .filter(|leaf| leaf.read(cx).pane_id == want)
+            .and_then(|leaf| leaf.read(cx).effective_cwd())
+            .map(|cwd| cwd.display().to_string())
+        else {
+            return;
+        };
+        let input = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .placeholder(t(L10nKey::PanelCwdEditHint))
+        });
+        input.update(cx, |state, cx| state.set_value(prefill, window, cx));
+        crate::ui::prefill::select_all_when_drawn(&input, window, cx);
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+        self.right_panel.cwd_edit = Some(CwdEdit {
+            pane_id: want,
+            input,
+        });
+        cx.notify();
+    }
+
+    /// Pin (or, on empty input, unpin) the directory the cwd row's field
+    /// holds. Unusable text stays up for the user to fix rather than pinning
+    /// a directory no panel could resolve; a pane switch in between drops the
+    /// edit, which belonged to the pane in front when it was typed.
+    pub(crate) fn commit_cwd_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.right_panel.cwd_edit.take() else {
+            return;
+        };
+        let raw = edit.input.read(cx).value().trim().to_string();
+        match crate::terminal::view::parse_manual_cwd(&raw) {
+            None => self.right_panel.cwd_edit = Some(edit),
+            Some(pin) => {
+                if let Some(leaf) = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.detail_pane(window, cx))
+                    .filter(|leaf| leaf.read(cx).pane_id == edit.pane_id)
+                {
+                    leaf.update(cx, |view, _| view.set_manual_cwd(pin));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Walk away from the cwd field, keeping whatever the pane was tracking.
+    pub(crate) fn cancel_cwd_edit(&mut self, cx: &mut Context<Self>) {
+        self.right_panel.cwd_edit = None;
+        cx.notify();
+    }
+
+    /// Flip the Info panel's follow switch for the pane in front. The row
+    /// shows the view's own state at once; the daemon enforces it down the
+    /// link (remote panes follow stale titles regardless, so the row is only
+    /// drawn where the switch matters).
+    pub(crate) fn toggle_follow_nested(
+        &mut self,
+        pane_id: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(leaf) = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.detail_pane(window, cx))
+            .filter(|leaf| Some(leaf.read(cx).pane_id) == pane_id)
+        else {
+            return;
+        };
+        let on = !leaf.read(cx).follow_nested_ui();
+        leaf.update(cx, |view, _| view.set_follow_nested_ui(on));
+        leaf.read(cx).terminal.set_follow_nested(on);
+        cx.notify();
     }
 
     /// A section heading of the Info tab: a 28px row, the label a half step
@@ -2190,6 +2374,8 @@ mod tests {
             },
             copy: None,
             reveal: None,
+            edit_cwd: false,
+            toggle_follow: false,
         }
     }
 

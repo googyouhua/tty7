@@ -722,6 +722,20 @@ struct PaneState {
     /// Reset with every new controller.
     lease_watch: bool,
     cwd: Option<PathBuf>,
+    /// When the shell last reported its cwd over OSC 7. The remote title
+    /// fallback ([`apply_title_cwd`]) only adopts a title-derived directory
+    /// once reports have gone stale — a nested `su` that stopped reporting —
+    /// and never in the read that carried a fresh report.
+    cwd_reported_at: Option<std::time::Instant>,
+    /// When the standing title arrived. Cleared on every remote hop, so the
+    /// title fallback only ever reads a title the current side drew — never
+    /// the near shell's leftover after an `ssh` hop.
+    title_reported_at: Option<std::time::Instant>,
+    /// The pane's follow switch (Info panel, default on): =off freezes the
+    /// cwd where the shell left it. Gates the title fallback on local panes;
+    /// remote panes keep the always-on behavior. Session state, never
+    /// persisted.
+    follow_nested: bool,
     /// The last title the pane reported over OSC 0/2, for the machine tree to
     /// record. See [`crate::core::machine::PaneRecord::osc_title`].
     osc_title: Option<String>,
@@ -1380,6 +1394,7 @@ pub struct Carried {
     pub agent: Option<crate::core::cli_agent::CLIAgent>,
     pub agent_argv: Option<Vec<String>>,
     pub agent_session: Option<crate::core::cli_agent::AgentSessionState>,
+    pub follow_nested: bool,
 }
 
 /// A pty master this process inherited from its own previous image.
@@ -1799,6 +1814,9 @@ impl DaemonPane {
                 lease: None,
                 lease_watch: false,
                 cwd: spawn.initial_cwd,
+                cwd_reported_at: None,
+                title_reported_at: None,
+                follow_nested: true,
                 osc_title: restored_title,
                 shell: ShellState::default(),
                 remote_prompt_seen: false,
@@ -1956,6 +1974,7 @@ impl DaemonPane {
             ring: st.ring.snapshot(),
             cwd: st.cwd.clone(),
             osc_title: st.osc_title.clone(),
+            follow_nested: st.follow_nested,
             shell_spec: st.shell_spec.clone(),
             shell_active: st.shell.active,
             at_prompt: st.shell.at_prompt,
@@ -2023,6 +2042,9 @@ impl DaemonPane {
                 lease: None,
                 lease_watch: false,
                 cwd: carried.cwd,
+                cwd_reported_at: None,
+                title_reported_at: None,
+                follow_nested: carried.follow_nested,
                 osc_title: carried.osc_title,
                 shell_spec: carried.shell_spec,
                 shell: ShellState {
@@ -2100,6 +2122,9 @@ impl DaemonPane {
             // it is, `ssh_spec` already says.
             shell_spec: None,
             cwd: None,
+            cwd_reported_at: None,
+            title_reported_at: None,
+            follow_nested: true,
             osc_title: None,
             shell: ShellState::default(),
             remote_prompt_seen: false,
@@ -2364,7 +2389,27 @@ impl DaemonPane {
                             // it; spent after the hop below — see the function.
                             let saw_prompt_mark =
                                 signals.shell.iter().any(|s| s.mark_at_prompt);
+                            // The shell's own OSC 7 report always wins the read
+                            // it arrives in: the probe may still point at the
+                            // previous foreground program (an agent or editor in
+                            // another directory), and letting it overwrite a
+                            // fresh report is how the panels fight the shell.
+                            // A nested shell that never reports leaves this
+                            // false, which is exactly when the probe applies.
+                            let shell_reported_cwd = signals.cwd.is_some();
+                            let title_arrived = signals.title.is_some();
+                            let now = std::time::Instant::now();
                             let mut st = state.lock().unwrap();
+                            // A title adoption below can move the cwd on a read
+                            // that carried no cwd signal at all, so a pane
+                            // that may adopt titles always pays for the
+                            // comparison (which still publishes only on a real
+                            // change): remote panes, and local ones with the
+                            // follow switch on.
+                            let may_change_facts = may_change_facts
+                                || (!shell_reported_cwd
+                                    && st.osc_title.is_some()
+                                    && (st.remote.is_some() || st.follow_nested));
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
                             record_output(&mut st, bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
@@ -2381,7 +2426,21 @@ impl DaemonPane {
                             if let Some(agent) = agent {
                                 apply_agent(&mut st, agent);
                             }
-                            apply_probed_cwd(&mut st, probed_cwd);
+                            if !shell_reported_cwd {
+                                apply_probed_cwd(&mut st, probed_cwd);
+                            }
+                            if shell_reported_cwd {
+                                st.cwd_reported_at = Some(now);
+                            }
+                            if title_arrived {
+                                // Stamped after the hop above, so a title the
+                                // hop read carried is the new side's own.
+                                st.title_reported_at = Some(now);
+                            }
+                            // Remote only inside: a far `su` that stopped
+                            // reporting follows its titles until the far shell
+                            // speaks again.
+                            apply_title_cwd(&mut st, shell_reported_cwd, now);
                             if let Some(tr1) = tr1 {
                                 tr_disp_t += tr1.elapsed();
                             }
@@ -2706,6 +2765,12 @@ impl DaemonPane {
 
     pub fn kill(&self) {
         self.hangup();
+    }
+
+    /// Flip this pane's follow switch (Info panel): with it on, the title
+    /// fallback also serves local panes whose shells stopped reporting.
+    pub fn set_follow_nested(&self, on: bool) {
+        self.state.lock().unwrap().follow_nested = on;
     }
 
     fn hangup(&self) {
@@ -3572,6 +3637,100 @@ fn apply_agent_signals(
     }
 }
 
+/// How long a remote pane's OSC 7 reports may be silent before the title
+/// fallback is trusted: a nested `su` stops reporting the moment it takes
+/// over, while an idle far prompt keeps a title that merely repeats the known
+/// cwd (a no-op through [`same_dir`]). Five seconds is past any prompt redraw
+/// and far inside a human `cd`.
+const TITLE_CWD_STALE_AFTER: Duration = Duration::from_secs(5);
+
+/// The cwd out of a window title, strictly.
+///
+/// The shape Debian/Ubuntu Bourne shells write by default —
+/// `root@host: /tmp`, `alice@host:/home/alice` — and nothing else: the user
+/// and host are single tokens around one `@`, the path is absolute, and a
+/// `~` only counts for root (as `/root`), where the home is conventional.
+/// Anything else — relative paths, missing hosts, trailing prose — is `None`,
+/// because a guessed directory is worse than a stale one.
+fn parse_title_cwd(title: &str) -> Option<PathBuf> {
+    let title = title.trim();
+    if title.is_empty() || title.bytes().any(|b| b == 0 || b < 0x20 && b != 0x09) {
+        return None;
+    }
+    let (who, path) = title.rsplit_once(':')?;
+    let (user, host) = who.rsplit_once('@')?;
+    if user.is_empty()
+        || host.is_empty()
+        || user.bytes().any(|b| b == b'@')
+        || who.bytes().any(|b| b.is_ascii_whitespace() || b == b':')
+    {
+        return None;
+    }
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    if let Some(rest) = path.strip_prefix('~') {
+        if user != "root" {
+            return None;
+        }
+        if rest.is_empty() {
+            return Some(PathBuf::from("/root"));
+        }
+        let rest = rest.strip_prefix('/').filter(|r| !r.is_empty())?;
+        return Some(PathBuf::from("/root").join(rest));
+    }
+    if !path.starts_with('/') {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+/// The title fallback for a remote pane whose far shell stopped reporting —
+/// an `su` to root on the far host, whose stock shell emits titles but no
+/// OSC 7, and which this machine's `/proc` cannot see.
+///
+/// Remote only: local panes keep the `/proc` probe. Never in the read that
+/// carried a fresh OSC 7 report, and never while reports are recent — the far
+/// user shell coming back from `su` wins the moment it speaks again.
+fn apply_title_cwd(st: &mut PaneState, fresh_report: bool, now: std::time::Instant) {
+    if fresh_report {
+        return;
+    }
+    // Remote panes follow stale titles always; local panes only with the
+    // user's explicit follow switch — a frozen cwd is the default there.
+    if st.remote.is_none() && !st.follow_nested {
+        return;
+    }
+    // Only a title drawn by the current side counts: the stamp is cleared on
+    // every hop, so the near shell's leftover can never pose as the far side.
+    if st.title_reported_at.is_none() {
+        return;
+    }
+    let stale = st
+        .cwd_reported_at
+        .is_none_or(|at| now.duration_since(at) >= TITLE_CWD_STALE_AFTER);
+    if !stale {
+        return;
+    }
+    let Some(title) = st.osc_title.clone() else {
+        return;
+    };
+    let Some(path) = parse_title_cwd(&title) else {
+        return;
+    };
+    if st.cwd.as_deref().is_some_and(|cur| same_dir(cur, &path)) {
+        return;
+    }
+    notify(st, DaemonMsg::Cwd(path.clone()));
+    st.cwd = Some(path);
+}
+
+/// The `/proc` fallback for a shell that stopped reporting OSC 7 — a nested
+/// `sudo -s`/`su`/inner `bash` that never sourced the rcfile. The caller
+/// skips this for a read that carried the shell's own report, so a fresh
+/// report always wins over a probe still pointed at the previous foreground
+/// program.
 fn apply_probed_cwd(st: &mut PaneState, probed: Option<PathBuf>) {
     let Some(probed) = probed else {
         return;
@@ -3716,6 +3875,11 @@ fn apply_remote_context(st: &mut PaneState, remote: Option<RemoteContext>) {
     // standing right now belongs to whatever the pane was before this hop —
     // the near shell's "I started `ssh`", or the previous host's prompt.
     st.remote_prompt_seen = false;
+    // Same for the standing title and the report clock: the title fallback
+    // must not read the previous side's leftover, and it must not rush the
+    // new side before its opening prompt has had a chance to land.
+    st.title_reported_at = None;
+    st.cwd_reported_at = Some(std::time::Instant::now());
     notify(st, DaemonMsg::RemoteContext(remote.clone()));
     st.remote = remote;
 }
@@ -3840,9 +4004,21 @@ fn foreground_cwd(
         }
     };
 
-    pty_foreground_pgid(master)
-        .and_then(read_cwd)
-        .or_else(|| read_cwd(shell_pid.map(|p| p as i32).unwrap_or(0)))
+    let fg = pty_foreground_pgid(master);
+    // Same group-not-a-process problem as Linux (`sudo -s` keeps the `sudo`
+    // parent in the outer directory while the inner shell moves in the same
+    // group): resolve through the process table first, leader and shell as
+    // fallbacks, first readable wins.
+    let resolved = match (fg, shell_pid) {
+        (Some(pg), Some(shell)) if pg > 0 && pg as u32 != shell => {
+            crate::daemon::procinfo::foreground_pid(shell, pg).map(|pid| pid as i32)
+        }
+        _ => None,
+    };
+    probe_candidates(fg, shell_pid, resolved)
+        .into_iter()
+        .filter_map(read_cwd)
+        .next()
 }
 
 #[cfg(target_os = "linux")]
@@ -3857,9 +4033,49 @@ fn foreground_cwd(
         let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
         cwd.is_dir().then_some(cwd)
     };
-    pty_foreground_pgid(master)
-        .and_then(read_cwd)
-        .or_else(|| read_cwd(shell_pid.map(|p| p as i32).unwrap_or(0)))
+    let fg = pty_foreground_pgid(master);
+    // A pgid is a group, not a process: `sudo -s` keeps the `sudo` parent as
+    // the group leader in the outer directory while the inner shell `cd`s
+    // elsewhere inside the same group, so reading the leader's cwd freezes the
+    // panels. Resolve to the deepest process in that group under the shell
+    // first; the leader and the shell stay as fallbacks. Skipped while the
+    // shell itself owns the terminal, which is also the common case and saves
+    // a full `/proc` walk per poll.
+    let resolved = match (fg, shell_pid) {
+        (Some(pg), Some(shell)) if pg > 0 && pg as u32 != shell => {
+            crate::daemon::procinfo::foreground_pid(shell, pg).map(|pid| pid as i32)
+        }
+        _ => None,
+    };
+    // First readable wins, in probe order: a root-owned inner shell is
+    // unreadable to a non-root daemon (`read_link` fails), and then the probe
+    // honestly degrades to the leader and finally the shell instead of
+    // reporting a directory it cannot see.
+    probe_candidates(fg, shell_pid, resolved)
+        .into_iter()
+        .filter_map(read_cwd)
+        .next()
+}
+
+/// The `/proc` pids a cwd probe reads, in order: the resolved foreground
+/// process, the pty's group leader, then the shell itself. The shell reads
+/// last on purpose — its cwd is stale whenever a nested shell moved, so it
+/// must never shadow a readable foreground process.
+///
+/// Linux reads `/proc/<pid>/cwd`; macOS reads the vnode path. Either way the
+/// order is what keeps a stale shell from shadowing, so one shared helper.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn probe_candidates(fg: Option<i32>, shell_pid: Option<u32>, resolved: Option<i32>) -> Vec<i32> {
+    let mut out = Vec::with_capacity(3);
+    for pid in [resolved, fg, shell_pid.map(|p| p as i32)] {
+        if let Some(pid) = pid
+            && pid > 0
+            && !out.contains(&pid)
+        {
+            out.push(pid);
+        }
+    }
+    out
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -5888,6 +6104,9 @@ mod tests {
             lease_watch: false,
             shell_spec: None,
             cwd: None,
+            cwd_reported_at: None,
+            title_reported_at: None,
+            follow_nested: true,
             osc_title: None,
             shell: ShellState::default(),
             remote_prompt_seen: false,
@@ -6430,6 +6649,165 @@ mod tests {
         assert!(rx.try_recv().is_err(), "same directory → nothing to tell");
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn probe_candidates_read_the_foreground_before_the_stale_shell() {
+        // Nested `sudo -s`: 100 outer shell, 200 sudo leader, 201 inner shell.
+        assert_eq!(
+            probe_candidates(Some(200), Some(100), Some(201)),
+            vec![201, 200, 100]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn probe_candidates_dedupe_and_drop_empties() {
+        // At a prompt the resolution is the shell itself: read once, not twice.
+        assert_eq!(probe_candidates(Some(100), Some(100), Some(100)), vec![100]);
+        assert_eq!(probe_candidates(None, Some(100), None), vec![100]);
+        assert!(probe_candidates(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn title_cwd_reads_debian_and_ubuntu_shell_titles() {
+        assert_eq!(
+            parse_title_cwd("root@web1: /tmp"),
+            Some(PathBuf::from("/tmp"))
+        );
+        assert_eq!(
+            parse_title_cwd("alice@web1:/home/alice"),
+            Some(PathBuf::from("/home/alice"))
+        );
+        assert_eq!(
+            parse_title_cwd("root@web1: ~"),
+            Some(PathBuf::from("/root"))
+        );
+        assert_eq!(
+            parse_title_cwd("root@web1: ~/pg"),
+            Some(PathBuf::from("/root/pg"))
+        );
+    }
+
+    #[test]
+    fn title_cwd_rejects_anything_that_is_not_a_bare_path() {
+        for bad in [
+            "",
+            "root@web1:",
+            "root@web1: relative/path",
+            "just a title",
+            "web1: /tmp",
+            "root@: /tmp",
+            "@web1: /tmp",
+            "root@web1 : /tmp",
+            "alice@web1: ~",
+            "alice@web1: ~/pg",
+            "root@web1: ~/",
+        ] {
+            assert_eq!(parse_title_cwd(bad), None, "{bad:?}");
+        }
+    }
+
+    fn remote_state() -> PaneState {
+        let mut st = test_state(true);
+        st.remote = Some(RemoteContext {
+            kind: RemoteKind::Ssh,
+            argv: vec!["ssh".into(), "web1".into()],
+            target: "web1".into(),
+        });
+        st
+    }
+
+    fn stale_title_state(dir: &str, title: &str) -> PaneState {
+        let now = std::time::Instant::now();
+        let mut st = remote_state();
+        st.cwd = Some(PathBuf::from(dir));
+        st.cwd_reported_at = Some(now - TITLE_CWD_STALE_AFTER - std::time::Duration::from_secs(1));
+        st.osc_title = Some(title.to_string());
+        st.title_reported_at = Some(now);
+        let (tx, _) = mpsc::channel();
+        st.subscriber = Some(tx);
+        st
+    }
+
+    #[test]
+    fn title_cwd_adopts_a_stale_remote_su_shells_directory() {
+        let mut st = stale_title_state("/home/alice", "root@web1: /tmp");
+        let (tx, rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+
+        apply_title_cwd(&mut st, false, std::time::Instant::now());
+
+        assert_eq!(st.cwd.as_deref(), Some(Path::new("/tmp")));
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Cwd(_))));
+    }
+
+    #[test]
+    fn title_cwd_yields_to_fresh_reports_and_recent_ones() {
+        // A read that carried OSC 7: the report wins, no parsing at all.
+        let mut st = stale_title_state("/home/alice", "root@web1: /tmp");
+        apply_title_cwd(&mut st, true, std::time::Instant::now());
+        assert_eq!(st.cwd.as_deref(), Some(Path::new("/home/alice")));
+
+        // Reports that only just stopped: the far shell may be mid-prompt.
+        let mut st = remote_state();
+        st.cwd = Some(PathBuf::from("/home/alice"));
+        st.cwd_reported_at = Some(std::time::Instant::now());
+        st.osc_title = Some("root@web1: /tmp".to_string());
+        st.title_reported_at = Some(std::time::Instant::now());
+        apply_title_cwd(&mut st, false, std::time::Instant::now());
+        assert_eq!(st.cwd.as_deref(), Some(Path::new("/home/alice")));
+    }
+
+    #[test]
+    fn title_cwd_ignores_local_panes_unstamped_titles_and_same_dirs() {
+        // Local panes keep the /proc probe; titles are not their business.
+        let mut st = test_state(true);
+        st.follow_nested = false;
+        st.cwd = Some(PathBuf::from("/home/alice"));
+        st.osc_title = Some("root@web1: /tmp".to_string());
+        st.title_reported_at = Some(std::time::Instant::now());
+        apply_title_cwd(&mut st, false, std::time::Instant::now());
+        assert_eq!(st.cwd.as_deref(), Some(Path::new("/home/alice")));
+
+        // A title from before the hop carries no stamp after it.
+        let mut st = stale_title_state("/home/alice", "root@web1: /tmp");
+        st.title_reported_at = None;
+        apply_title_cwd(&mut st, false, std::time::Instant::now());
+        assert_eq!(st.cwd.as_deref(), Some(Path::new("/home/alice")));
+
+        // A title that repeats the known directory says nothing.
+        let mut st = stale_title_state("/tmp", "root@web1: /tmp");
+        let (tx, rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+        apply_title_cwd(&mut st, false, std::time::Instant::now());
+        assert_eq!(st.cwd.as_deref(), Some(Path::new("/tmp")));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn title_cwd_serves_local_panes_with_the_follow_switch_on() {
+        // On by default: the same title adopts — and reports it once.
+        let mut st = test_state(true);
+        st.cwd = Some(PathBuf::from("/home/alice"));
+        st.osc_title = Some("root@laptop: /tmp".to_string());
+        st.title_reported_at = Some(std::time::Instant::now());
+        assert!(st.follow_nested);
+        let (tx, rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+        apply_title_cwd(&mut st, false, std::time::Instant::now());
+        assert_eq!(st.cwd.as_deref(), Some(Path::new("/tmp")));
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Cwd(_))));
+
+        // Flipped off, the pane freezes where the shell left it.
+        let mut st = test_state(true);
+        st.cwd = Some(PathBuf::from("/home/alice"));
+        st.osc_title = Some("root@laptop: /tmp".to_string());
+        st.title_reported_at = Some(std::time::Instant::now());
+        st.follow_nested = false;
+        apply_title_cwd(&mut st, false, std::time::Instant::now());
+        assert_eq!(st.cwd.as_deref(), Some(Path::new("/home/alice")));
     }
 
     #[test]

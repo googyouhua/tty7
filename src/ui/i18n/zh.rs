@@ -1327,6 +1327,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelPortsRestricted => "这里有以其他用户身份运行的进程，看不到它们的端口。",
         L10nKey::PortAutoForwarded => "远程 :{port} 现在是 http://localhost:{local}",
         L10nKey::PanelCwd => "工作目录",
+        L10nKey::PanelCwdEditHint => "输入路径，回车固定",
+        L10nKey::PanelFollowNested => "跟随",
         L10nKey::PanelShell => "shell",
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "分支",

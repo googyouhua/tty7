@@ -499,6 +499,26 @@ if [[ $- == *i* ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
   precmd_functions=(__tty7_precmd_d "${precmd_functions[@]}")
   precmd_functions+=(__tty7_precmd)
   preexec_functions+=(__tty7_preexec)
+
+  # Nested shells (`su`, a `sudo` that preserves the environment) inherit
+  # exported variables but never source this file: no functions, no precmd
+  # arrays, no DEBUG trap — only $PROMPT_COMMAND, and only if it is exported.
+  # Freeze the composed chain into one string, hide it behind a function call
+  # whose absence is silent, and let a self-contained reporter carry OSC 7
+  # where nothing else can. Outer behavior is unchanged: the same commands in
+  # the same order, plus a duplicate cwd report the daemon deduplicates. In a
+  # nested shell the chain call fails silent and the reporter — builtins and
+  # shell-maintained variables only — still reports precisely.
+  #
+  # `__bp_interactive_mode` must keep the last word: it arms preexec for the
+  # next command, and anything running after it (like the reporter) trips the
+  # DEBUG trap while armed and disarms it again — the next typed command
+  # would then run with no `133;C`. Re-arming it here is a harmless second
+  # run outwardly (a bare flag set) and silent inwardly (missing function,
+  # swallowed, `|| true` normalizing the status).
+  __TTY7_SAVED_PROMPT_COMMAND="$(IFS=$'\n'; printf '%s' "${PROMPT_COMMAND[*]}")"
+  __tty7_outer_chain() { eval "$__TTY7_SAVED_PROMPT_COMMAND"; }
+  export PROMPT_COMMAND=$'__tty7_outer_chain 2>/dev/null\nbuiltin printf \'\\e]7;file://%s%s\\a\' "${HOSTNAME:-localhost}" "${PWD//\\%/%25}"\n__bp_interactive_mode 2>/dev/null || true'
 fi
 # --- end tty7 shell integration ---
 "#;
@@ -1874,6 +1894,91 @@ fi
                 assert!(!body.contains(HEREDOC));
             }
             assert!(!bash_rcfile().contains(HEREDOC));
+        }
+
+        #[test]
+        fn bash_rcfile_exports_a_self_contained_nested_reporter() {
+            let rc = bash_rcfile();
+            let line = rc
+                .lines()
+                .find(|l| l.trim_start().starts_with("export PROMPT_COMMAND="))
+                .expect("the nested-shell reporter export");
+            // The outer chain runs first, silenced for shells that never
+            // sourced this file; the reporter is plain builtins afterwards.
+            assert!(
+                line.contains("__tty7_outer_chain 2>/dev/null"),
+                "missing-function calls must stay silent: {line}"
+            );
+            assert!(line.contains("builtin printf"), "{line}");
+            // `__bp_interactive_mode` keeps the last word: it arms preexec
+            // for the next typed command, and the reporter running after the
+            // chain would otherwise disarm it via the DEBUG trap (no 133;C).
+            let rearm = "__bp_interactive_mode 2>/dev/null || true";
+            assert!(line.contains(rearm), "preexec must stay armed: {line}");
+            assert!(
+                line.find("builtin printf").unwrap() < line.find(rearm).unwrap(),
+                "the re-arm runs after the reporter: {line}"
+            );
+            // Self-contained means exactly that: the tail (past the literal
+            // `\n` inside the `$'...'`) forks nothing and calls no function
+            // an inner shell never defined.
+            let tail = line.split("\\n").nth(1).expect("reporter tail");
+            for banned in ["$(", "`", "__bp_", "__tty7_", "precmd_functions", "eval"] {
+                assert!(!tail.contains(banned), "tail reaches for {banned}: {tail}");
+            }
+            // The freeze it feeds on is there, and the chain it wraps is the
+            // composed value, string or array alike.
+            assert!(rc.contains(
+                "__TTY7_SAVED_PROMPT_COMMAND=\"$(IFS=$'\\n'; printf '%s' \"${PROMPT_COMMAND[*]}\")\""
+            ));
+            assert!(rc.contains("__tty7_outer_chain() { eval \"$__TTY7_SAVED_PROMPT_COMMAND\"; }"));
+        }
+
+        /// The inner-shell path, without needing a password: a bash with an
+        /// emptied environment knows no function and sources no file, exactly
+        /// like a shell reached through `su` — except for the one exported
+        /// `PROMPT_COMMAND` line the rcfile would have handed it.
+        #[cfg(unix)]
+        #[test]
+        fn nested_bash_reports_cwd_on_the_exported_line_alone() {
+            use std::io::Write as _;
+            use std::process::{Command, Stdio};
+
+            let rc = bash_rcfile();
+            let line = rc
+                .lines()
+                .find(|l| l.trim_start().starts_with("export PROMPT_COMMAND="))
+                .expect("the nested-shell reporter export");
+            let mut child = match Command::new("bash")
+                .args(["--noprofile", "--norc", "-i"])
+                .env_clear()
+                .env("HOME", "/tmp")
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(_) => return,
+            };
+            child
+                .stdin
+                .take()
+                .expect("piped stdin")
+                .write_all(format!("{line}\ncd /tmp\ntrue\n").as_bytes())
+                .expect("write script");
+            let out = child.wait_with_output().expect("bash exits on EOF");
+            let mut transcript = String::from_utf8_lossy(&out.stdout).into_owned();
+            transcript.push_str(&String::from_utf8_lossy(&out.stderr));
+            assert!(
+                transcript.contains("\u{1b}]7;file://") && transcript.contains("/tmp\u{7}"),
+                "the reporter never fired:\n{transcript}"
+            );
+            assert!(
+                !transcript.contains("command not found"),
+                "a nested shell must stay silent about the chain it never had:\n{transcript}"
+            );
         }
 
         #[cfg(unix)]

@@ -1111,6 +1111,8 @@ l10n_keys! {
     PanelLatency,
     PortAutoForwarded,
     PanelCwd,
+    PanelCwdEditHint,
+    PanelFollowNested,
     PanelShell,
     PanelSsh,
     PanelBranch,

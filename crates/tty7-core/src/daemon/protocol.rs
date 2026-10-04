@@ -45,6 +45,12 @@ pub const FEATURE_UPDATE_SERVER: &str = "update-server";
 /// and drops the connection.
 pub const FEATURE_SIZE_LEASE: &str = "size-lease";
 
+/// The daemon understands [`ClientMsg::SetFollowNested`]: the attached pane
+/// follows stale titles into directories its shell stopped reporting. A
+/// client must see this before sending one; an older daemon cannot decode
+/// the frame and drops the connection.
+pub const FEATURE_FOLLOW_NESTED: &str = "follow-nested";
+
 /// What a [`ClientMsg::Lease`] asks. The first two are an observer's, the last
 /// two the controller's; each side's are ignored from the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +87,7 @@ impl DaemonVersion {
             FEATURE_RESTORE_SCROLLBACK.to_string(),
             FEATURE_UPDATE_SERVER.to_string(),
             FEATURE_SIZE_LEASE.to_string(),
+            FEATURE_FOLLOW_NESTED.to_string(),
         ];
         if cfg!(unix) {
             features.push(FEATURE_HANDOFF.to_string());
@@ -910,6 +917,10 @@ pub enum ClientMsg {
     },
     Resize(WinSize),
     Detach,
+    /// Flip the attached pane's follow switch (Info panel): with it on, the
+    /// title fallback also serves local panes whose shells stopped reporting.
+    /// Applies to the attached pane, like `Resize` — no pane id to route.
+    SetFollowNested(bool),
     Kill {
         pane_id: u64,
     },
@@ -1091,6 +1102,7 @@ mod kind {
     pub const HANDOFF: u8 = 56;
     pub const LEASE: u8 = 57;
     pub const AGENT_EVENT: u8 = 58;
+    pub const SET_FOLLOW_NESTED: u8 = 59;
 
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
@@ -1322,6 +1334,9 @@ impl ClientMsg {
             } => write_frame(w, kind::AGENT_EVENT, &to_json(&(pane_id, pid, event))?),
             ClientMsg::Resize(size) => write_frame(w, kind::RESIZE, &to_json(size)?),
             ClientMsg::Detach => write_frame(w, kind::DETACH, &[]),
+            ClientMsg::SetFollowNested(on) => {
+                write_frame(w, kind::SET_FOLLOW_NESTED, &to_json(on)?)
+            }
             ClientMsg::Kill { pane_id } => write_frame(w, kind::KILL, &to_json(pane_id)?),
             ClientMsg::List => write_frame(w, kind::LIST, &[]),
             ClientMsg::Shutdown => write_frame(w, kind::SHUTDOWN, &[]),
@@ -1457,6 +1472,7 @@ impl ClientMsg {
             }
             kind::RESIZE => ClientMsg::Resize(from_json(&payload)?),
             kind::DETACH => ClientMsg::Detach,
+            kind::SET_FOLLOW_NESTED => ClientMsg::SetFollowNested(from_json(&payload)?),
             kind::KILL => ClientMsg::Kill {
                 pane_id: from_json(&payload)?,
             },
@@ -1822,6 +1838,8 @@ mod tests {
             },
             ClientMsg::Resize(SIZE),
             ClientMsg::Detach,
+            ClientMsg::SetFollowNested(true),
+            ClientMsg::SetFollowNested(false),
             ClientMsg::Kill { pane_id: 7 },
             ClientMsg::List,
             ClientMsg::Shutdown,

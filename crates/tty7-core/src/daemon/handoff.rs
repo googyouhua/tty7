@@ -74,6 +74,10 @@ struct Manifest {
     panes: Vec<PaneRecord>,
 }
 
+fn follow_nested_default() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize)]
 struct PaneRecord {
     id: u64,
@@ -94,6 +98,11 @@ struct PaneRecord {
     agent: Option<crate::core::cli_agent::CLIAgent>,
     agent_argv: Option<Vec<String>>,
     agent_session: Option<crate::core::cli_agent::AgentSessionState>,
+    /// Whether the pane's follow switch was on. Newer than the fields around
+    /// it, so an old image's blob still parses — defaulting on, like fresh
+    /// panes, since the switch defaults on everywhere.
+    #[serde(default = "follow_nested_default")]
+    follow_nested: bool,
     /// Length of this pane's ring in the data section, which follows the
     /// manifest in pane order.
     ring_len: u32,
@@ -242,6 +251,7 @@ fn stage(panes: &[Carried], next_pane_id: u64) -> std::io::Result<std::fs::File>
             agent: pane.agent,
             agent_argv: pane.agent_argv.clone(),
             agent_session: pane.agent_session.clone(),
+            follow_nested: pane.follow_nested,
             ring_len: encoded.len() as u32,
         });
         data.extend_from_slice(&encoded);
@@ -376,6 +386,7 @@ pub fn adopt(fd: RawFd) -> Option<Adopted> {
             agent: record.agent,
             agent_argv: record.agent_argv,
             agent_session: record.agent_session,
+            follow_nested: record.follow_nested,
         });
     }
 
@@ -420,6 +431,7 @@ mod tests {
             agent: None,
             agent_argv: None,
             agent_session: None,
+            follow_nested: false,
         }
     }
 
