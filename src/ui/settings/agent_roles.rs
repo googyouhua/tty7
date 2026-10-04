@@ -6,8 +6,9 @@ use super::shell::SearchOption;
 use super::*;
 
 use crate::core::agent_roles::{
-    AgentRole, RoleStarter, delete_role, fetch_opencode_models_with_error, load_roles,
-    model_choices_fast, roles_dir, save_role, slug_from_name, unique_slug,
+    AgentRole, MODELS_DEV_URL, RoleStarter, delete_role, fetch_live_models, load_roles,
+    model_choices_fast, models_dev_providers, read_last_models_source, read_models_cache,
+    roles_dir, save_role, slug_from_name, source_from_parts, unique_slug, write_last_models_source,
 };
 use crate::core::cli_agent::CLIAgent;
 
@@ -34,6 +35,13 @@ pub(crate) struct AgentRoleForm {
     models_loading: bool,
     /// Guards overlapping refreshes; only the latest generation applies.
     models_generation: u64,
+    /// Model-list source toggle: false loads the URL text as a
+    /// models.dev-compatible list (custom mirrors allowed), true loads the
+    /// path text as a `{flag, models[]}` JSON file. Session-only; the loaded
+    /// list persists through the UI-written per-base cache.
+    models_from_file: bool,
+    /// The URL or file path the list loads from, depending on the toggle.
+    models_source: Entity<InputState>,
     error: Option<String>,
     _subs: Vec<Subscription>,
 }
@@ -107,16 +115,35 @@ impl Tty7App {
             )
         });
         let base = editing.map(|r| r.base).unwrap_or(CLIAgent::Claude);
+        // Restore the last-used source for this base so a reopen keeps the
+        // file-loaded list (via the cache seed below) instead of resetting
+        // to the default URL.
+        let (from_file, last_text) =
+            read_last_models_source(base).unwrap_or((false, MODELS_DEV_URL.to_string()));
+        let models_source = seed(&last_text, &mut subs);
+        let source_opt = source_from_parts(from_file, &last_text);
+        // Fast path first so opening the form never blocks on a hung
+        // source; the cached list seeds instantly and the live list fills
+        // in on a background task below.
+        let mut initial = model_choices_fast(base);
+        if let Some(ref source) = source_opt {
+            let cached = read_models_cache(base, &source.cache_key());
+            if !cached.is_empty() {
+                initial = cached;
+            }
+        }
+        let auto_load =
+            source_opt.is_some() && Self::models_should_load(base, from_file, &last_text);
         let form = AgentRoleForm {
             editing: editing.map(|r| r.slug.clone()),
             base,
             model: editing.map(|r| r.model.clone()).unwrap_or_default(),
-            // Fast path first so opening the form never blocks on a hung
-            // CLI; the live list fills in on a background task below.
-            models: model_choices_fast(base),
+            models: initial,
             models_error: None,
-            models_loading: matches!(base, CLIAgent::OpenCode | CLIAgent::OpenCode2),
+            models_loading: auto_load,
             models_generation: 0,
+            models_from_file: from_file,
+            models_source,
             name,
             launch,
             description,
@@ -130,12 +157,23 @@ impl Tty7App {
             s.role_form = Some(form);
         }
         cx.notify();
-        // Live fill for bases with a fetch (OpenCode and OpenCode2):
-        // success replaces the fast list, failure keeps it and records
-        // the reason instead of silently showing stale data.
-        if matches!(base, CLIAgent::OpenCode | CLIAgent::OpenCode2) {
+        // Live fill for bases with a source (mapped providers, or a custom
+        // URL the user typed): success replaces the fast list, failure keeps
+        // it and records the reason instead of silently showing stale data.
+        if auto_load {
             self.spawn_live_models(0, cx);
         }
+    }
+
+    /// Whether opening the form (or switching to `base`) should kick off a
+    /// background load: mapped bases always do; unmapped ones only when the
+    /// user pointed at an explicit source (a file path, or a non-default URL).
+    fn models_should_load(base: CLIAgent, from_file: bool, source_text: &str) -> bool {
+        if from_file {
+            return !source_text.trim().is_empty();
+        }
+        let url = source_text.trim();
+        !models_dev_providers(base).is_empty() || (!url.is_empty() && url != MODELS_DEV_URL)
     }
 
     /// Open a blank add form.
@@ -165,24 +203,53 @@ impl Tty7App {
 
     pub(crate) fn set_role_base(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(base) = CLIAgent::ALL.get(index) {
-            let generation = if let Some(form) = self.role_form_mut() {
+            let (generation, auto_load) = if let Some(form) = self.role_form_mut() {
                 form.base = *base;
                 // A new base means a new model list; the old pick rarely
                 // survives the switch, so reset rather than keep a stale one.
+                // The source toggle stays: it is the user's choice, not the
+                // base's.
                 form.model.clear();
                 form.models = model_choices_fast(*base);
                 form.models_error = None;
-                form.models_loading = matches!(*base, CLIAgent::OpenCode | CLIAgent::OpenCode2);
+                let auto_load = Self::models_should_load(
+                    *base,
+                    form.models_from_file,
+                    &form.models_source.read(cx).value().to_string(),
+                );
+                form.models_loading = auto_load;
                 form.models_generation = form.models_generation.wrapping_add(1);
-                form.models_generation
+                (form.models_generation, auto_load)
             } else {
                 return;
             };
-            if matches!(*base, CLIAgent::OpenCode | CLIAgent::OpenCode2) {
+            if auto_load {
                 self.spawn_live_models(generation, cx);
             }
         }
         cx.notify();
+    }
+
+    /// Switch the list source between a URL and a JSON file. The text field
+    /// keeps its value; an empty file path loads nothing until one is typed.
+    pub(crate) fn set_role_models_source(&mut self, index: usize, cx: &mut Context<Self>) {
+        let generation = if let Some(form) = self.role_form_mut() {
+            form.models_from_file = index == 1;
+            if form.models_from_file && form.models_source.read(cx).value().trim().is_empty() {
+                form.models_loading = false;
+                form.models_error = None;
+                cx.notify();
+                return;
+            }
+            form.models_generation = form.models_generation.wrapping_add(1);
+            form.models_loading = true;
+            form.models_error = None;
+            form.models_generation
+        } else {
+            return;
+        };
+        cx.notify();
+        self.spawn_live_models(generation, cx);
     }
 
     /// Re-run the model fetch for the form's base (the dropdown's refresh).
@@ -201,24 +268,28 @@ impl Tty7App {
         self.spawn_live_models(generation, cx);
     }
 
-    /// Background `opencode2`/`opencode models` fetch for the form's current
-    /// base. Only `generation` applies, so rapid base switches or refresh clicks
-    /// cannot let a stale slow fetch overwrite a newer one.
+    /// Background model load for the form's current base and selected
+    /// source (URL or file). Only `generation` applies, so rapid base
+    /// switches or refresh clicks cannot let a stale slow fetch overwrite a
+    /// newer one.
     fn spawn_live_models(&mut self, generation: u64, cx: &mut Context<Self>) {
-        let base = match self.role_form_mut() {
-            Some(form) => form.base,
+        let (base, source) = match self.role_form_mut() {
+            Some(form) => {
+                let text = form.models_source.read(cx).value().trim().to_string();
+                let Some(source) = source_from_parts(form.models_from_file, &text) else {
+                    form.models_loading = false;
+                    return;
+                };
+                // Remember the effective source so a reopen restores it.
+                write_last_models_source(form.base, form.models_from_file, &text);
+                (form.base, source)
+            }
             None => return,
         };
-        if !matches!(base, CLIAgent::OpenCode | CLIAgent::OpenCode2) {
-            if let Some(form) = self.role_form_mut() {
-                form.models_loading = false;
-            }
-            return;
-        }
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { fetch_opencode_models_with_error() })
+                .spawn(async move { fetch_live_models(base, &source) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let Some(form) = this.role_form_mut() else {
@@ -503,6 +574,19 @@ impl Tty7App {
         const W: f32 = 320.;
         let models_loading = form.models_loading;
         let models_error = form.models_error.clone();
+        let source_selected = match form.models_from_file {
+            true => 1,
+            false => 0,
+        };
+        let source_choice = self.settings_choice(
+            "role-models-source",
+            &["URL", "File"],
+            source_selected,
+            cx,
+            |this, ix, _w, cx| {
+                this.set_role_models_source(ix, cx);
+            },
+        );
         let mut rows: Vec<AnyElement> = vec![
             self.settings_row(
                 t(L10nKey::SettingsRoleName),
@@ -545,6 +629,18 @@ impl Tty7App {
             )
             .into_any_element(),
             self.settings_row(
+                t(L10nKey::SettingsRoleModelsSource),
+                t(L10nKey::SettingsRoleModelsSourceDesc),
+                v_flex()
+                    .gap(px(6.))
+                    .items_end()
+                    .child(source_choice)
+                    .child(self.settings_text_input(&form.models_source, W, false, cx))
+                    .into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+            self.settings_row(
                 t(L10nKey::SettingsRoleLaunch),
                 t(L10nKey::SettingsRoleLaunchDesc),
                 self.settings_text_input(&form.launch, W, form.error.is_some(), cx)
@@ -569,6 +665,19 @@ impl Tty7App {
             )
             .into_any_element(),
         ];
+        if form.models_from_file {
+            let tk = Tk::of(cx);
+            // Directly under the source row (Name, Base, Model, Source),
+            // next to the path input it documents.
+            rows.insert(
+                4,
+                div()
+                    .text_size(fs(12.))
+                    .text_color(tk.k5)
+                    .child(t(L10nKey::SettingsRoleModelsFileHint))
+                    .into_any_element(),
+            );
+        }
         for i in 0..3 {
             rows.push(
                 self.settings_row(

@@ -180,6 +180,9 @@ pub fn role_launch_program(role: &AgentRole) -> Option<String> {
 /// The argv a role launches (and resumes) with: the launch words plus
 /// `{flag} {model}` when the role names a model. The flag comes from the
 /// same table as the model list ([`model_flag`]).
+///
+/// The launch line is the final escape hatch: when it already names the
+/// flag (bare or `flag=value`), the dropdown value is not appended again.
 pub fn role_launch_argv(role: &AgentRole) -> Vec<String> {
     let mut argv: Vec<String> = role.launch.split_whitespace().map(str::to_string).collect();
     if argv.is_empty() {
@@ -188,6 +191,9 @@ pub fn role_launch_argv(role: &AgentRole) -> Vec<String> {
     let model = role.model.trim();
     if !model.is_empty()
         && let Some(flag) = model_flag(role.base)
+        && !argv
+            .iter()
+            .any(|t| t == flag || t.starts_with(&format!("{flag}=")))
     {
         argv.push(flag.to_string());
         argv.push(model.to_string());
@@ -313,13 +319,383 @@ pub fn model_choices(base: CLIAgent) -> Vec<String> {
     out
 }
 
+/// The default model-list URL (URL mode default; the form lets the user
+/// override it with a self-hosted mirror or any extra address).
+pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+
+/// The models.dev provider ids backing `base`. Empty means no HTTP fetch
+/// for this base — it keeps the local/config/built-in chain untouched.
+pub fn models_dev_providers(base: CLIAgent) -> &'static [&'static str] {
+    match base {
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => &["opencode", "opencode-go"],
+        CLIAgent::Claude => &["anthropic"],
+        CLIAgent::Codex => &["openai"],
+        CLIAgent::Gemini => &["google"],
+        CLIAgent::Grok => &["xai"],
+        CLIAgent::Qwen => &["alibaba"],
+        CLIAgent::Kimi => &["moonshotai"],
+        CLIAgent::Copilot => &["github-copilot"],
+        _ => &[],
+    }
+}
+
+/// Where the form loads models from: a local JSON file or an HTTP(S) URL.
+/// Files use the `{flag, models[]}` shape documented in
+/// `docs/agents/models-load-file.md`; URLs serve a models.dev-compatible
+/// document and are filtered through [`models_dev_providers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelLoadSource {
+    File(PathBuf),
+    Url(String),
+}
+
+impl ModelLoadSource {
+    /// The cache key distinguishing one loaded list from another: the URL
+    /// itself, or the file path. A source change never reads another
+    /// source's stale cache.
+    pub fn cache_key(&self) -> String {
+        match self {
+            ModelLoadSource::File(path) => format!("file:{}", path.display()),
+            ModelLoadSource::Url(url) => format!("url:{url}"),
+        }
+    }
+}
+
+/// Build the effective load source from the form's toggle and text: `None`
+/// only when file mode has no path yet. Empty URL text means the default.
+pub fn source_from_parts(from_file: bool, text: &str) -> Option<ModelLoadSource> {
+    let trimmed = text.trim();
+    if from_file {
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(ModelLoadSource::File(PathBuf::from(trimmed)));
+    }
+    if trimmed.is_empty() {
+        return Some(ModelLoadSource::Url(MODELS_DEV_URL.to_string()));
+    }
+    Some(ModelLoadSource::Url(trimmed.to_string()))
+}
+
+/// Best-effort live model lists for `base` from `source`, then the local
+/// CLI/catalog fetch. Anything failing reads as an error describing the
+/// first failure; the caller keeps its old list.
+pub fn fetch_live_models(base: CLIAgent, source: &ModelLoadSource) -> Result<Vec<String>, String> {
+    let mut first_err: Option<String> = None;
+    let mut failed = |e: String| {
+        if first_err.is_none() {
+            first_err = Some(e);
+        }
+    };
+    match source {
+        ModelLoadSource::File(path) => match load_models_file(path, base) {
+            Ok(models) => {
+                write_models_cache(base, &source.cache_key(), &models);
+                return Ok(models);
+            }
+            Err(e) => {
+                failed(e);
+                let cached = read_models_cache(base, &source.cache_key());
+                if !cached.is_empty() {
+                    return Ok(cached);
+                }
+            }
+        },
+        ModelLoadSource::Url(url) => {
+            // An unmapped base against the default URL would only ever fetch
+            // megabytes to learn nothing: skip the HTTP and go local.
+            let skip_http = models_dev_providers(base).is_empty() && url == MODELS_DEV_URL;
+            if !skip_http {
+                match fetch_models_dev(url, base) {
+                    Ok(models) => {
+                        write_models_cache(base, &source.cache_key(), &models);
+                        return Ok(models);
+                    }
+                    Err(e) => {
+                        failed(e);
+                        let cached = read_models_cache(base, &source.cache_key());
+                        if !cached.is_empty() {
+                            return Ok(cached);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let local = fetch_models_local(base);
+    if !local.is_empty() {
+        return Ok(local);
+    }
+    Err(first_err.unwrap_or_else(|| format!("no models found for {}", base.slug())))
+}
+
 /// Best-effort live model lists. No network beyond what the CLIs do
 /// themselves; anything failing reads as empty (bounded by a timeout).
 fn fetch_models(base: CLIAgent) -> Vec<String> {
+    fetch_live_models(base, &ModelLoadSource::Url(MODELS_DEV_URL.to_string())).unwrap_or_default()
+}
+
+/// The local half of the live chain: what the installed CLIs report
+/// themselves. Anything failing reads as empty.
+fn fetch_models_local(base: CLIAgent) -> Vec<String> {
     match base {
         CLIAgent::OpenCode | CLIAgent::OpenCode2 => fetch_opencode_models(),
         CLIAgent::Claude => read_claude_catalog_models(),
         _ => Vec::new(),
+    }
+}
+
+/// Pull `url` (models.dev-compatible) and keep only the providers backing
+/// `base`. Sorted and de-duplicated; an empty pick reads as an error so
+/// callers fall through to the next source instead of blanking the list.
+fn fetch_models_dev(url: &str, base: CLIAgent) -> Result<Vec<String>, String> {
+    let bytes = http_get_bytes(url)?;
+    parse_models_dev(&bytes, base)
+}
+
+/// Parse a models.dev-compatible document for `base`: the `models` keys of
+/// each mapped provider. `opencode`/`opencode-go` keys gain their provider
+/// prefix (the `provider/model` shape the CLI reports); every other
+/// provider keeps its bare id. Unknown fields are ignored.
+fn parse_models_dev(bytes: &[u8], base: CLIAgent) -> Result<Vec<String>, String> {
+    const MAX_MODELS_DEV_BYTES: usize = 32 * 1024 * 1024;
+    if bytes.len() > MAX_MODELS_DEV_BYTES {
+        return Err(format!(
+            "models list from {base} is larger than 32 MiB",
+            base = base.slug()
+        ));
+    }
+    let doc: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("cannot parse model list: {e}"))?;
+    let providers = models_dev_providers(base);
+    let mut out: Vec<String> = Vec::new();
+    for provider in providers {
+        let Some(models) = doc.get(*provider).and_then(|p| p.get("models")) else {
+            continue;
+        };
+        let Some(map) = models.as_object() else {
+            continue;
+        };
+        for key in map.keys() {
+            let id = key.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if id.contains('/') {
+                out.push(id.to_string());
+            } else if matches!(*provider, "opencode" | "opencode-go") {
+                out.push(format!("{provider}/{id}"));
+            } else {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return Err(format!("no models listed for {}", base.slug()));
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "remote-install")]
+fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    const MAX_LIST_BYTES: u64 = 32 * 1024 * 1024;
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(8)))
+        .timeout_connect(Some(std::time::Duration::from_secs(8)))
+        .user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")))
+        .build();
+    let agent: ureq::Agent = agent.into();
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("cannot fetch model list from {url}: {e}"))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("model list from {url} returned HTTP {status}"));
+    }
+    let mut body = response.into_body();
+    let mut reader = body.as_reader().take(MAX_LIST_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read model list from {url}: {e}"))?;
+    if bytes.len() as u64 > MAX_LIST_BYTES {
+        return Err(format!("model list from {url} is larger than 32 MiB"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(not(feature = "remote-install"))]
+fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    Err(format!(
+        "HTTP model fetch from {url} is unavailable in this build"
+    ))
+}
+
+/// Load a model-list JSON file (see `docs/agents/models-load-file.md`).
+/// Two shapes are accepted: a hand-written `{flag, models[]}` (`flag` is
+/// accepted and validated but informational — the launch flag still comes
+/// from [`model_flag`]), or a models.dev full/slice document, which is
+/// filtered through [`models_dev_providers`] exactly like URL mode. A top
+/// level without a `models` key takes the second road; a present-but-broken
+/// `models` array keeps its precise error.
+pub fn load_models_file(path: &Path, base: CLIAgent) -> Result<Vec<String>, String> {
+    const MAX_FILE_BYTES: u64 = 1024 * 1024;
+    const MAX_FILE_MODELS: usize = 2000;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("cannot read model file {}: {e}", path.display()))?;
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "model file {} is larger than 1 MiB",
+            path.display()
+        ));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("cannot read model file {}: {e}", path.display()))?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("cannot parse model file {}: {e}", path.display()))?;
+    if v.get("models").is_none() {
+        return parse_models_dev(&bytes, base)
+            .map_err(|e| format!("model file {}: {e}", path.display()));
+    }
+    if let Some(flag) = v.get("flag")
+        && !flag.is_null()
+    {
+        let ok = flag
+            .as_str()
+            .is_some_and(|f| f.trim().starts_with('-') && !f.trim().is_empty());
+        if !ok {
+            return Err(format!(
+                "model file {} has an invalid `flag` (want e.g. \"--model\")",
+                path.display()
+            ));
+        }
+    }
+    let models = v.get("models").and_then(|m| m.as_array()).ok_or_else(|| {
+        format!(
+            "model file {} needs a `models` string array (see docs/agents/models-load-file.md)",
+            path.display()
+        )
+    })?;
+    if models.len() > MAX_FILE_MODELS {
+        return Err(format!(
+            "model file {} lists more than {MAX_FILE_MODELS} models",
+            path.display()
+        ));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for (i, m) in models.iter().enumerate() {
+        let Some(s) = m.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            return Err(format!(
+                "model file {} has a non-string `models[{i}]`",
+                path.display()
+            ));
+        };
+        out.push(s.to_string());
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return Err(format!("model file {} lists no models", path.display()));
+    }
+    Ok(out)
+}
+
+/// The UI-written per-base model cache beside `roles/`: survivors of a
+/// successful load so a reopen works offline. Failures never clear it.
+fn models_cache_dir() -> Option<PathBuf> {
+    crate::core::config::config_dir_path().map(|d| d.join("models-cache"))
+}
+
+fn read_models_cache_in(dir: &Path, base: CLIAgent, source: &str) -> Vec<String> {
+    let read = || -> Option<Vec<String>> {
+        let text = std::fs::read_to_string(dir.join(format!("{}.json", base.slug()))).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+        if v.get("source").and_then(|s| s.as_str()) != Some(source) {
+            return None;
+        }
+        v.get("models").and_then(|m| m.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|e| e.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+    };
+    read().unwrap_or_default()
+}
+
+fn write_models_cache_in(dir: &Path, base: CLIAgent, source: &str, models: &[String]) {
+    if models.is_empty() {
+        return;
+    }
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let body = serde_json::json!({"source": source, "models": models});
+    let text = serde_json::to_string(&body).unwrap_or_default();
+    let _ = std::fs::write(dir.join(format!("{}.json", base.slug())), text);
+}
+
+/// The cached list for `base` under `source`'s cache key (see
+/// [`ModelLoadSource::cache_key`]), or empty when nothing was cached for
+/// exactly that source. The form seeds from it so a reopen survives offline.
+pub fn read_models_cache(base: CLIAgent, source: &str) -> Vec<String> {
+    models_cache_dir()
+        .map(|d| read_models_cache_in(&d, base, source))
+        .unwrap_or_default()
+}
+
+/// The form's last-used source per base (`from_file` plus the URL/path
+/// text), so a reopen restores the toggle instead of resetting to the
+/// default URL. Written by the UI on every load; failures never clear it.
+fn last_source_file(dir: &Path, base: CLIAgent) -> PathBuf {
+    dir.join(format!("{}.source.json", base.slug()))
+}
+
+fn read_last_source_in(dir: &Path, base: CLIAgent) -> Option<(bool, String)> {
+    let text = std::fs::read_to_string(last_source_file(dir, base)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let from_file = v.get("from_file").and_then(|b| b.as_bool())?;
+    let text = v
+        .get("text")
+        .and_then(|s| s.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    Some((from_file, text))
+}
+
+fn write_last_source_in(dir: &Path, base: CLIAgent, from_file: bool, text: &str) {
+    let trimmed = text.trim();
+    if from_file && trimmed.is_empty() {
+        return;
+    }
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let body = serde_json::json!({"from_file": from_file, "text": trimmed});
+    let text = serde_json::to_string(&body).unwrap_or_default();
+    let _ = std::fs::write(last_source_file(dir, base), text);
+}
+
+pub fn read_last_models_source(base: CLIAgent) -> Option<(bool, String)> {
+    models_cache_dir().and_then(|d| read_last_source_in(&d, base))
+}
+
+pub fn write_last_models_source(base: CLIAgent, from_file: bool, text: &str) {
+    if let Some(dir) = models_cache_dir() {
+        write_last_source_in(&dir, base, from_file, text);
+    }
+}
+
+fn write_models_cache(base: CLIAgent, source: &str, models: &[String]) {
+    if let Some(dir) = models_cache_dir() {
+        write_models_cache_in(&dir, base, source, models);
     }
 }
 
@@ -817,6 +1193,238 @@ mod tests {
             ]
         );
         assert!(parse_models_output(b"\n   \n").is_empty());
+    }
+
+    #[test]
+    fn models_dev_providers_cover_the_mapped_bases() {
+        assert_eq!(
+            models_dev_providers(CLIAgent::OpenCode),
+            &["opencode", "opencode-go"]
+        );
+        assert_eq!(
+            models_dev_providers(CLIAgent::OpenCode2),
+            models_dev_providers(CLIAgent::OpenCode)
+        );
+        assert!(!models_dev_providers(CLIAgent::Claude).is_empty());
+        assert!(!models_dev_providers(CLIAgent::Codex).is_empty());
+        assert!(!models_dev_providers(CLIAgent::Gemini).is_empty());
+        assert!(!models_dev_providers(CLIAgent::Grok).is_empty());
+        assert!(!models_dev_providers(CLIAgent::Qwen).is_empty());
+        assert!(!models_dev_providers(CLIAgent::Kimi).is_empty());
+        assert!(!models_dev_providers(CLIAgent::Copilot).is_empty());
+        assert!(models_dev_providers(CLIAgent::Goose).is_empty());
+        assert!(models_dev_providers(CLIAgent::Droid).is_empty());
+    }
+
+    #[test]
+    fn models_dev_parses_only_mapped_providers() {
+        let doc = serde_json::json!({
+            "anthropic": {"models": {
+                "claude-sonnet-4-5": {},
+                "claude-haiku-4-5": {},
+            }},
+            "openai": {"models": {"gpt-5.1": {}}},
+            "opencode": {"models": {"gpt-5": {}, "with/slash": {}}},
+            "opencode-go": {"models": {"mimo-v2.6-pro": {}}},
+        });
+        let bytes = serde_json::to_vec(&doc).unwrap();
+        assert_eq!(
+            parse_models_dev(&bytes, CLIAgent::Claude).unwrap(),
+            vec![
+                "claude-haiku-4-5".to_string(),
+                "claude-sonnet-4-5".to_string()
+            ]
+        );
+        assert_eq!(
+            parse_models_dev(&bytes, CLIAgent::OpenCode).unwrap(),
+            vec![
+                "opencode-go/mimo-v2.6-pro".to_string(),
+                "opencode/gpt-5".to_string(),
+                "with/slash".to_string(),
+            ]
+        );
+        assert!(parse_models_dev(&bytes, CLIAgent::Goose).is_err());
+        assert!(parse_models_dev(b"{}", CLIAgent::Claude).is_err());
+        assert!(parse_models_dev(b"nope", CLIAgent::Claude).is_err());
+    }
+
+    #[test]
+    fn load_models_file_accepts_flag_shape_and_rejects_junk() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let good = dir.path().join("models.json");
+        std::fs::write(
+            &good,
+            r#"{"flag": "--model", "models": ["b", "a", "a", " x "]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_models_file(&good, CLIAgent::Qwen).unwrap(),
+            vec!["a".to_string(), "b".to_string(), "x".to_string()]
+        );
+        let no_flag = dir.path().join("noflag.json");
+        std::fs::write(&no_flag, r#"{"models": ["m"]}"#).unwrap();
+        assert_eq!(
+            load_models_file(&no_flag, CLIAgent::Qwen).unwrap(),
+            vec!["m".to_string()]
+        );
+        for (name, body) in [
+            ("no-models.json", r#"{"flag": "--model"}"#),
+            ("empty.json", r#"{"models": []}"#),
+            ("mixed.json", r#"{"models": ["ok", 7]}"#),
+            ("bad-flag.json", r#"{"flag": "model", "models": ["m"]}"#),
+            ("bad-json.json", r#"{"models": "#),
+        ] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            assert!(
+                load_models_file(&p, CLIAgent::Qwen).is_err(),
+                "{name} should fail"
+            );
+        }
+        assert!(
+            load_models_file(dir.path().join("missing.json").as_path(), CLIAgent::Qwen).is_err()
+        );
+    }
+
+    #[test]
+    fn load_models_file_accepts_a_models_dev_document() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let doc = serde_json::json!({
+            "anthropic": {"models": {"claude-sonnet-4-5": {}, "claude-haiku-4-5": {}}},
+            "opencode": {"models": {"gpt-5": {}}},
+            "deepinfra": {"models": {"x": {}}},
+        });
+        let p = dir.path().join("api.json");
+        std::fs::write(&p, serde_json::to_vec(&doc).unwrap()).unwrap();
+        assert_eq!(
+            load_models_file(&p, CLIAgent::Claude).unwrap(),
+            vec![
+                "claude-haiku-4-5".to_string(),
+                "claude-sonnet-4-5".to_string()
+            ]
+        );
+        assert_eq!(
+            load_models_file(&p, CLIAgent::OpenCode).unwrap(),
+            vec!["opencode/gpt-5".to_string()]
+        );
+        // Slice with no mapped provider fails instead of blanking the list.
+        let slim = dir.path().join("slim.json");
+        std::fs::write(&slim, r#"{"deepinfra": {"models": {"x": {}}}}"#).unwrap();
+        let err = load_models_file(&slim, CLIAgent::Claude).unwrap_err();
+        assert!(err.contains("slim.json"), "unexpected error: {err}");
+        // A present-but-broken `models` array keeps its precise error.
+        let mixed = dir.path().join("mixed.json");
+        std::fs::write(&mixed, r#"{"models": ["ok", 7]}"#).unwrap();
+        let err = load_models_file(&mixed, CLIAgent::Claude).unwrap_err();
+        assert!(err.contains("non-string"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn models_cache_roundtrips_only_for_its_source() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let models = vec!["a".to_string(), "b".to_string()];
+        write_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://x", &models);
+        assert_eq!(
+            read_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://x"),
+            models
+        );
+        assert!(read_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://y").is_empty());
+        assert!(read_models_cache_in(dir.path(), CLIAgent::Claude, "url:https://x").is_empty());
+        write_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://x", &[]);
+        assert_eq!(
+            read_models_cache_in(dir.path(), CLIAgent::Qwen, "url:https://x"),
+            models,
+            "empty writes must not clear the cache"
+        );
+    }
+
+    #[test]
+    fn source_parts_build_file_url_or_nothing() {
+        assert!(source_from_parts(true, "   ").is_none());
+        assert_eq!(
+            source_from_parts(true, " ~/m.json "),
+            Some(ModelLoadSource::File(PathBuf::from("~/m.json")))
+        );
+        assert_eq!(
+            source_from_parts(false, ""),
+            Some(ModelLoadSource::Url(MODELS_DEV_URL.to_string()))
+        );
+        assert_eq!(
+            source_from_parts(false, "https://mirror/x"),
+            Some(ModelLoadSource::Url("https://mirror/x".to_string()))
+        );
+    }
+
+    #[test]
+    fn last_source_roundtrips_per_base() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(read_last_source_in(dir.path(), CLIAgent::Qwen).is_none());
+        write_last_source_in(dir.path(), CLIAgent::Qwen, true, "  ~/m.json  ");
+        assert_eq!(
+            read_last_source_in(dir.path(), CLIAgent::Qwen),
+            Some((true, "~/m.json".to_string()))
+        );
+        assert!(read_last_source_in(dir.path(), CLIAgent::Claude).is_none());
+        // Empty file text is not worth remembering.
+        write_last_source_in(dir.path(), CLIAgent::Qwen, true, "   ");
+        assert_eq!(
+            read_last_source_in(dir.path(), CLIAgent::Qwen),
+            Some((true, "~/m.json".to_string()))
+        );
+        std::fs::write(
+            dir.path().join("qwen.source.json"),
+            r#"{"from_file": "yes"}"#,
+        )
+        .unwrap();
+        assert!(read_last_source_in(dir.path(), CLIAgent::Qwen).is_none());
+    }
+
+    #[test]
+    fn unmapped_base_with_default_url_skips_http_and_fails_fast() {
+        // No network, no CLI for goose: the skip means this errors from the
+        // local chain, proving no HTTP was attempted for the default URL.
+        let err = fetch_live_models(
+            CLIAgent::Goose,
+            &ModelLoadSource::Url(MODELS_DEV_URL.to_string()),
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn missing_file_errors_with_the_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("gone.json");
+        let source = ModelLoadSource::File(missing);
+        // No local fetcher for qwen either: surfaces the file error.
+        let err = fetch_live_models(CLIAgent::Qwen, &source).unwrap_err();
+        assert!(err.contains("gone.json"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn launch_argv_skips_the_dropdown_when_the_line_names_the_flag() {
+        let role = |launch: &str, model: &str| AgentRole {
+            slug: "m".to_string(),
+            name: "M".to_string(),
+            base: CLIAgent::Claude,
+            description: String::new(),
+            launch: launch.to_string(),
+            model: model.to_string(),
+            instructions: String::new(),
+            starters: vec![],
+        };
+        assert_eq!(
+            role_launch_argv(&role("claude --model opus", "sonnet")),
+            vec!["claude", "--model", "opus"]
+        );
+        assert_eq!(
+            role_launch_argv(&role("claude --model=opus", "sonnet")),
+            vec!["claude", "--model=opus"]
+        );
+        assert_eq!(
+            role_launch_argv(&role("claude --verbose", "sonnet")),
+            vec!["claude", "--verbose", "--model", "sonnet"]
+        );
     }
 
     #[test]
