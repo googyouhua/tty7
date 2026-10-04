@@ -728,9 +728,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRoleModelNone => "起動行のみ",
         L10nKey::SettingsRoleRefresh => "更新",
         L10nKey::SettingsRoleModelsSource => "モデルソース",
-        L10nKey::SettingsRoleModelsSourceDesc => {
-            "URL は models.dev 互換の一覧を取得します（独自ミラー可）。File はローカル JSON を読み込みます。詳しくは docs/agents/models-load-file.md を参照してください。"
-        }
+        L10nKey::SettingsRoleModelsSourceDesc => "URL の一覧またはローカル JSON。",
         L10nKey::SettingsRoleDescription => "説明",
         L10nKey::SettingsRoleDescriptionDesc => "表示のみ。エージェントには送信されません。",
         L10nKey::SettingsRoleInstructions => "指示",

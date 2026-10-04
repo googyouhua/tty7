@@ -620,8 +620,9 @@ impl Tty7App {
             self.settings_row(
                 t(L10nKey::SettingsRoleModelsSource),
                 t(L10nKey::SettingsRoleModelsSourceDesc),
-                h_flex()
-                    .gap(px(8.))
+                v_flex()
+                    .gap(px(6.))
+                    .items_end()
                     .child(source_choice)
                     .child(self.settings_text_input(&form.models_source, W, false, cx))
                     .into_any_element(),

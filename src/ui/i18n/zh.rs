@@ -620,9 +620,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRoleModelNone => "仅启动行",
         L10nKey::SettingsRoleRefresh => "刷新",
         L10nKey::SettingsRoleModelsSource => "模型来源",
-        L10nKey::SettingsRoleModelsSourceDesc => {
-            "URL 拉取 models.dev 兼容列表（可填自建镜像）；文件加载本地 JSON——见 docs/agents/models-load-file.md。"
-        }
+        L10nKey::SettingsRoleModelsSourceDesc => "URL 列表或本地 JSON 文件。",
         L10nKey::SettingsRoleDescription => "说明",
         L10nKey::SettingsRoleDescriptionDesc => "只显示，不会发给 agent。",
         L10nKey::SettingsRoleInstructions => "首发提示词",

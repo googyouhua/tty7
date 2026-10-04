@@ -387,7 +387,7 @@ pub fn fetch_live_models(
         }
     };
     match source {
-        ModelLoadSource::File(path) => match load_models_file(path) {
+        ModelLoadSource::File(path) => match load_models_file(path, base) {
             Ok(models) => {
                 write_models_cache(base, &source.cache_key(), &models);
                 return Ok(models);
@@ -539,10 +539,14 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
     ))
 }
 
-/// Load a `{flag, models[]}` JSON file (see
-/// `docs/agents/models-load-file.md`). `flag` is accepted and validated but
-/// informational: the launch flag still comes from [`model_flag`].
-pub fn load_models_file(path: &Path) -> Result<Vec<String>, String> {
+/// Load a model-list JSON file (see `docs/agents/models-load-file.md`).
+/// Two shapes are accepted: a hand-written `{flag, models[]}` (`flag` is
+/// accepted and validated but informational — the launch flag still comes
+/// from [`model_flag`]), or a models.dev full/slice document, which is
+/// filtered through [`models_dev_providers`] exactly like URL mode. A top
+/// level without a `models` key takes the second road; a present-but-broken
+/// `models` array keeps its precise error.
+pub fn load_models_file(path: &Path, base: CLIAgent) -> Result<Vec<String>, String> {
     const MAX_FILE_BYTES: u64 = 1024 * 1024;
     const MAX_FILE_MODELS: usize = 2000;
     let meta = std::fs::metadata(path)
@@ -553,10 +557,14 @@ pub fn load_models_file(path: &Path) -> Result<Vec<String>, String> {
             path.display()
         ));
     }
-    let text = std::fs::read_to_string(path)
+    let bytes = std::fs::read(path)
         .map_err(|e| format!("cannot read model file {}: {e}", path.display()))?;
-    let v: serde_json::Value = serde_json::from_str(&text)
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("cannot parse model file {}: {e}", path.display()))?;
+    if v.get("models").is_none() {
+        return parse_models_dev(&bytes, base)
+            .map_err(|e| format!("model file {}: {e}", path.display()));
+    }
     if let Some(flag) = v.get("flag")
         && !flag.is_null()
     {
@@ -1243,12 +1251,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_models_file(&good).unwrap(),
+            load_models_file(&good, CLIAgent::Qwen).unwrap(),
             vec!["a".to_string(), "b".to_string(), "x".to_string()]
         );
         let no_flag = dir.path().join("noflag.json");
         std::fs::write(&no_flag, r#"{"models": ["m"]}"#).unwrap();
-        assert_eq!(load_models_file(&no_flag).unwrap(), vec!["m".to_string()]);
+        assert_eq!(load_models_file(&no_flag, CLIAgent::Qwen).unwrap(), vec!["m".to_string()]);
         for (name, body) in [
             ("no-models.json", r#"{"flag": "--model"}"#),
             ("empty.json", r#"{"models": []}"#),
@@ -1258,9 +1266,42 @@ mod tests {
         ] {
             let p = dir.path().join(name);
             std::fs::write(&p, body).unwrap();
-            assert!(load_models_file(&p).is_err(), "{name} should fail");
+            assert!(load_models_file(&p, CLIAgent::Qwen).is_err(), "{name} should fail");
         }
-        assert!(load_models_file(dir.path().join("missing.json").as_path()).is_err());
+        assert!(load_models_file(dir.path().join("missing.json").as_path(), CLIAgent::Qwen).is_err());
+    }
+
+    #[test]
+    fn load_models_file_accepts_a_models_dev_document() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let doc = serde_json::json!({
+            "anthropic": {"models": {"claude-sonnet-4-5": {}, "claude-haiku-4-5": {}}},
+            "opencode": {"models": {"gpt-5": {}}},
+            "deepinfra": {"models": {"x": {}}},
+        });
+        let p = dir.path().join("api.json");
+        std::fs::write(&p, serde_json::to_vec(&doc).unwrap()).unwrap();
+        assert_eq!(
+            load_models_file(&p, CLIAgent::Claude).unwrap(),
+            vec![
+                "claude-haiku-4-5".to_string(),
+                "claude-sonnet-4-5".to_string()
+            ]
+        );
+        assert_eq!(
+            load_models_file(&p, CLIAgent::OpenCode).unwrap(),
+            vec!["opencode/gpt-5".to_string()]
+        );
+        // Slice with no mapped provider fails instead of blanking the list.
+        let slim = dir.path().join("slim.json");
+        std::fs::write(&slim, r#"{"deepinfra": {"models": {"x": {}}}}"#).unwrap();
+        let err = load_models_file(&slim, CLIAgent::Claude).unwrap_err();
+        assert!(err.contains("slim.json"), "unexpected error: {err}");
+        // A present-but-broken `models` array keeps its precise error.
+        let mixed = dir.path().join("mixed.json");
+        std::fs::write(&mixed, r#"{"models": ["ok", 7]}"#).unwrap();
+        let err = load_models_file(&mixed, CLIAgent::Claude).unwrap_err();
+        assert!(err.contains("non-string"), "unexpected error: {err}");
     }
 
     #[test]
