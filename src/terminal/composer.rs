@@ -188,7 +188,7 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
 
     if (matches!(
         agent,
-        CLIAgent::Claude | CLIAgent::CodeBuddy | CLIAgent::OpenCode
+        CLIAgent::Claude | CLIAgent::CodeBuddy | CLIAgent::OpenCode | CLIAgent::OpenCode2
     ) || reads_like_gemini(agent))
         && let Some(rest) = body.strip_prefix('!')
         && !rest.is_empty()
@@ -221,6 +221,7 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
                 agent,
                 CLIAgent::Codex
                     | CLIAgent::OpenCode
+                    | CLIAgent::OpenCode2
                     | CLIAgent::Amp
                     | CLIAgent::Copilot
                     | CLIAgent::Kimi
@@ -305,7 +306,10 @@ pub(super) fn compose_message(
 /// image, and leave a path that follows the message's text as words — the
 /// image never reaches the model.
 fn attaches_pasted_paths(agent: CLIAgent) -> bool {
-    matches!(agent, CLIAgent::OpenCode | CLIAgent::Amp)
+    matches!(
+        agent,
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 | CLIAgent::Amp
+    )
 }
 
 /// The writes that send `text` with `attached` — [`compose_message`] handed
@@ -561,6 +565,7 @@ fn covers(agent: CLIAgent) -> bool {
             | CLIAgent::CodeBuddy
             | CLIAgent::Kimi
             | CLIAgent::OpenCode
+            | CLIAgent::OpenCode2
             | CLIAgent::QoderCLI
             | CLIAgent::QoderCLICn
     )
@@ -688,7 +693,7 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
                 .map(|top| InputArea { top, mode: None })
         }
         CLIAgent::Kimi => kimi_input_top(rows, floor).map(|top| InputArea { top, mode: None }),
-        CLIAgent::OpenCode => {
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => {
             opencode_input_top(rows, floor).map(|top| InputArea { top, mode: None })
         }
         CLIAgent::QoderCLI | CLIAgent::QoderCLICn => {
@@ -1138,6 +1143,7 @@ fn clear_input(agent: CLIAgent, lines: usize) -> Option<Vec<Step>> {
         | CLIAgent::CodeBuddy
         | CLIAgent::Kimi
         | CLIAgent::OpenCode
+        | CLIAgent::OpenCode2
         | CLIAgent::QoderCLI
         | CLIAgent::QoderCLICn => b"\x15\x7f".repeat(lines),
         _ => return None,
@@ -1278,22 +1284,24 @@ fn held_lines(agent: CLIAgent, rows: &[String], width: usize) -> usize {
                     .collect(),
             )
         }),
-        CLIAgent::OpenCode => opencode_input_top(rows, floor).map_or(0, |top| {
-            let block: Vec<&str> = rows[top..]
-                .iter()
-                .take_while(|r| r.trim_start().starts_with('┃'))
-                .map(|r| r.trim().trim_start_matches('┃').trim())
-                .collect();
-            // The last line names the agent and model.
-            let lines = block[..block.len().saturating_sub(1)]
-                .iter()
-                .map(|l| match l.starts_with("Ask anything...") {
-                    true => "",
-                    false => l,
-                })
-                .collect();
-            count(lines)
-        }),
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => {
+            opencode_input_top(rows, floor).map_or(0, |top| {
+                let block: Vec<&str> = rows[top..]
+                    .iter()
+                    .take_while(|r| r.trim_start().starts_with('┃'))
+                    .map(|r| r.trim().trim_start_matches('┃').trim())
+                    .collect();
+                // The last line names the agent and model.
+                let lines = block[..block.len().saturating_sub(1)]
+                    .iter()
+                    .map(|l| match l.starts_with("Ask anything...") {
+                        true => "",
+                        false => l,
+                    })
+                    .collect();
+                count(lines)
+            })
+        }
         CLIAgent::QoderCLI | CLIAgent::QoderCLICn => {
             qoder_input(rows, floor, width).map_or(0, |q| {
                 count(
@@ -1667,7 +1675,7 @@ fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] 
             ("/stats", "Show session statistics"),
             ("/help", "Show help"),
         ],
-        CLIAgent::OpenCode => &[
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => &[
             ("/new", "New session"),
             ("/models", "Switch model"),
             ("/agents", "Switch agent"),
@@ -2891,7 +2899,9 @@ impl TerminalView {
         }
         let shell = self.shell_program();
         // Where OpenCode's mentions are looked up, to be picked from its list.
-        let mentions_from = match agent == CLIAgent::OpenCode && self.host_id().is_local() {
+        let mentions_from = match matches!(agent, CLIAgent::OpenCode | CLIAgent::OpenCode2)
+            && self.host_id().is_local()
+        {
             true => self.files_cwd(),
             false => None,
         };
@@ -3889,6 +3899,23 @@ mod tests {
             compose_message(claude, "just text  ", &[], Some("zsh")),
             "just text"
         );
+    }
+
+    #[test]
+    fn opencode2_composes_like_opencode() {
+        for msg in ["!ls", "hello", "PONG! ok?", "see @file for context"] {
+            assert_eq!(
+                submit_plan(CLIAgent::OpenCode2, msg, true),
+                submit_plan(CLIAgent::OpenCode, msg, true),
+                "{msg}"
+            );
+        }
+        assert_eq!(
+            builtin_commands(CLIAgent::OpenCode2),
+            builtin_commands(CLIAgent::OpenCode)
+        );
+        assert!(attaches_pasted_paths(CLIAgent::OpenCode2));
+        assert_eq!(covers(CLIAgent::OpenCode2), covers(CLIAgent::OpenCode));
     }
 
     #[test]
@@ -5730,6 +5757,7 @@ mod tests {
             CLIAgent::Codex,
             CLIAgent::Gemini,
             CLIAgent::OpenCode,
+            CLIAgent::OpenCode2,
             CLIAgent::Copilot,
             CLIAgent::Qwen,
             CLIAgent::CodeBuddy,

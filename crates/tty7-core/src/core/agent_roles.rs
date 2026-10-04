@@ -205,7 +205,7 @@ pub fn model_flag(base: CLIAgent) -> Option<&'static str> {
         CLIAgent::Claude => "--model",
         CLIAgent::Codex => "--model",
         CLIAgent::Gemini => "--model",
-        CLIAgent::OpenCode => "--model",
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => "--model",
         CLIAgent::Cursor => "--model",
         CLIAgent::Copilot => "--model",
         CLIAgent::Qwen => "--model",
@@ -281,7 +281,9 @@ fn builtin_models(base: CLIAgent) -> &'static [&'static str] {
         CLIAgent::Claude => &["opus", "sonnet", "haiku"],
         CLIAgent::Codex => &["gpt-5.1", "gpt-5-mini"],
         CLIAgent::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
-        CLIAgent::OpenCode => &["opencode/gpt-5", "opencode/claude-sonnet-4-5"],
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => {
+            &["opencode/gpt-5", "opencode/claude-sonnet-4-5"]
+        }
         _ => &[],
     }
 }
@@ -315,7 +317,7 @@ pub fn model_choices(base: CLIAgent) -> Vec<String> {
 /// themselves; anything failing reads as empty (bounded by a timeout).
 fn fetch_models(base: CLIAgent) -> Vec<String> {
     match base {
-        CLIAgent::OpenCode => fetch_opencode_models(),
+        CLIAgent::OpenCode | CLIAgent::OpenCode2 => fetch_opencode_models(),
         CLIAgent::Claude => read_claude_catalog_models(),
         _ => Vec::new(),
     }
@@ -787,6 +789,16 @@ mod tests {
         };
         assert!(save_role(dir.path(), &bad).is_err());
         assert!(delete_role(dir.path(), "ghost").is_ok());
+    }
+
+    #[test]
+    fn opencode2_shares_opencodes_model_table() {
+        assert_eq!(model_flag(CLIAgent::OpenCode2), Some("--model"));
+        assert!(!model_choices_fast(CLIAgent::OpenCode2).is_empty());
+        assert_eq!(
+            model_choices_fast(CLIAgent::OpenCode2),
+            model_choices_fast(CLIAgent::OpenCode)
+        );
     }
 
     #[test]

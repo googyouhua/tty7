@@ -639,7 +639,7 @@ impl HookAgent {
             CLIAgent::Codex => Some(HookAgent::Codex),
             CLIAgent::TraeCode => Some(HookAgent::TraeCode),
             CLIAgent::Copilot => Some(HookAgent::Copilot),
-            CLIAgent::OpenCode => Some(HookAgent::OpenCode),
+            CLIAgent::OpenCode | CLIAgent::OpenCode2 => Some(HookAgent::OpenCode),
             CLIAgent::Pi => Some(HookAgent::Pi),
             CLIAgent::Grok => Some(HookAgent::Grok),
             CLIAgent::OhMyPi => Some(HookAgent::OhMyPi),
@@ -2534,6 +2534,14 @@ mod tests {
                 "{hooked:?} has hooks but no detected agent maps to it"
             );
         }
+    }
+
+    #[test]
+    fn opencode2_shares_opencodes_hooks() {
+        assert_eq!(
+            HookAgent::of_detected(CLIAgent::OpenCode2),
+            Some(HookAgent::OpenCode)
+        );
     }
 
     #[test]

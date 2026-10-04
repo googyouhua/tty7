@@ -115,7 +115,7 @@ impl Tty7App {
             // CLI; the live list fills in on a background task below.
             models: model_choices_fast(base),
             models_error: None,
-            models_loading: matches!(base, CLIAgent::OpenCode),
+            models_loading: matches!(base, CLIAgent::OpenCode | CLIAgent::OpenCode2),
             models_generation: 0,
             name,
             launch,
@@ -130,10 +130,10 @@ impl Tty7App {
             s.role_form = Some(form);
         }
         cx.notify();
-        // Live fill for bases with a fetch (currently only OpenCode):
+        // Live fill for bases with a fetch (OpenCode and OpenCode2):
         // success replaces the fast list, failure keeps it and records
         // the reason instead of silently showing stale data.
-        if matches!(base, CLIAgent::OpenCode) {
+        if matches!(base, CLIAgent::OpenCode | CLIAgent::OpenCode2) {
             self.spawn_live_models(0, cx);
         }
     }
@@ -172,13 +172,13 @@ impl Tty7App {
                 form.model.clear();
                 form.models = model_choices_fast(*base);
                 form.models_error = None;
-                form.models_loading = matches!(*base, CLIAgent::OpenCode);
+                form.models_loading = matches!(*base, CLIAgent::OpenCode | CLIAgent::OpenCode2);
                 form.models_generation = form.models_generation.wrapping_add(1);
                 form.models_generation
             } else {
                 return;
             };
-            if matches!(*base, CLIAgent::OpenCode) {
+            if matches!(*base, CLIAgent::OpenCode | CLIAgent::OpenCode2) {
                 self.spawn_live_models(generation, cx);
             }
         }
@@ -209,7 +209,7 @@ impl Tty7App {
             Some(form) => form.base,
             None => return,
         };
-        if !matches!(base, CLIAgent::OpenCode) {
+        if !matches!(base, CLIAgent::OpenCode | CLIAgent::OpenCode2) {
             if let Some(form) = self.role_form_mut() {
                 form.models_loading = false;
             }
@@ -429,19 +429,30 @@ impl Tty7App {
             true => t(L10nKey::SettingsRoleEdit),
             false => t(L10nKey::SettingsRoleNew),
         };
-        let base_names: Vec<&str> = CLIAgent::ALL.iter().map(|a| a.display_name()).collect();
+        // Searchable like the model dropdown below: 27 bases no longer
+        // fit the plain popover, which cannot scroll.
+        let base_options = std::rc::Rc::new(
+            CLIAgent::ALL
+                .iter()
+                .map(|a| SearchOption {
+                    label: SharedString::from(a.display_name()),
+                    font: None,
+                })
+                .collect::<Vec<_>>(),
+        );
         let base_selected = CLIAgent::ALL
             .iter()
             .position(|a| *a == form.base)
             .unwrap_or(0);
-        let base_choice = self.settings_choice(
+        let base_choice = self.settings_search_dropdown(
             "role-base",
-            &base_names,
-            base_selected,
-            cx,
-            |this, ix, _w, cx| {
+            base_options[base_selected].label.clone(),
+            base_options,
+            Some(base_selected),
+            std::rc::Rc::new(move |this, ix, _w, cx| {
                 this.set_role_base(ix, cx);
-            },
+            }),
+            cx,
         );
         // Model options: "launch line only" first, then whatever the base
         // offers; a saved model the list no longer names stays selectable
