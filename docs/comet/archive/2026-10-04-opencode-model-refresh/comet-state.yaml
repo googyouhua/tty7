@@ -1,0 +1,172 @@
+schema: comet.native.v4
+name: opencode-model-refresh
+language: en
+phase: archive
+status: done
+state_version: 8
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: 5ecca4de37bc7d652538c3d9c4f4fc35c1f76b4fff2f7a84585621d7a37bdda3
+spec_changes:
+  - capability: role-model-refresh
+    operation: create
+    source: specs/role-model-refresh/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: A1：装有 `opencode2` 或 `opencode` 任一（本机均为 v2.0.18）时，base=opencode 的表单 refresh
+      后下拉出现完整列表（含 `opencode-go/*`），不再只有 2 条内置。
+    result: passed
+    reason:
+      text: opencode2 preferred over opencode; PATH plus ~/.opencode/bin,
+        ~/.local/bin, /usr/local/bin, /opt/homebrew/bin fallback; per-line
+        provider/model parse; empty output is an error, never clears the list.
+        Live CLI test green.
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: A2：CLI 缺失/执行失败/8s 超时/返回空列表时，下拉保留旧列表，页面出现红字失败原因（如 ``no `opencode2` or
+      `opencode` binary found on PATH``）。
+    result: passed
+    reason:
+      text: "failure path keeps the old list and sets models_error, rendered as red
+        'Models refresh failed: <reason>'; refresh never touches the old list
+        before completion."
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: A3：打开表单、切换 base、点击 refresh 时 UI 不冻结；刷新中有加载态（按钮
+      `…`）；快速连点/切换时旧慢请求不覆盖新结果（代际号）。
+    result: passed
+    reason:
+      text: open/base-switch/refresh all seed fast values then background-fill via
+        cx.spawn plus background_executor; loading state on the refresh button;
+        generation counter discards stale slow fills.
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: A4：`cargo test -p tty7-core agent_roles` 全过（含新增 v2 优先、解析、真机 live
+      用例）；`cargo check --bins` 通过。
+    result: passed
+    reason:
+      text: cargo test -p tty7-core agent_roles 14/14 green (new v2-preference, parse,
+        live tests); cargo check --bins green via Runtime check bins-check; no
+        new dependencies; no reserved-keyword identifiers.
+      truncated: false
+builder_handoff:
+  candidate_id: a115be94-fc4c-4be6-b2bf-a21f7dd58a87
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:a6252b20-a078-4d8f-aa5c-63f89b377cc2
+  iteration: 1
+  summary:
+    text: "opencode model refresh fix: dual-binary (opencode2 first, then opencode)
+      lookup via PATH plus known install dirs with executable check; 8s bounded
+      `models` run (std try_wait polling, no new deps); empty output treated as
+      failure; settings Role form seeds fast (models.json+builtin) then
+      background live fill on open/base-switch; refresh button async with
+      loading state, generation guard, keep-old-list plus red error reason on
+      failure"
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+  checks:
+    - name:
+        text: cargo test -p tty7-core agent_roles
+        truncated: false
+      result: passed
+      note:
+        text: 14 passed incl new v2-preference, parse, live CLI tests
+        truncated: false
+    - name:
+        text: cargo check --bins
+        truncated: false
+      result: passed
+      note:
+        text: clean; only pre-existing warnings
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: live list depends on locally installed opencode CLI; without it the
+        fallback chain (models.json, builtin) applies with an explanatory error
+      truncated: false
+    - text: live fetch timeout is 8s; a hung CLI delays background fill but never
+        blocks the UI
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-04T04:36:05.620Z
+blockers: []
+verification:
+  candidate_id: a115be94-fc4c-4be6-b2bf-a21f7dd58a87
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:dd48af07-e131-44ed-933d-cdec991ee4b3
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: bins-check
+      name:
+        text: cargo check --bins
+        truncated: false
+      argv_display:
+        - text: check
+          truncated: false
+        - text: --bins
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 4883
+  summary:
+    text: A1-A4 pass by independent read-only inspection plus Runtime-executed
+      checks (agent_roles tests 14 green, bins check green).
+    truncated: false
+  risks: []
+  risks_truncated: false
+  completed_at: 2026-10-04T04:37:17.693Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: A1-A4 pass by independent read-only inspection plus Runtime-executed
+        checks (agent_roles tests 14 green, bins check green).
+      truncated: false
+    completed_at: 2026-10-04T04:37:17.693Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-04T04:33:12.346Z
