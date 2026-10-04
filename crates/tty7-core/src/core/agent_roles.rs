@@ -319,12 +319,10 @@ pub fn model_choices(base: CLIAgent) -> Vec<String> {
     out
 }
 
-/// The default model-list URL (URL mode default; the form lets the user
-/// override it with a self-hosted mirror or any extra address).
+/// Default model-list URL for URL mode; the form allows an override.
 pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 
-/// The models.dev provider ids backing `base`. Empty means no HTTP fetch
-/// for this base — it keeps the local/config/built-in chain untouched.
+/// models.dev provider ids backing each base; empty disables HTTP fetch.
 pub fn models_dev_providers(base: CLIAgent) -> &'static [&'static str] {
     match base {
         CLIAgent::OpenCode | CLIAgent::OpenCode2 => &["opencode", "opencode-go"],
@@ -339,10 +337,8 @@ pub fn models_dev_providers(base: CLIAgent) -> &'static [&'static str] {
     }
 }
 
-/// Where the form loads models from: a local JSON file or an HTTP(S) URL.
-/// Files use the `{flag, models[]}` shape documented in
-/// `docs/agents/models-load-file.md`; URLs serve a models.dev-compatible
-/// document and are filtered through [`models_dev_providers`].
+/// Model source: local JSON file (`{flag, models[]}`, see
+/// `docs/agents/models-load-file.md`) or HTTP(S) URL (models.dev-compatible).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelLoadSource {
     File(PathBuf),
@@ -350,9 +346,7 @@ pub enum ModelLoadSource {
 }
 
 impl ModelLoadSource {
-    /// The cache key distinguishing one loaded list from another: the URL
-    /// itself, or the file path. A source change never reads another
-    /// source's stale cache.
+    /// Cache key for one loaded list (URL or file path).
     pub fn cache_key(&self) -> String {
         match self {
             ModelLoadSource::File(path) => format!("file:{}", path.display()),
@@ -361,8 +355,7 @@ impl ModelLoadSource {
     }
 }
 
-/// Build the effective load source from the form's toggle and text: `None`
-/// only when file mode has no path yet. Empty URL text means the default.
+/// Effective load source from the form; `None` only when file mode lacks a path.
 pub fn source_from_parts(from_file: bool, text: &str) -> Option<ModelLoadSource> {
     let trimmed = text.trim();
     if from_file {
@@ -377,9 +370,8 @@ pub fn source_from_parts(from_file: bool, text: &str) -> Option<ModelLoadSource>
     Some(ModelLoadSource::Url(trimmed.to_string()))
 }
 
-/// Best-effort live model lists for `base` from `source`, then the local
-/// CLI/catalog fetch. Anything failing reads as an error describing the
-/// first failure; the caller keeps its old list.
+/// Live model lists for `base` from `source`, then local CLI fetch.
+/// Failures read as the first error; callers keep their old list.
 pub fn fetch_live_models(base: CLIAgent, source: &ModelLoadSource) -> Result<Vec<String>, String> {
     let mut first_err: Option<String> = None;
     let mut failed = |e: String| {
@@ -402,8 +394,7 @@ pub fn fetch_live_models(base: CLIAgent, source: &ModelLoadSource) -> Result<Vec
             }
         },
         ModelLoadSource::Url(url) => {
-            // An unmapped base against the default URL would only ever fetch
-            // megabytes to learn nothing: skip the HTTP and go local.
+            // Unmapped base + default URL would fetch megabytes to learn nothing.
             let skip_http = models_dev_providers(base).is_empty() && url == MODELS_DEV_URL;
             if !skip_http {
                 match fetch_models_dev(url, base) {
@@ -429,14 +420,12 @@ pub fn fetch_live_models(base: CLIAgent, source: &ModelLoadSource) -> Result<Vec
     Err(first_err.unwrap_or_else(|| format!("no models found for {}", base.slug())))
 }
 
-/// Best-effort live model lists. No network beyond what the CLIs do
-/// themselves; anything failing reads as empty (bounded by a timeout).
+/// Live lists using only what the CLIs do themselves; failures read as empty.
 fn fetch_models(base: CLIAgent) -> Vec<String> {
     fetch_live_models(base, &ModelLoadSource::Url(MODELS_DEV_URL.to_string())).unwrap_or_default()
 }
 
-/// The local half of the live chain: what the installed CLIs report
-/// themselves. Anything failing reads as empty.
+/// What the installed CLIs report themselves; failures read as empty.
 fn fetch_models_local(base: CLIAgent) -> Vec<String> {
     match base {
         CLIAgent::OpenCode | CLIAgent::OpenCode2 => fetch_opencode_models(),
@@ -445,18 +434,15 @@ fn fetch_models_local(base: CLIAgent) -> Vec<String> {
     }
 }
 
-/// Pull `url` (models.dev-compatible) and keep only the providers backing
-/// `base`. Sorted and de-duplicated; an empty pick reads as an error so
-/// callers fall through to the next source instead of blanking the list.
+/// Pull `url` and keep only `base`'s providers (sorted, de-duplicated).
+/// Empty pick reads as an error so callers fall through.
 fn fetch_models_dev(url: &str, base: CLIAgent) -> Result<Vec<String>, String> {
     let bytes = http_get_bytes(url)?;
     parse_models_dev(&bytes, base)
 }
 
-/// Parse a models.dev-compatible document for `base`: the `models` keys of
-/// each mapped provider. `opencode`/`opencode-go` keys gain their provider
-/// prefix (the `provider/model` shape the CLI reports); every other
-/// provider keeps its bare id. Unknown fields are ignored.
+/// Parse a models.dev-compatible document for `base` into model ids
+/// (`opencode*` keys gain their provider prefix; unknown fields ignored).
 fn parse_models_dev(bytes: &[u8], base: CLIAgent) -> Result<Vec<String>, String> {
     const MAX_MODELS_DEV_BYTES: usize = 32 * 1024 * 1024;
     if bytes.len() > MAX_MODELS_DEV_BYTES {
@@ -535,13 +521,8 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
     ))
 }
 
-/// Load a model-list JSON file (see `docs/agents/models-load-file.md`).
-/// Two shapes are accepted: a hand-written `{flag, models[]}` (`flag` is
-/// accepted and validated but informational — the launch flag still comes
-/// from [`model_flag`]), or a models.dev full/slice document, which is
-/// filtered through [`models_dev_providers`] exactly like URL mode. A top
-/// level without a `models` key takes the second road; a present-but-broken
-/// `models` array keeps its precise error.
+/// Load a model-list JSON file: hand-written `{flag, models[]}` or a
+/// models.dev full/slice document (see `docs/agents/models-load-file.md`).
 pub fn load_models_file(path: &Path, base: CLIAgent) -> Result<Vec<String>, String> {
     const MAX_FILE_BYTES: u64 = 1024 * 1024;
     const MAX_FILE_MODELS: usize = 2000;
@@ -604,8 +585,7 @@ pub fn load_models_file(path: &Path, base: CLIAgent) -> Result<Vec<String>, Stri
     Ok(out)
 }
 
-/// The UI-written per-base model cache beside `roles/`: survivors of a
-/// successful load so a reopen works offline. Failures never clear it.
+/// Per-base model cache beside `roles/` so a reopen works offline.
 fn models_cache_dir() -> Option<PathBuf> {
     crate::core::config::config_dir_path().map(|d| d.join("models-cache"))
 }
@@ -641,18 +621,14 @@ fn write_models_cache_in(dir: &Path, base: CLIAgent, source: &str, models: &[Str
     let _ = std::fs::write(dir.join(format!("{}.json", base.slug())), text);
 }
 
-/// The cached list for `base` under `source`'s cache key (see
-/// [`ModelLoadSource::cache_key`]), or empty when nothing was cached for
-/// exactly that source. The form seeds from it so a reopen survives offline.
+/// Cached list for `base` under `source`'s key; empty when never cached.
 pub fn read_models_cache(base: CLIAgent, source: &str) -> Vec<String> {
     models_cache_dir()
         .map(|d| read_models_cache_in(&d, base, source))
         .unwrap_or_default()
 }
 
-/// The form's last-used source per base (`from_file` plus the URL/path
-/// text), so a reopen restores the toggle instead of resetting to the
-/// default URL. Written by the UI on every load; failures never clear it.
+/// The form's last-used source per base, restored on reopen.
 fn last_source_file(dir: &Path, base: CLIAgent) -> PathBuf {
     dir.join(format!("{}.source.json", base.slug()))
 }
