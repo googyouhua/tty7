@@ -613,6 +613,8 @@ l10n_keys! {
     SettingsRoleModelDesc,
     SettingsRoleModelNone,
     SettingsRoleRefresh,
+    SettingsRoleModelsSource,
+    SettingsRoleModelsSourceDesc,
     SettingsRoleDescription,
     SettingsRoleDescriptionDesc,
     SettingsRoleInstructions,

@@ -718,6 +718,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsRoleModelNone => "Launch line only",
         L10nKey::SettingsRoleRefresh => "Refresh",
+        L10nKey::SettingsRoleModelsSource => "Model source",
+        L10nKey::SettingsRoleModelsSourceDesc => {
+            "URL fetches a models.dev-compatible list (custom mirror allowed); File loads a local JSON file — see docs/agents/models-load-file.md."
+        }
         L10nKey::SettingsRoleDescription => "Description",
         L10nKey::SettingsRoleDescriptionDesc => "Display only; never sent to the agent.",
         L10nKey::SettingsRoleInstructions => "Instructions",
