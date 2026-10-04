@@ -1,0 +1,212 @@
+schema: comet.native.v4
+name: agents-models-dev
+language: en
+phase: archive
+status: done
+state_version: 11
+brief: brief.md
+document_constraints_version: 1
+shape_confirmation_hash: cee07f5641c96f7d9ef4862e599f56399efb60fd052e10f9f8ee7020a5383642
+spec_changes:
+  - capability: models-dev-fetch
+    operation: create
+    source: specs/models-dev-fetch/spec.md
+workspace:
+  isolation: current
+  change_branch: main
+  target_branch: main
+  finish: null
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 2
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 1
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: A1：URL 模式默认 models.dev、无本地 `opencode2`/`opencode` 但有网时，base=opencode
+      的表单加载后下拉出现 `opencode/*` 完整列表（含 `opencode-go` 源模型），不再只有 2 条内置。
+    result: passed
+    reason:
+      text: Default URL, opencode mapping, prefixing parse and auto-load in code; unit
+        tests pass.
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: A2：有映射的 base（如 claude/codex/gemini）在无本地 catalog/CLI 时，下拉出现 models.dev 对应
+      provider 列表（如 anthropic/openai/google 的裸 id），数量>内置表。
+    result: passed
+    reason:
+      text: Per-base provider mapping with parse/load tests passing.
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: A3：无映射的 base（如 goose/droid）且未指定文件/URL 时行为不变：不发起 HTTP，有 models.json
+      则用之、无则内置/空，不报错不卡顿。
+    result: passed
+    reason:
+      text: Unmapped base plus default URL skips HTTP; no background task; fallback
+        chain untouched.
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: A4：断网/8s 超时/URL 解析失败/文件缺失或非法时，下拉保留旧列表并显示红字失败原因，UI 不冻结；有 CLI 时回退本地 CLI
+      列表仍可用；缓存存在时离线可读缓存。
+    result: passed
+    reason:
+      text: Failure keeps old list with red-text reason, 8s timeouts, cache read on
+        failure, background task.
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: A5：`cargo test -p tty7-core agent_roles` 全过（含新增映射、解析、缓存回退、去重单测）；`cargo
+      check --bins` 通过；无新增重型依赖。
+    result: passed
+    reason:
+      text: 23/23 agent_roles tests, bins check, feature-gated build pass; no new
+        heavy deps.
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: A6：文件模式：按 `docs/agents/models-load-file.md` 手写一份
+      JSON，表单选「文件」填路径点加载，下拉出现文件内列表；重开表单仍在；非法文件报红字且保留旧表。
+    result: passed
+    reason:
+      text: Last-used source persists per base, form restores toggle+text on open,
+        list seeds from source-keyed cache; new unit tests pass.
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: A7：自定义 URL 与 launch 兜底：填自建镜像地址可加载；launch 行手写 `--model xxx`
+      时下拉不再追加（无重复传参，argv 只含一处 flag）；下拉选空 + launch 手写即兜底生效。
+    result: passed
+    reason:
+      text: Custom URL triggers load; launch dedup for bare and flag=value forms
+        tested.
+      truncated: false
+builder_handoff:
+  candidate_id: ccf7a6b4-12c2-417e-b15e-c1e5675fcef0
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:03fc2d72-046d-4e73-bbe9-7e6aece56c90
+  iteration: 2
+  summary:
+    text: "Round 2 (repair A6): per-base last-used source persisted
+      (models-cache/<slug>.source.json); form reopens restore toggle+text and
+      seed from source-keyed cache; new source_from_parts helper with unit
+      tests"
+    truncated: false
+  addressed_acceptance_ids:
+    - A6
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A7
+  checks:
+    - name:
+        text: cargo test -p tty7-core agent_roles
+        truncated: false
+      result: passed
+      note:
+        text: 23/23 pass (added source_from_parts, last-source roundtrip)
+        truncated: false
+    - name:
+        text: cargo check -p tty7-core --features remote-install
+        truncated: false
+      result: passed
+      note:
+        text: ok
+        truncated: false
+    - name:
+        text: cargo check --bins
+        truncated: false
+      result: passed
+      note:
+        text: no errors, no new warnings in touched files
+        truncated: false
+    - name:
+        text: GUI agent_roles_page test
+        truncated: false
+      result: passed
+      note:
+        text: 1 passed
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: Load-file flag field informational; launch flag still from model_flag
+        table
+      truncated: false
+    - text: "No native file dialog: file path is a text input"
+      truncated: false
+    - text: Unmapped bases skip default-URL HTTP; custom URL still attempted
+      truncated: false
+    - text: Builds without remote-install disable HTTP fetch
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-04T08:33:19.799Z
+blockers: []
+verification:
+  candidate_id: ccf7a6b4-12c2-417e-b15e-c1e5675fcef0
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:93a5f293-7a71-4ed2-9c78-b2333453c674
+  iteration: 2
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks: []
+  summary:
+    text: All 7 pass after A6 repair (last-source persistence plus cache seed on
+      open). No regressions.
+    truncated: false
+  risks:
+    - text: Live models.dev shape unverified without network; mismatch degrades to
+        error with fallback.
+      truncated: false
+    - text: GUI offline-reopen judged by inspection plus headless tests.
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-04T08:34:08.330Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: fail
+    unresolved_ids:
+      - A6
+    summary:
+      text: "A1-A5 and A7 pass; A6 fails on file-list reopen persistence. Next Build:
+        persist last-used source per base and seed form from cache on open."
+      truncated: false
+    completed_at: 2026-10-04T08:29:56.325Z
+  - goal_cycle: 1
+    iteration: 2
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: All 7 pass after A6 repair (last-source persistence plus cache seed on
+        open). No regressions.
+      truncated: false
+    completed_at: 2026-10-04T08:34:08.330Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-04T07:54:50.070Z
