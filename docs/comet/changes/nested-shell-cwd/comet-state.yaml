@@ -3,7 +3,7 @@ name: nested-shell-cwd
 language: zh-CN
 phase: archive
 status: active
-state_version: 11
+state_version: 12
 brief: brief.md
 document_constraints_version: 1
 shape_confirmation_hash: 5eaf634bc4b0110d7b3b3f75c170dac36c9c514b59fcb640aa063e0b6d4dda4e
