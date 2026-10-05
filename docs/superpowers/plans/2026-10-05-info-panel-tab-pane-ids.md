@@ -52,7 +52,7 @@ base-ref: 283dd1a21d71b28359c0a60336d18974e6ae2297
 - Consumes: existing `PanelCwd`/`PanelShell`/`PanelSsh` pattern and the `KEPT_IN_ENGLISH` + `ALL` consistency test in `src/ui/i18n/mod.rs:2100-2122`.
 - Produces: `L10nKey::PanelTabId`, `L10nKey::PanelPaneId`, `L10nKey::PanelOrdinal` usable via `t(...)` in Task 2/3.
 
-- [x] **Step 1: Declare the three enum variants**
+- [x] **Step 1: Declare the three enum variants** (tasks.md 1.1)
 
 In `src/ui/i18n/mod.rs`, insert after `PanelSsh,`:
 
@@ -73,7 +73,7 @@ PanelOrdinal,
 PanelBranch,
 ```
 
-- [x] **Step 2: Add the en strings**
+- [x] **Step 2: Add the en strings** (tasks.md 1.1)
 
 In `src/ui/i18n/en.rs`, insert after `L10nKey::PanelSsh => "ssh",`:
 
@@ -83,7 +83,7 @@ L10nKey::PanelPaneId => "pane id",
 L10nKey::PanelOrdinal => "tab",
 ```
 
-- [x] **Step 3: Add the zh-CN strings**
+- [x] **Step 3: Add the zh-CN strings** (tasks.md 1.1)
 
 In `src/ui/i18n/zh.rs`, insert after `L10nKey::PanelSsh => "ssh",`:
 
@@ -95,7 +95,7 @@ L10nKey::PanelOrdinal => "标签页",
 
 Each value differs from its en string, satisfying the consistency test.
 
-- [x] **Step 4: Add the ja strings**
+- [x] **Step 4: Add the ja strings** (tasks.md 1.1)
 
 In `src/ui/i18n/ja.rs`, insert after `L10nKey::PanelSsh => "ssh",`:
 
@@ -105,12 +105,12 @@ L10nKey::PanelPaneId => "ペイン ID",
 L10nKey::PanelOrdinal => "タブ",
 ```
 
-- [x] **Step 5: Run the locale consistency test**
+- [x] **Step 5: Run the locale consistency test** (tasks.md 1.1)
 
 Run: `cargo test -p tty7 i18n`
 Expected: PASS — all three locales resolve every new key, and none is byte-identical to en outside the allowlist (these keys are NOT added to `KEPT_IN_ENGLISH`).
 
-- [x] **Step 6: Commit**
+- [x] **Step 6: Commit** (tasks.md 1.1)
 
 ```bash
 git add src/ui/i18n/mod.rs src/ui/i18n/en.rs src/ui/i18n/zh.rs src/ui/i18n/ja.rs
@@ -129,7 +129,7 @@ git commit -m "feat(info-panel): add Tab ID / Pane ID / tab ordinal i18n keys"
 - Consumes: `L10nKey::PanelTabId` / `PanelPaneId` from Task 1; `tab: &Tab` with `tree_id: Cell<TabId>` (`src/ui/app.rs:521`); `view: &TerminalView` with `pane_id: u64` (`src/terminal/view.rs:307`), both already in scope inside the `detail_pane` block; `InfoRow::text` + `.copyable()` (`src/ui/right_panel.rs:421-439`).
 - Produces: two copyable `InfoValue::Text` rows in fixed position (ordinal row from Task 3 slots between the Pane ID push and the shell block).
 
-- [x] **Step 1: Insert the two rows**
+- [x] **Step 1: Insert the two rows** (tasks.md 1.2)
 
 In `render_panel_info`, immediately after the follow-switch `if` block's closing brace and before the `// A pane on the default shell runs ...` comment, insert:
 
@@ -140,7 +140,7 @@ rows.push(InfoRow::text(t(L10nKey::PanelPaneId), view.pane_id.to_string()).copya
 
 Notes the implementer must honor: `InfoValue::Text` (tail truncation handles the 36-char uuid in narrow panels; full value rides the copy tile, same contract as the branch row). No `reveal`, no `edit_cwd`, no `toggle_follow`. Both lines stay inside the `if let Some(leaf)` block so a split tab reports the last-focused leaf, matching the cwd/shell rows. The existing `rows.is_empty()` → `PanelNoSession` early return (~line 1063) is untouched — the rows cannot appear without a session.
 
-- [x] **Step 2: Write the failing row-construction test**
+- [x] **Step 2: Write the failing row-construction test** (tasks.md 1.2)
 
 Append to `mod tests` in `src/ui/right_panel.rs`:
 
@@ -175,16 +175,16 @@ fn id_rows_carry_raw_values_as_copy_payloads() {
 
 This test needs `InfoRow` field access — fields are private to the module, and `mod tests` is a child of the same module, so access is legal (same pattern as the existing `diff()` helper at line 2362). Run it before the render change is wired if the change is not yet in place; it passes on construction alone, so its real gate is Step 4.
 
-- [x] **Step 3: Write the focus-following regression test**
+- [x] **Step 3: Write the focus-following regression test** (tasks.md 1.2)
 
 The behavior under test: both pushes read `tab.tree_id.get()` and `view.pane_id` from the *focused leaf's* `view`, where `view` comes from `leaf.read(cx)` two lines above — the same `view` the cwd row uses. Refocusing a split changes which leaf `detail_pane` returns, so the Pane ID follows while the Tab ID (read from `tab`, not `leaf`) stays put. Encode this as a `#[gpui::test]` only if a multi-pane fixture exists in this repo's harness; otherwise verify by code inspection against the two source lines (`tab.tree_id.get()` vs `view.pane_id`) plus the manual pass in Task 4, and record which was done in the commit message. Do not invent a harness — grep for existing `detail_pane` gpui tests (e.g. `src/ui/app.rs` split tests near line 13483) and reuse their fixture verbatim if one fits.
 
-- [x] **Step 4: Run the panel tests**
+- [x] **Step 4: Run the panel tests** (tasks.md 1.2)
 
 Run: `cargo test -p tty7 right_panel`
 Expected: PASS, including `id_rows_carry_raw_values_as_copy_payloads` and all pre-existing tests (`a_row_lights_up_only_when_there_is_something_behind_it`, port tests).
 
-- [x] **Step 5: Commit**
+- [x] **Step 5: Commit** (tasks.md 1.2)
 
 ```bash
 git add src/ui/right_panel.rs
@@ -203,7 +203,7 @@ git commit -m "feat(info-panel): render Tab ID and Pane ID rows with copy tiles"
 - Consumes: the two pushes from Task 2 (insertion point); `MachineMirrors::machine(cx, host)` returning `Option<&Machine>`; host from `crate::core::session::WorkspaceStore::all(cx).get(self.workspace)` → `entry.host_id()` (same expression as `src/ui/switcher.rs:1050`); `EMPTY` dash const (`src/ui/right_panel.rs:377`); `L10nKey::PanelOrdinal` from Task 1.
 - Produces: ordinal row in final position (Tab ID, Pane ID, Tab `#`); `tab_ordinal(&Machine, TabId) -> Option<u64>` pure helper unit-tested for synced and unsynced cases.
 
-- [x] **Step 1: Add the pure ordinal helper**
+- [x] **Step 1: Add the pure ordinal helper** (tasks.md 2.1)
 
 Place near `format_rtt`:
 
@@ -232,7 +232,7 @@ fn tab_ordinal(
 
 Check the actual `Machine`/`TabId` paths against `crates/tty7-cli/src/resolve.rs:1-11` (`tty7_core::core::machine::{Machine, TabId}`) and the `TabEntry.tab` type — adjust the import path to whatever `right_panel.rs` already uses for core types; do not introduce a second naming.
 
-- [x] **Step 2: Insert the ordinal row**
+- [x] **Step 2: Insert the ordinal row** (tasks.md 2.1)
 
 Between the Pane ID push and the shell comment block, insert:
 
@@ -258,7 +258,7 @@ match ordinal_text {
 
 Verify before writing: `self.workspace` is the field holding this window's `WorkspaceId` (confirm the field name at the `WorkspaceStore::all(cx).get(...)` call sites and use the exact one); `entry.host_id()` returns the id type `MachineMirrors::machine` takes (cf. `src/ui/switcher.rs:1050` and `src/ui/machine_mirror.rs:497-506`); the fallback row carries `copy: None` (a dash is not worth copying) via plain `InfoRow::text` without `.copyable()`. Remote panes need no special casing: enumeration uses the pane's host mirror, and `pane_id` is displayed as-is.
 
-- [x] **Step 3: Write the failing helper tests**
+- [x] **Step 3: Write the failing helper tests** (tasks.md 2.1)
 
 Append to `mod tests`:
 
@@ -282,7 +282,7 @@ assert_eq!(tab_ordinal(&m, m.workspaces[0].tabs[1].id), Some(2));
 assert_eq!(tab_ordinal(&m, m.workspaces[1].tabs[0].id), Some(3));
 ```
 
-- [x] **Step 4: Cover the unsynced fallback**
+- [x] **Step 4: Cover the unsynced fallback** (tasks.md 2.1)
 
 ```rust
 #[test]
@@ -300,7 +300,7 @@ fn ordinal_missing_from_mirror_means_no_copy_payload() {
 
 Plus, if a `#[gpui::test]` fixture with a populated `MachineMirrors` entry exists (see `src/ui/machine_mirror.rs:848` pull-install pattern), add one integration assertion that `render_panel_info`'s row for a synced tab shows `@n` and for a store entry whose host has no machine shows `—`; otherwise rely on the Task 4 manual pass and say so in the commit message.
 
-- [x] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests** (tasks.md 2.1)
 
 Run: `cargo test -p tty7 right_panel`
 Expected: PASS — new ordinal tests plus all Task 2 tests green.
@@ -308,7 +308,7 @@ Expected: PASS — new ordinal tests plus all Task 2 tests green.
 Run: `cargo test -p tty7 i18n`
 Expected: PASS — `PanelOrdinal` still resolves in all locales.
 
-- [x] **Step 6: Commit**
+- [x] **Step 6: Commit** (tasks.md 2.1)
 
 ```bash
 git add src/ui/right_panel.rs
@@ -326,19 +326,19 @@ git commit -m "feat(info-panel): render machine-wide tab ordinal with dash fallb
 - Consumes: finished Tasks 1–3; live commands `tty7 tab ls --json` and `tty7 pane ls`.
 - Produces: the change's done criterion — Info rows match daemon truth, no other surface changed, full touched-crate suite green.
 
-- [x] **Step 1: Manual parity pass**
+- [x] **Step 1: Manual parity pass** (tasks.md 2.2)
 
 1. Open two same-named tabs plus a split in the second tab (three panes total across two tabs).
 2. Focus each pane in turn and read the Info panel: Tab ID equals the `id` field for that tab in `tty7 tab ls --json`; Pane ID equals the focused pane's id in `tty7 pane ls`; ordinal equals the tab's `@n` in `tty7 tab ls --json`.
 3. Disconnect/sync-lag case: with the daemon unreachable at startup (mirror not yet synced), confirm the ordinal cell shows `—` while both ID rows still render.
 4. Confirm the strip, sidebar, and switcher show no new rows (this change touches only `render_panel_info`).
 
-- [x] **Step 2: Run the full touched-crate suite**
+- [x] **Step 2: Run the full touched-crate suite** (tasks.md 2.2)
 
 Run: `cargo test -p tty7`
 Expected: PASS with zero failures. If the workspace layout puts the panel/i18n code in a differently named crate, substitute it (the crate containing `src/ui/right_panel.rs`) and record the exact command run.
 
-- [x] **Step 3: Record evidence and finish**
+- [x] **Step 3: Record evidence and finish** (tasks.md 2.2)
 
 Paste into the change record: the `@n`/id comparisons from Step 1 (tab ids, pane ids, ordinals vs CLI output), the `—` fallback observation, and the `cargo test` tail. No commit (no files change in this task). If any mismatch appears — ordinal off by one, pane id stale after refocus, an extra row in another surface — file it against Task 2/3 with the observed vs expected values and do not mark the change done.
 
