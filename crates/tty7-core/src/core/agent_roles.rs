@@ -233,6 +233,8 @@ pub fn model_flag(base: CLIAgent) -> Option<&'static str> {
         CLIAgent::Hermes => "--model",
         CLIAgent::Antigravity => "--model",
         CLIAgent::Empryo => "--model",
+        CLIAgent::Muse => "--model",
+        CLIAgent::Jcode => "--model",
     })
 }
 

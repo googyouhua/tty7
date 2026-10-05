@@ -71,7 +71,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "先にスマートフォンからのアクセスをオンにしてください。"
         }
         L10nKey::SettingsMobilePairScan => {
-            "スマートフォンの tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
+            "スマートフォンのカメラを向けるか、tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
         }
         L10nKey::SettingsMobilePairValid => {
             "あと {time} で失効します。1 台のスマートフォンに限ります。"
@@ -328,6 +328,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsLanguageRussian => "Русский",
         L10nKey::SettingsSearchLanguageKeywords => {
             "言語 ロケール 英語 中国語 language locale english chinese"
         }
@@ -969,6 +970,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentEmpryo => "Empryo",
+        L10nKey::SettingsAgentJcode => "jcode",
+        L10nKey::SettingsAgentMuse => "Muse Code",
+        L10nKey::SettingsMuseManualInstall => "手動インストールが必要",
+        L10nKey::AppAgentHooksMuseManualInstall => "対象のマシンで実行: {command}",
         L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
@@ -1130,6 +1136,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchPrimeAgentKeywords => {
             "エージェント 統合 拡張 インストール prime prime-agent primeintellect agent integration extension install"
+        }
+        L10nKey::SettingsSearchEmpryoKeywords => {
+            "エージェント 統合 フック インストール empryo agent integration hooks install"
+        }
+        L10nKey::SettingsSearchJcodeKeywords => {
+            "エージェント 統合 フック インストール jcode agent integration hooks install"
+        }
+        L10nKey::SettingsSearchMuseKeywords => {
+            "エージェント 統合 フック プラグイン インストール muse meta agent integration hooks plugins install"
         }
         L10nKey::SettingsSearchAntigravityKeywords => {
             "エージェント 統合 フック インストール antigravity agy google agent integration hooks install"
