@@ -994,9 +994,9 @@ impl Tty7App {
                             toggle_follow: true,
                         });
                     }
-                    rows.push(InfoRow::text(t(L10nKey::PanelTabId), tab.tree_id.get().to_string()).copyable());
-                    rows.push(InfoRow::text(t(L10nKey::PanelPaneId), view.pane_id.to_string()).copyable());
                 }
+                rows.push(InfoRow::text(t(L10nKey::PanelTabId), tab.tree_id.get().to_string()).copyable());
+                rows.push(InfoRow::text(t(L10nKey::PanelPaneId), view.pane_id.to_string()).copyable());
                 // A pane on the default shell runs whatever the server picked,
                 // which is not always the login shell the inventory names: a
                 // server started from bash spawns bash. The process at the root
