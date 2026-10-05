@@ -203,7 +203,7 @@ git commit -m "feat(info-panel): render Tab ID and Pane ID rows with copy tiles"
 - Consumes: the two pushes from Task 2 (insertion point); `MachineMirrors::machine(cx, host)` returning `Option<&Machine>`; host from `crate::core::session::WorkspaceStore::all(cx).get(self.workspace)` → `entry.host_id()` (same expression as `src/ui/switcher.rs:1050`); `EMPTY` dash const (`src/ui/right_panel.rs:377`); `L10nKey::PanelOrdinal` from Task 1.
 - Produces: ordinal row in final position (Tab ID, Pane ID, Tab `#`); `tab_ordinal(&Machine, TabId) -> Option<u64>` pure helper unit-tested for synced and unsynced cases.
 
-- [ ] **Step 1: Add the pure ordinal helper**
+- [x] **Step 1: Add the pure ordinal helper**
 
 Place near `format_rtt`:
 
@@ -232,7 +232,7 @@ fn tab_ordinal(
 
 Check the actual `Machine`/`TabId` paths against `crates/tty7-cli/src/resolve.rs:1-11` (`tty7_core::core::machine::{Machine, TabId}`) and the `TabEntry.tab` type — adjust the import path to whatever `right_panel.rs` already uses for core types; do not introduce a second naming.
 
-- [ ] **Step 2: Insert the ordinal row**
+- [x] **Step 2: Insert the ordinal row**
 
 Between the Pane ID push and the shell comment block, insert:
 
@@ -258,7 +258,7 @@ match ordinal_text {
 
 Verify before writing: `self.workspace` is the field holding this window's `WorkspaceId` (confirm the field name at the `WorkspaceStore::all(cx).get(...)` call sites and use the exact one); `entry.host_id()` returns the id type `MachineMirrors::machine` takes (cf. `src/ui/switcher.rs:1050` and `src/ui/machine_mirror.rs:497-506`); the fallback row carries `copy: None` (a dash is not worth copying) via plain `InfoRow::text` without `.copyable()`. Remote panes need no special casing: enumeration uses the pane's host mirror, and `pane_id` is displayed as-is.
 
-- [ ] **Step 3: Write the failing helper tests**
+- [x] **Step 3: Write the failing helper tests**
 
 Append to `mod tests`:
 
@@ -282,7 +282,7 @@ assert_eq!(tab_ordinal(&m, m.workspaces[0].tabs[1].id), Some(2));
 assert_eq!(tab_ordinal(&m, m.workspaces[1].tabs[0].id), Some(3));
 ```
 
-- [ ] **Step 4: Cover the unsynced fallback**
+- [x] **Step 4: Cover the unsynced fallback**
 
 ```rust
 #[test]
@@ -300,7 +300,7 @@ fn ordinal_missing_from_mirror_means_no_copy_payload() {
 
 Plus, if a `#[gpui::test]` fixture with a populated `MachineMirrors` entry exists (see `src/ui/machine_mirror.rs:848` pull-install pattern), add one integration assertion that `render_panel_info`'s row for a synced tab shows `@n` and for a store entry whose host has no machine shows `—`; otherwise rely on the Task 4 manual pass and say so in the commit message.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p tty7 right_panel`
 Expected: PASS — new ordinal tests plus all Task 2 tests green.
@@ -308,7 +308,7 @@ Expected: PASS — new ordinal tests plus all Task 2 tests green.
 Run: `cargo test -p tty7 i18n`
 Expected: PASS — `PanelOrdinal` still resolves in all locales.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/ui/right_panel.rs
