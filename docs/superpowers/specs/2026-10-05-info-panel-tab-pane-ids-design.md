@@ -2,6 +2,8 @@
 comet_change: info-panel-tab-pane-ids
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-10-05-info-panel-tab-pane-ids
+status: final
 ---
 
 # Design Doc: Tab/Pane IDs in the Info Panel

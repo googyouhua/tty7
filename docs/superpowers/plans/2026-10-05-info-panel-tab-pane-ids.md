@@ -2,6 +2,7 @@
 change: info-panel-tab-pane-ids
 design-doc: docs/superpowers/specs/2026-10-05-info-panel-tab-pane-ids-design.md
 base-ref: 283dd1a21d71b28359c0a60336d18974e6ae2297
+archived-with: 2026-10-05-info-panel-tab-pane-ids
 ---
 <!-- comet-task-authority: docs/openspec/changes/info-panel-tab-pane-ids/tasks.md -->
 <!-- comet-task-ref:9621092b-ae83-4f3b-b8a8-b870eb62e877 -->

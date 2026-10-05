@@ -1,0 +1,16 @@
+{
+  "change": "info-panel-tab-pane-ids",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "task_hash_policy": "task-content-v1",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "1e64e92fbaf706d7e887f1428c7596b0886d60e555ad9dc09605ff4456fb15e1",
+  "files": [
+    { "path": "docs/openspec/changes/info-panel-tab-pane-ids/proposal.md", "sha256": "29d350d26111502aaae07d6c9f194a7cc1b96155a1332072bef455321aa1cde7" },
+    { "path": "docs/openspec/changes/info-panel-tab-pane-ids/design.md", "sha256": "eecac176ce31543592d9ec75c3f32d1a569457ccf5833ebd124d577fb49f8e66" },
+    { "path": "docs/openspec/changes/info-panel-tab-pane-ids/tasks.md", "sha256": "5a9f30084142823d85b628483d6f11100c3b31d7d1c92d050e2d617cdd37af2e" },
+    { "path": "docs/openspec/changes/info-panel-tab-pane-ids/.openspec.yaml", "sha256": "c956e2a907cf0aa23d948e300827f91e46ab77d64e288d98285dfe990bb0d989" },
+    { "path": "docs/openspec/changes/info-panel-tab-pane-ids/specs/info-panel-ids/spec.md", "sha256": "ca3d2620268746d6424a82eda33f14a9f03442cc1597c00e034ce6b8bcee069a" }
+  ]
+}

@@ -1,0 +1,334 @@
+   Compiling tty7-cli v26.9.4 (/ws/tty7/crates/tty7-cli)
+   Compiling tty7-server v26.9.4 (/ws/tty7/crates/tty7-server)
+   Compiling tty7 v26.9.4 (/ws/tty7)
+warning: constant `ENV_INSTANCE_ROOT` is never used
+  --> crates/tty7-cli/src/address.rs:20:11
+   |
+20 | pub const ENV_INSTANCE_ROOT: &str = tty7_core::core::instance::ENV_INSTANCE_ROOT;
+   |           ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `instance_dir` is never used
+  --> crates/tty7-cli/src/address.rs:36:8
+   |
+36 | pub fn instance_dir(name: &str, root: Option<&str>, home: Option<&str>) -> Result<PathBuf> {
+   |        ^^^^^^^^^^^^
+
+warning: `tty7-cli` (bin "tty7") generated 2 warnings
+warning: unused import: `crate::ui::host_ops::Host`
+    --> src/ui/right_panel.rs:2141:33
+     |
+2141 | ...                   use crate::ui::host_ops::Host as _;
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/ui/app.rs:3393:13
+     |
+3393 |         let mut failure = match self.place_forward(&route, rule.clone()) {
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `repo`
+   --> src/ui/panel_review.rs:371:9
+    |
+371 |         repo: &RepoKey,
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_repo`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `backdrop`
+   --> src/ui/theme.rs:403:5
+    |
+403 |     backdrop: WindowBackdrop,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_backdrop`
+
+warning: type `LoopbackPlan` is more private than the item `port_route_of`
+   --> src/terminal/view.rs:619:1
+    |
+619 | pub(crate) fn port_route_of(plan: &LoopbackPlan, local: bool) -> PortRoute {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `port_route_of` is reachable at visibility `pub(crate)`
+    |
+note: but type `LoopbackPlan` is only usable at visibility `pub(in crate::terminal)`
+   --> src/terminal/view.rs:605:1
+    |
+605 | pub(super) enum LoopbackPlan {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `CwdEdit` is more private than the item `RightPanelState::cwd_edit`
+   --> src/ui/right_panel.rs:309:5
+    |
+309 |     pub(crate) cwd_edit: Option<CwdEdit>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `RightPanelState::cwd_edit` is reachable at visibility `pub(crate)`
+    |
+note: but type `CwdEdit` is only usable at visibility `pub(self)`
+   --> src/ui/right_panel.rs:235:1
+    |
+235 | struct CwdEdit {
+    | ^^^^^^^^^^^^^^
+
+warning: constant `DIRECTORY_KEY` is never used
+  --> src/core/explorer_context_menu.rs:22:7
+   |
+22 | const DIRECTORY_KEY: &str = r"Software\Classes\Directory\shell\tty7";
+   |       ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `BACKGROUND_KEY` is never used
+  --> src/core/explorer_context_menu.rs:23:7
+   |
+23 | const BACKGROUND_KEY: &str = r"Software\Classes\Directory\Background\shell\tty7";
+   |       ^^^^^^^^^^^^^^
+
+warning: enum `Location` is never used
+  --> src/core/explorer_context_menu.rs:26:6
+   |
+26 | enum Location {
+   |      ^^^^^^^^
+
+warning: methods `key`, `label`, and `placeholder` are never used
+  --> src/core/explorer_context_menu.rs:32:8
+   |
+31 | impl Location {
+   | ------------- methods in this implementation
+32 |     fn key(self) -> &'static str {
+   |        ^^^
+...
+47 |     fn label(self) -> &'static str {
+   |        ^^^^^
+...
+54 |     fn placeholder(self) -> &'static str {
+   |        ^^^^^^^^^^^
+
+warning: struct `Registration` is never constructed
+  --> src/core/explorer_context_menu.rs:65:8
+   |
+65 | struct Registration {
+   |        ^^^^^^^^^^^^
+
+warning: function `replace_entry_with` is never used
+  --> src/core/explorer_context_menu.rs:71:4
+   |
+71 | fn replace_entry_with(
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/core/explorer_context_menu.rs:84:8
+   |
+83 | impl Registration {
+   | ----------------- associated function in this implementation
+84 |     fn new(location: Location, app: &Path) -> Self {
+   |        ^^^
+
+warning: function `quoted_open_command` is never used
+   --> src/core/explorer_context_menu.rs:127:4
+    |
+127 | fn quoted_open_command(executable: &Path, placeholder: &str) -> OsString {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `application_path` is never used
+   --> src/core/explorer_context_menu.rs:136:4
+    |
+136 | fn application_path() -> Result<PathBuf> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `registrations` is never used
+   --> src/core/explorer_context_menu.rs:143:4
+    |
+143 | fn registrations(app: &Path) -> [Registration; 2] {
+    |    ^^^^^^^^^^^^^
+
+warning: methods `known_status` and `probed` are never used
+   --> src/terminal/git_data.rs:405:12
+    |
+391 | impl ScmData {
+    | ------------ methods in this implementation
+...
+405 |     pub fn known_status(
+    |            ^^^^^^^^^^^^
+...
+415 |     pub fn probed(&self, host: HostId, root: &Path) -> bool {
+    |            ^^^^^^
+
+warning: variant `Pending` is never constructed
+  --> src/terminal/onekey.rs:25:5
+   |
+23 | pub enum OneKeyAction {
+   |          ------------ variant in this enum
+24 |     /// Keep interacting (filter/cursor changed).
+25 |     Pending,
+   |     ^^^^^^^
+   |
+   = note: `OneKeyAction` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `set_filter`, `cancel`, and `entry_count` are never used
+   --> src/terminal/onekey.rs:75:12
+    |
+ 39 | impl OneKeyPicker {
+    | ----------------- associated items in this implementation
+...
+ 75 |     pub fn set_filter(&mut self, filter: String) {
+    |            ^^^^^^^^^^
+...
+139 |     pub fn cancel() -> OneKeyAction {
+    |            ^^^^^^
+...
+143 |     pub fn entry_count(&self) -> usize {
+    |            ^^^^^^^^^^^
+
+warning: associated function `local` is never used
+   --> src/terminal/search.rs:957:12
+    |
+954 | impl LinkRoots {
+    | -------------- associated function in this implementation
+...
+957 |     pub fn local(dirs: Vec<PathBuf>) -> Self {
+    |            ^^^^^
+
+warning: method `manual_cwd` is never used
+    --> src/terminal/view.rs:2359:12
+     |
+1564 | impl TerminalView {
+     | ----------------- method in this implementation
+...
+2359 |     pub fn manual_cwd(&self) -> Option<&std::path::Path> {
+     |            ^^^^^^^^^^
+
+warning: function `tile_trailing_inset_sm` is never used
+   --> src/ui/app.rs:297:15
+    |
+297 | pub(crate) fn tile_trailing_inset_sm() -> f32 {
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `leaf_title_and_home` is never used
+   --> src/ui/app.rs:693:19
+    |
+571 | impl Tab {
+    | -------- method in this implementation
+...
+693 |     pub(crate) fn leaf_title_and_home(
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `with_session`, `active_ssh_pane`, and `active_connected_native_ssh_pane` are never used
+    --> src/ui/app.rs:1469:19
+     |
+1336 | impl Tty7App {
+     | ------------ associated items in this implementation
+...
+1469 |     pub(crate) fn with_session(
+     |                   ^^^^^^^^^^^^
+...
+8513 |     pub(crate) fn active_ssh_pane(
+     |                   ^^^^^^^^^^^^^^^
+...
+8528 |     pub(crate) fn active_connected_native_ssh_pane(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `t_select` is never used
+    --> src/ui/i18n/mod.rs:1985:8
+     |
+1985 | pub fn t_select(key: L10nKey, branch: &'static str, args: &[(&str, &str)]) -> String {
+     |        ^^^^^^^^
+
+warning: field `passthrough` is never read
+   --> src/ui/instance_picker.rs:161:5
+    |
+155 | pub struct InstancePicker {
+    |            -------------- field in this struct
+...
+161 |     passthrough: Vec<OsString>,
+    |     ^^^^^^^^^^^
+
+warning: methods `review_send_to_new_agent`, `review_send_edit`, and `deliver_review_to_new_agent` are never used
+   --> src/ui/review_actions.rs:197:19
+    |
+ 54 | impl Tty7App {
+    | ------------ methods in this implementation
+...
+197 |     pub(crate) fn review_send_to_new_agent(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+329 |     pub(crate) fn review_send_edit(
+    |                   ^^^^^^^^^^^^^^^^
+...
+375 |     pub(crate) fn deliver_review_to_new_agent(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `drafts_for_source`, and `draft_count_for_source` are never used
+   --> src/ui/review_state.rs:106:12
+    |
+105 | impl ReviewState {
+    | ---------------- associated items in this implementation
+106 |     pub fn new() -> Self {
+    |            ^^^
+...
+127 |     pub fn drafts_for_source(&self, source_tag: &str) -> Vec<&ReviewDraft> {
+    |            ^^^^^^^^^^^^^^^^^
+...
+137 |     pub fn draft_count_for_source(&self, source_tag: &str) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `step` is never used
+   --> src/ui/search/mod.rs:104:19
+    |
+ 41 | impl SearchTab {
+    | -------------- method in this implementation
+...
+104 |     pub(crate) fn step(self, forward: bool) -> SearchTab {
+    |                   ^^^^
+
+warning: field `k07` is never read
+  --> src/ui/settings/kit.rs:37:9
+   |
+30 | pub(crate) struct Tk {
+   |                   -- field in this struct
+...
+37 |     pub k07: Hsla,
+   |         ^^^
+   |
+   = note: `Tk` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: function `workspace_avatar` is never used
+    --> src/ui/tab_strip.rs:1286:15
+     |
+1286 | pub(crate) fn workspace_avatar(
+     |               ^^^^^^^^^^^^^^^^
+
+warning: function `windows_background_appearance` is never used
+   --> src/ui/theme.rs:293:15
+    |
+293 | pub(crate) fn windows_background_appearance(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `supported_backdrops_for` is never used
+   --> src/ui/theme.rs:353:15
+    |
+353 | pub(crate) fn supported_backdrops_for(build: u32) -> &'static [WindowBackdrop] {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sender` is never used
+  --> src/ui/tray/mod.rs:50:15
+   |
+50 | pub(crate) fn sender() -> Option<smol::channel::Sender<TrayAction>> {
+   |               ^^^^^^
+
+warning: field `height` is never read
+ --> src/ui/tray/icon.rs:7:9
+  |
+4 | pub(super) struct RgbaImage {
+  |                   --------- field in this struct
+...
+7 |     pub height: u32,
+  |         ^^^^^^
+
+warning: `tty7` (bin "tty7-app") generated 35 warnings (run `cargo fix --bin "tty7-app" -p tty7` to apply 3 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 52.68s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
