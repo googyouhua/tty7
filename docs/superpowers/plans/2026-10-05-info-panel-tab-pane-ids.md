@@ -129,7 +129,7 @@ git commit -m "feat(info-panel): add Tab ID / Pane ID / tab ordinal i18n keys"
 - Consumes: `L10nKey::PanelTabId` / `PanelPaneId` from Task 1; `tab: &Tab` with `tree_id: Cell<TabId>` (`src/ui/app.rs:521`); `view: &TerminalView` with `pane_id: u64` (`src/terminal/view.rs:307`), both already in scope inside the `detail_pane` block; `InfoRow::text` + `.copyable()` (`src/ui/right_panel.rs:421-439`).
 - Produces: two copyable `InfoValue::Text` rows in fixed position (ordinal row from Task 3 slots between the Pane ID push and the shell block).
 
-- [ ] **Step 1: Insert the two rows**
+- [x] **Step 1: Insert the two rows**
 
 In `render_panel_info`, immediately after the follow-switch `if` block's closing brace and before the `// A pane on the default shell runs ...` comment, insert:
 
@@ -140,7 +140,7 @@ rows.push(InfoRow::text(t(L10nKey::PanelPaneId), view.pane_id.to_string()).copya
 
 Notes the implementer must honor: `InfoValue::Text` (tail truncation handles the 36-char uuid in narrow panels; full value rides the copy tile, same contract as the branch row). No `reveal`, no `edit_cwd`, no `toggle_follow`. Both lines stay inside the `if let Some(leaf)` block so a split tab reports the last-focused leaf, matching the cwd/shell rows. The existing `rows.is_empty()` → `PanelNoSession` early return (~line 1063) is untouched — the rows cannot appear without a session.
 
-- [ ] **Step 2: Write the failing row-construction test**
+- [x] **Step 2: Write the failing row-construction test**
 
 Append to `mod tests` in `src/ui/right_panel.rs`:
 
@@ -175,16 +175,16 @@ fn id_rows_carry_raw_values_as_copy_payloads() {
 
 This test needs `InfoRow` field access — fields are private to the module, and `mod tests` is a child of the same module, so access is legal (same pattern as the existing `diff()` helper at line 2362). Run it before the render change is wired if the change is not yet in place; it passes on construction alone, so its real gate is Step 4.
 
-- [ ] **Step 3: Write the focus-following regression test**
+- [x] **Step 3: Write the focus-following regression test**
 
 The behavior under test: both pushes read `tab.tree_id.get()` and `view.pane_id` from the *focused leaf's* `view`, where `view` comes from `leaf.read(cx)` two lines above — the same `view` the cwd row uses. Refocusing a split changes which leaf `detail_pane` returns, so the Pane ID follows while the Tab ID (read from `tab`, not `leaf`) stays put. Encode this as a `#[gpui::test]` only if a multi-pane fixture exists in this repo's harness; otherwise verify by code inspection against the two source lines (`tab.tree_id.get()` vs `view.pane_id`) plus the manual pass in Task 4, and record which was done in the commit message. Do not invent a harness — grep for existing `detail_pane` gpui tests (e.g. `src/ui/app.rs` split tests near line 13483) and reuse their fixture verbatim if one fits.
 
-- [ ] **Step 4: Run the panel tests**
+- [x] **Step 4: Run the panel tests**
 
 Run: `cargo test -p tty7 right_panel`
 Expected: PASS, including `id_rows_carry_raw_values_as_copy_payloads` and all pre-existing tests (`a_row_lights_up_only_when_there_is_something_behind_it`, port tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/ui/right_panel.rs
