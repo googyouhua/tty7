@@ -33,10 +33,12 @@ pub enum CLIAgent {
     PrimeAgent,
     QoderCLICn,
     OpenCode2,
+    Muse,
+    Jcode,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 27] = [
+    pub const ALL: [CLIAgent; 29] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -66,6 +68,8 @@ impl CLIAgent {
         CLIAgent::CodeBuddy,
         CLIAgent::Empryo,
         CLIAgent::PrimeAgent,
+        CLIAgent::Muse,
+        CLIAgent::Jcode,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -124,6 +128,8 @@ impl CLIAgent {
             // avatar until it exits is the cost of catching the short name.
             CLIAgent::CodeBuddy => &["codebuddy", "codebuddy-code", "cbc"],
             CLIAgent::Empryo => &["empryo"],
+            CLIAgent::Muse => &["muse"],
+            CLIAgent::Jcode => &["jcode"],
             CLIAgent::PrimeAgent => &["prime-agent"],
         }
     }
@@ -155,6 +161,8 @@ impl CLIAgent {
             CLIAgent::Crush => "crush",
             CLIAgent::CodeBuddy => "codebuddy",
             CLIAgent::Empryo => "empryo",
+            CLIAgent::Muse => "muse",
+            CLIAgent::Jcode => "jcode",
             CLIAgent::PrimeAgent => "prime-agent",
             CLIAgent::QoderCLICn => "qoderclicn",
         }
@@ -192,6 +200,8 @@ impl CLIAgent {
             CLIAgent::Crush => "Crush",
             CLIAgent::CodeBuddy => "CodeBuddy",
             CLIAgent::Empryo => "Empryo",
+            CLIAgent::Muse => "Muse Code",
+            CLIAgent::Jcode => "jcode",
             CLIAgent::PrimeAgent => "Prime Agent",
             CLIAgent::QoderCLICn => "Qoder CN CLI",
         }
@@ -234,6 +244,9 @@ impl CLIAgent {
             CLIAgent::Crush => Some(format!("crush{flags} --session {session_id}")),
             CLIAgent::CodeBuddy => Some(format!("codebuddy{flags} --resume {session_id}")),
             CLIAgent::Empryo => Some(format!("empryo{flags} --session {session_id}")),
+            // Root options may sit on either side of `resume`.
+            CLIAgent::Muse => Some(format!("muse{flags} resume {session_id}")),
+            CLIAgent::Jcode => Some(format!("jcode{flags} --resume {session_id}")),
             CLIAgent::PrimeAgent => Some(format!("prime-agent{flags} --resume {session_id}")),
             _ => None,
         }
@@ -427,7 +440,7 @@ impl CLIAgent {
         let named = argv.iter().position(|t| names_self(t))?;
         let mut tail: Vec<&str> = argv[named + 1..].iter().map(String::as_str).collect();
 
-        if matches!(self, CLIAgent::Codex | CLIAgent::TraeCode)
+        if matches!(self, CLIAgent::Codex | CLIAgent::TraeCode | CLIAgent::Muse)
             && matches!(tail.first(), Some(&"resume") | Some(&"fork"))
         {
             tail.remove(0);
@@ -529,6 +542,9 @@ impl CLIAgent {
             // empryo resumes with `--session <id>`; `--save-session` only
             // applies to headless runs and is not a session selector.
             CLIAgent::Empryo => &["--session"],
+            // `muse resume --last` picks the newest session instead of the id.
+            CLIAgent::Muse => &["--last"],
+            CLIAgent::Jcode => &["--resume"],
             // `--resume`/`-r` is Kimi's hidden alias for `--session`/`-S`.
             // `--agent`/`--agent-file` bind the main agent at session creation
             // and Kimi rejects either next to `--session` outright; resuming
@@ -648,6 +664,8 @@ impl CLIAgent {
             // The blue-violet field Charm ships the Crush heart on.
             CLIAgent::Crush => 0x6B50FF,
             CLIAgent::Empryo => 0xE8663D,
+            CLIAgent::Muse => 0x0866FF,
+            CLIAgent::Jcode => 0x111111,
             CLIAgent::PrimeAgent => 0x111111,
             // The near-black field CodeBuddy's own app icon sits on.
             CLIAgent::CodeBuddy => 0x1F1F1F,
@@ -703,11 +721,20 @@ impl CLIAgent {
             | CLIAgent::Vibe
             | CLIAgent::Antigravity
             | CLIAgent::Empryo
-            | CLIAgent::PrimeAgent => "icons/bot.svg",
+            | CLIAgent::PrimeAgent
+            | CLIAgent::Muse
+            | CLIAgent::Jcode => "icons/bot.svg",
         }
     }
 
     fn match_token(token: &str) -> Option<CLIAgent> {
+        // Muse Code's `muse` launcher execs a versioned binary,
+        // `muse-bin-<version>`, so that is the name the process runs under.
+        let token = if token.starts_with("muse-bin-") {
+            "muse"
+        } else {
+            token
+        };
         CLIAgent::ALL
             .into_iter()
             .find(|a| a.aliases().contains(&token))
@@ -1550,7 +1577,9 @@ mod tests {
                 "vibe",
                 "antigravity",
                 "empryo",
-                "prime-agent"
+                "prime-agent",
+                "muse",
+                "jcode"
             ]
         );
         assert!(
@@ -1565,6 +1594,54 @@ mod tests {
                 a.display_name()
             );
         }
+    }
+
+    #[test]
+    fn muse_and_jcode_are_detected_and_resume() {
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["muse", "--yolo"])),
+            Some(CLIAgent::Muse)
+        );
+        // The `muse` launcher execs a versioned binary.
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&[
+                "/home/me/.local/share/muse/muse-bin-1.4.2",
+                "--yolo"
+            ])),
+            Some(CLIAgent::Muse)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["/home/me/.jcode/builds/stable/jcode"])),
+            Some(CLIAgent::Jcode)
+        );
+        assert_eq!(CLIAgent::from_slug("muse"), Some(CLIAgent::Muse));
+        assert_eq!(CLIAgent::from_slug("jcode"), Some(CLIAgent::Jcode));
+        assert_eq!(
+            CLIAgent::Muse
+                .resume_command("s-1", Some(&argv(&["muse", "--yolo"])))
+                .as_deref(),
+            Some("muse --yolo resume s-1")
+        );
+        assert_eq!(
+            CLIAgent::Muse
+                .resume_command("s-1", Some(&argv(&["muse", "resume", "old", "--yolo"])))
+                .as_deref(),
+            Some("muse --yolo resume s-1")
+        );
+        assert_eq!(
+            CLIAgent::Muse
+                .resume_command("s-1", Some(&argv(&["muse", "resume", "--last", "--yolo"])))
+                .as_deref(),
+            Some("muse --yolo resume s-1")
+        );
+        assert_eq!(
+            CLIAgent::Jcode
+                .resume_command("s-1", Some(&argv(&["jcode", "--resume", "old"])))
+                .as_deref(),
+            Some("jcode --resume s-1")
+        );
+        assert_eq!(CLIAgent::Muse.fork_command("s-1", None), None);
+        assert_eq!(CLIAgent::Jcode.fork_command("s-1", None), None);
     }
 
     #[test]

@@ -63,7 +63,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsMobilePairDesc => "Shows a one-time code for the tty7 app on your phone.",
         L10nKey::SettingsMobilePairNeedsAccess => "Turn on phone access first.",
         L10nKey::SettingsMobilePairScan => {
-            "Scan this with the tty7 app on your phone, or copy the code and paste it there."
+            "Point your phone's camera at this, or scan it in the tty7 app, or copy the code and paste it there."
         }
         L10nKey::SettingsMobilePairValid => "Expires in {time}. Works for one phone.",
         L10nKey::SettingsMobileNewCode => "New code",
@@ -309,6 +309,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsLanguageRussian => "Русский",
         L10nKey::SettingsSearchLanguageKeywords => "language, locale, english, chinese",
         L10nKey::SettingsTransparency => "Transparency",
         L10nKey::SettingsOpacity => "Opacity",
@@ -966,6 +967,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentEmpryo => "Empryo",
+        L10nKey::SettingsAgentJcode => "jcode",
+        L10nKey::SettingsAgentMuse => "Muse Code",
+        L10nKey::SettingsMuseManualInstall => "Manual install required",
+        L10nKey::AppAgentHooksMuseManualInstall => "Run on the remote host: {command}",
         L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
@@ -1082,6 +1088,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchPrimeAgentKeywords => {
             "agent integration extension install prime prime-agent primeintellect"
         }
+        L10nKey::SettingsSearchEmpryoKeywords => "agent integration hooks install empryo",
+        L10nKey::SettingsSearchJcodeKeywords => "agent integration hooks install jcode",
+        L10nKey::SettingsSearchMuseKeywords => "agent integration hooks plugins install muse meta",
         L10nKey::SettingsSearchAntigravityKeywords => {
             "agent integration hooks install antigravity agy google"
         }

@@ -662,6 +662,21 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchAntigravityKeywords,
         },
         SearchEntry {
+            section: Agents,
+            title: SettingsAgentEmpryo,
+            keywords: SettingsSearchEmpryoKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentJcode,
+            keywords: SettingsSearchJcodeKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentMuse,
+            keywords: SettingsSearchMuseKeywords,
+        },
+        SearchEntry {
             section: AgentRoles,
             title: SettingsRolesIntro,
             keywords: SettingsRoleSearchKeywords,
@@ -3114,7 +3129,7 @@ mod tests {
 
     #[test]
     fn config_keys_and_cross_language_names_reach_the_same_setting() {
-        for locale in ["en", "zh-CN", "ja-JP"] {
+        for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
             crate::ui::i18n::set_locale(locale);
             for (query, title, section) in [
                 (
@@ -3166,7 +3181,7 @@ mod tests {
         ] {
             crate::ui::i18n::set_locale("en");
             let expected = settings_row_id(t(key), "");
-            for locale in ["zh-CN", "ja-JP"] {
+            for locale in ["zh-CN", "ja-JP", "ru-RU"] {
                 crate::ui::i18n::set_locale(locale);
                 assert_eq!(settings_row_id(t(key), ""), expected);
             }
@@ -3196,7 +3211,7 @@ mod tests {
             .find(|e| e.title == L10nKey::SettingsAutoHideTitlebarButtons)
             .unwrap();
         assert!(entry.section == SettingsSection::Appearance);
-        for locale in ["en", "zh-CN", "ja-JP"] {
+        for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
             crate::ui::i18n::set_locale(locale);
             let name = t(L10nKey::SettingsAutoHideTitlebarButtons);
             for query in ["auto_hide_titlebar_buttons", name] {
