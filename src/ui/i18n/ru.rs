@@ -758,7 +758,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Показывается в поиске и строках запуска; идентификатор создаётся из него один раз."
         }
         L10nKey::SettingsRoleBase => "Базовый агент",
-        L10nKey::SettingsRoleBaseDesc => "Распознавание, состояние и продолжение сеанса — от этого агента.",
+        L10nKey::SettingsRoleBaseDesc => {
+            "Распознавание, состояние и продолжение сеанса — от этого агента."
+        }
         L10nKey::SettingsRoleLaunch => "Команда запуска",
         L10nKey::SettingsRoleLaunchDesc => {
             "Вводится в новую оболочку. Пустое поле — запуск голого бинарника базового агента."
@@ -779,7 +781,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRoleInstructions => "Инструкции",
         L10nKey::SettingsRoleInstructionsDesc => "Отправляются первыми при каждом новом запуске.",
         L10nKey::SettingsRoleStarters => "Начала разговора",
-        L10nKey::SettingsRoleStartersDesc => "До трёх; выберите одно в меню панели, чтобы отправить.",
+        L10nKey::SettingsRoleStartersDesc => {
+            "До трёх; выберите одно в меню панели, чтобы отправить."
+        }
         L10nKey::SettingsRoleNameRequired => "Дайте роли название.",
         L10nKey::SettingsRoleFollowupMissed => {
             "Агент так и не запустился, поэтому инструкции роли пропущены. При необходимости отправьте одну из меню панели."

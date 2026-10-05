@@ -1016,8 +1016,12 @@ impl Tty7App {
                         });
                     }
                 }
-                rows.push(InfoRow::text(t(L10nKey::PanelTabId), tab.tree_id.get().to_string()).copyable());
-                rows.push(InfoRow::text(t(L10nKey::PanelPaneId), view.pane_id.to_string()).copyable());
+                rows.push(
+                    InfoRow::text(t(L10nKey::PanelTabId), tab.tree_id.get().to_string()).copyable(),
+                );
+                rows.push(
+                    InfoRow::text(t(L10nKey::PanelPaneId), view.pane_id.to_string()).copyable(),
+                );
                 let ordinal_text = crate::core::session::WorkspaceStore::all(cx)
                     .get(self.workspace)
                     .and_then(|entry| {
