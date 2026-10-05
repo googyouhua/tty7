@@ -6,4 +6,4 @@
 ## 2. Ordinal parity and verification
 
 - [x] 2.1 Derive the machine-wide tab ordinal from the machine mirror with `EMPTY`-dash fallback when unavailable, and verify unit tests cover both the synced and unsynced cases
-- [ ] 2.2 Manual pass: open two same-named tabs plus a split, confirm Info rows match `tty7 tab ls --json` / `tty7 pane ls` ids and ordinals, and confirm strip/sidebar/switcher show no new rows; run `cargo test` for the touched crates
+- [x] 2.2 Manual pass: open two same-named tabs plus a split, confirm Info rows match `tty7 tab ls --json` / `tty7 pane ls` ids and ordinals, and confirm strip/sidebar/switcher show no new rows; run `cargo test` for the touched crates
