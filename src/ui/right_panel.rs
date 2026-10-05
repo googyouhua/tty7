@@ -994,6 +994,8 @@ impl Tty7App {
                             toggle_follow: true,
                         });
                     }
+                    rows.push(InfoRow::text(t(L10nKey::PanelTabId), tab.tree_id.get().to_string()).copyable());
+                    rows.push(InfoRow::text(t(L10nKey::PanelPaneId), view.pane_id.to_string()).copyable());
                 }
                 // A pane on the default shell runs whatever the server picked,
                 // which is not always the login shell the inventory names: a
@@ -2457,6 +2459,33 @@ mod tests {
             diff(3, 1, true).copyable().copy,
             None,
             "there is no sensible clipboard form of two coloured numbers"
+        );
+    }
+
+    #[test]
+    fn id_rows_carry_raw_values_as_copy_payloads() {
+        let tab_id = "9f2c4b1a-3d5e-4f6a-8b7c-1d2e3f4a5b6c";
+        let tab_row = InfoRow::text("tab id", tab_id.to_string()).copyable();
+        assert!(
+            matches!(&tab_row.value, InfoValue::Text(v) if v == tab_id),
+            "tab id renders the full uuid as text"
+        );
+        assert_eq!(
+            tab_row.copy.as_deref(),
+            Some(tab_id),
+            "tab id copies the raw uuid, undecorated"
+        );
+        assert!(!tab_row.edit_cwd && !tab_row.toggle_follow && tab_row.reveal.is_none());
+
+        let pane_row = InfoRow::text("pane id", 42u64.to_string()).copyable();
+        assert!(
+            matches!(&pane_row.value, InfoValue::Text(v) if v == "42"),
+            "pane id renders the decimal pane id as text"
+        );
+        assert_eq!(
+            pane_row.copy.as_deref(),
+            Some("42"),
+            "pane id copies the raw decimal, not %42"
         );
     }
 }
