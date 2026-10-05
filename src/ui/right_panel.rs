@@ -376,6 +376,27 @@ enum InfoValue {
 /// and is shorter to read than any of the sentences it stands in for.
 const EMPTY: &str = "—";
 
+/// Position of `tab` in the machine-wide tab order, 1-based. Enumerates
+/// workspaces then tabs in stored order — the GUI mirror of the CLI's
+/// `tab_index` (`crates/tty7-cli/src/resolve.rs:13`). Returns `None` when
+/// the tab is absent (mirror not yet synced), in which case the caller
+/// renders the table `EMPTY` dash.
+fn tab_ordinal(
+    machine: &tty7_core::core::machine::Machine,
+    tab: tty7_core::core::machine::TabId,
+) -> Option<u64> {
+    let mut ordinal = 0;
+    for ws in &machine.workspaces {
+        for t in &ws.tabs {
+            ordinal += 1;
+            if t.id == tab {
+                return Some(ordinal);
+            }
+        }
+    }
+    None
+}
+
 /// A round trip, at the precision the number is worth reading to.
 ///
 /// Whole milliseconds up to a second: tenths of a millisecond on a link that
@@ -994,6 +1015,31 @@ impl Tty7App {
                             toggle_follow: true,
                         });
                     }
+                }
+                rows.push(
+                    InfoRow::text(t(L10nKey::PanelTabId), tab.tree_id.get().to_string()).copyable(),
+                );
+                rows.push(
+                    InfoRow::text(t(L10nKey::PanelPaneId), view.pane_id.to_string()).copyable(),
+                );
+                let ordinal_text = crate::core::session::WorkspaceStore::all(cx)
+                    .get(self.workspace)
+                    .and_then(|entry| {
+                        crate::ui::machine_mirror::MachineMirrors::machine(cx, entry.host_id())
+                    })
+                    .and_then(|machine| tab_ordinal(machine, tab.tree_id.get()))
+                    .map(|n| format!("@{n}"));
+                match ordinal_text {
+                    Some(decorated) => rows.push(InfoRow {
+                        label: t(L10nKey::PanelOrdinal),
+                        value: InfoValue::Text(decorated.clone()),
+                        // Paste-ready for `tty7 tab … @n`.
+                        copy: Some(decorated),
+                        reveal: None,
+                        edit_cwd: false,
+                        toggle_follow: false,
+                    }),
+                    None => rows.push(InfoRow::text(t(L10nKey::PanelOrdinal), EMPTY.to_string())),
                 }
                 // A pane on the default shell runs whatever the server picked,
                 // which is not always the login shell the inventory names: a
@@ -2458,5 +2504,82 @@ mod tests {
             None,
             "there is no sensible clipboard form of two coloured numbers"
         );
+    }
+
+    #[test]
+    fn id_rows_carry_raw_values_as_copy_payloads() {
+        let tab_id = "9f2c4b1a-3d5e-4f6a-8b7c-1d2e3f4a5b6c";
+        let tab_row = InfoRow::text("tab id", tab_id.to_string()).copyable();
+        assert!(
+            matches!(&tab_row.value, InfoValue::Text(v) if v == tab_id),
+            "tab id renders the full uuid as text"
+        );
+        assert_eq!(
+            tab_row.copy.as_deref(),
+            Some(tab_id),
+            "tab id copies the raw uuid, undecorated"
+        );
+        assert!(!tab_row.edit_cwd && !tab_row.toggle_follow && tab_row.reveal.is_none());
+
+        let pane_row = InfoRow::text("pane id", 42u64.to_string()).copyable();
+        assert!(
+            matches!(&pane_row.value, InfoValue::Text(v) if v == "42"),
+            "pane id renders the decimal pane id as text"
+        );
+        assert_eq!(
+            pane_row.copy.as_deref(),
+            Some("42"),
+            "pane id copies the raw decimal, not %42"
+        );
+    }
+
+    #[test]
+    fn ordinal_counts_workspaces_then_tabs_in_stored_order() {
+        // The GUI mirror of the CLI's `tab_index`
+        // (`crates/tty7-cli/src/resolve.rs:13`): workspaces in stored
+        // order, tabs in stored order, dense from @1.
+        let t1 = tty7_core::core::machine::Tab::leaf(1);
+        let t2 = tty7_core::core::machine::Tab::leaf(2);
+        let t3 = tty7_core::core::machine::Tab::leaf(3);
+        let m = tty7_core::core::machine::Machine {
+            workspaces: vec![
+                tty7_core::core::machine::Workspace {
+                    id: crate::core::session::WorkspaceId::new(),
+                    tabs: vec![t1.clone(), t2.clone()],
+                    ..tty7_core::core::machine::Workspace::default()
+                },
+                tty7_core::core::machine::Workspace {
+                    id: crate::core::session::WorkspaceId::new(),
+                    tabs: vec![t3.clone()],
+                    ..tty7_core::core::machine::Workspace::default()
+                },
+            ],
+            panes: Vec::new(),
+        };
+        assert_eq!(super::tab_ordinal(&m, t1.id), Some(1));
+        assert_eq!(super::tab_ordinal(&m, t2.id), Some(2));
+        assert_eq!(super::tab_ordinal(&m, t3.id), Some(3));
+    }
+
+    #[test]
+    fn ordinal_missing_from_mirror_means_no_copy_payload() {
+        // A tab id absent from the machine (mirror not yet synced):
+        // tab_ordinal returns None, and the fallback row built with
+        // InfoRow::text(LABEL, EMPTY.to_string()) has copy == None,
+        // reveal == None, and value Text("—"), so the ids still render
+        // while the ordinal cell shows the table dash.
+        assert_eq!(
+            super::tab_ordinal(
+                &tty7_core::core::machine::Machine {
+                    workspaces: Vec::new(),
+                    panes: Vec::new(),
+                },
+                tty7_core::core::machine::TabId::new()
+            ),
+            None
+        );
+        let row = InfoRow::text("tab", "—".to_string());
+        assert_eq!(row.copy, None);
+        assert!(matches!(&row.value, InfoValue::Text(v) if v == "—"));
     }
 }
