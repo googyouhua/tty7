@@ -2532,7 +2532,6 @@ mod tests {
             "pane id copies the raw decimal, not %42"
         );
     }
-
     #[test]
     fn ordinal_counts_workspaces_then_tabs_in_stored_order() {
         // The GUI mirror of the CLI's `tab_index`
