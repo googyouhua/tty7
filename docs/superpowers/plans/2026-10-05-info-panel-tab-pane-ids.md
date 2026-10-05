@@ -326,19 +326,19 @@ git commit -m "feat(info-panel): render machine-wide tab ordinal with dash fallb
 - Consumes: finished Tasks 1–3; live commands `tty7 tab ls --json` and `tty7 pane ls`.
 - Produces: the change's done criterion — Info rows match daemon truth, no other surface changed, full touched-crate suite green.
 
-- [ ] **Step 1: Manual parity pass**
+- [x] **Step 1: Manual parity pass**
 
 1. Open two same-named tabs plus a split in the second tab (three panes total across two tabs).
 2. Focus each pane in turn and read the Info panel: Tab ID equals the `id` field for that tab in `tty7 tab ls --json`; Pane ID equals the focused pane's id in `tty7 pane ls`; ordinal equals the tab's `@n` in `tty7 tab ls --json`.
 3. Disconnect/sync-lag case: with the daemon unreachable at startup (mirror not yet synced), confirm the ordinal cell shows `—` while both ID rows still render.
 4. Confirm the strip, sidebar, and switcher show no new rows (this change touches only `render_panel_info`).
 
-- [ ] **Step 2: Run the full touched-crate suite**
+- [x] **Step 2: Run the full touched-crate suite**
 
 Run: `cargo test -p tty7`
 Expected: PASS with zero failures. If the workspace layout puts the panel/i18n code in a differently named crate, substitute it (the crate containing `src/ui/right_panel.rs`) and record the exact command run.
 
-- [ ] **Step 3: Record evidence and finish**
+- [x] **Step 3: Record evidence and finish**
 
 Paste into the change record: the `@n`/id comparisons from Step 1 (tab ids, pane ids, ordinals vs CLI output), the `—` fallback observation, and the `cargo test` tail. No commit (no files change in this task). If any mismatch appears — ordinal off by one, pane id stale after refocus, an extra row in another surface — file it against Task 2/3 with the observed vs expected values and do not mark the change done.
 
