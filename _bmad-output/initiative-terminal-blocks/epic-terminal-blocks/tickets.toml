@@ -1,0 +1,91 @@
+# tickets.toml — a container's agreed children. tickets.py reads it.
+# The order of the tables is the build order: move a table to reorder. `id` names a child for good and is never reused; it is not an order.
+# Status never lives here: an entry with no plan and no leaf file is planned.
+
+[[entry]]
+id = 1
+type = "story"
+title = "块模型 tracer：配对建块贯通折叠与菜单脚手架"
+description = "Server 侧 B→D 配对建块（含 exit_code 解析与退出码行格式，alt-screen 排除，无 marks 不分块），gutter 折叠/展开打通，右键菜单脚手架（跳块首、复制两者）接同一块 id。拥有 block schema（id/exit_code/folded/truncated）与退出码语义，后续 entries 只消费。"
+verify = "万行输出块 gutter 点折只占一行、展开无损；无 marks 的 pane 不分块；菜单两项可点通。"
+covers = ["CAP-1"]
+after = []
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "跳块首与菜单折叠"
+description = "右键菜单补齐跳到块首与折叠/展开两项，与 gutter 同行为；悬停不遮挡输出首行。"
+verify = "块内右键跳块首一次点击视口置块首命令；菜单折叠与 gutter 等效。"
+covers = ["CAP-2"]
+after = [1]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 3
+type = "story"
+title = "整块纯文本复制三项"
+description = "右键复制命令、复制输出、复制两者（默认主项，统一带退出码行），纯文本与 capture --plain 同源；折叠态复制全块而非可见行；无 ANSI。"
+verify = "粘贴含完整命令、输出与退出码行；与 capture --plain 文本一致。"
+covers = ["CAP-3"]
+after = [1]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "失败红标与 Ctrl-C 成块"
+description = "非零退出块首红条（含 Ctrl-C 中断码），中断也成块；悬停不遮挡输出首行。"
+verify = "失败块红条可见；Ctrl-C 中断成块且标红。"
+covers = ["CAP-4"]
+after = [1]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "折叠持久化随 pane"
+description = "folded 存 server 侧跟 pane 生命周期，随持久会话恢复；scrollback 清除则块消失。"
+verify = "重启恢复后折叠态与关闭前一致；清除 scrollback 后块消失。"
+covers = ["CAP-5"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "远端一致与嵌套归属"
+description = "远端直连 pane（远端集成成功）折叠/跳转/复制/红标与本地一致；嵌套 ssh 端到端有 marks 则分块、无则无块，归属由 server 侧 pane 状态机判定、渲染只读；两端行为一致。"
+verify = "远端直连 pane 四能力与本地一致；嵌套有 marks 分块、无则纯 scrollback。"
+covers = ["CAP-6"]
+after = [1, 2, 3, 4]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Refactor sweep"
+description = "清理本 epic 各 plan  deferred 的清理项；只做清理，不加功能不改行为。"
+verify = "启动时汇总的清理清单清零；功能行为无变更。"
+covers = []
+after = [1, 2, 3, 4, 5, 6]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 8
+type = "story"
+title = "性能门：吞吐与交互验收"
+description = "sweep 后终态实测：11MB cat 五次平均相对基线退化≤10%，折叠/跳块首 <100ms。"
+verify = "bench 实测达标并记录数据。"
+covers = []
+after = [7]
+hitl = false
+risk = "medium"
