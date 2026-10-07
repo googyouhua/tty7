@@ -1,3 +1,4 @@
+mod blocks;
 mod boxdraw;
 mod cmd_editor;
 mod color_scheme;

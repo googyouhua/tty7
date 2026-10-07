@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::{Column as AlacColumn, Line as AlacLine, Point as AlacPoint};
 use alacritty_terminal::selection::SelectionRange;
+use alacritty_terminal::term::Term;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
@@ -1851,6 +1852,7 @@ impl TerminalElement {
         let mut cursor: Option<GridCursor> = None;
         let mut sliver: Option<Vec<RenderCell>> = None;
         let mut any_selected = false;
+        let (any_match, any_current);
         let display_offset;
         let history_size;
         let prompt_shape = self.prompt_cursor_shape(cx);
@@ -1891,6 +1893,20 @@ impl TerminalElement {
             history_size = term.grid().history_size();
             let selection = content.selection;
 
+            // Folded blocks collapse their rows out of the window,
+            // bottom-anchored: with any fold mapping, rows come from the grid
+            // directly instead of `display_iter`, and each folded span shows
+            // its one-line summary on its first row.
+            let store = self.view.read(cx).terminal.block_tracker();
+            let tracker = store.try_lock().ok();
+            // Spans address the primary grid; a full-screen program owns the
+            // alternate one, so folds never remap it.
+            let fold_map: Option<Vec<i64>> = tracker.as_deref().and_then(|tracker| {
+                (!term.mode().contains(TermMode::ALT_SCREEN))
+                    .then(|| super::blocks::visible_map(&term, tracker, rows))
+                    .flatten()
+            });
+
             let cur = content.cursor;
             let cursor_row = cur.point.line.0 + display_offset;
             let cursor_hidden = matches!(cur.shape, CursorShape::Hidden);
@@ -1902,35 +1918,62 @@ impl TerminalElement {
             // the IME anchor can snap to it.
             let mut inverse_runs: Vec<(usize, usize)> = Vec::new();
 
-            for cell in content.display_iter {
-                let row = cell.point.line.0 + display_offset;
-                let col = cell.point.column.0;
-                if row < 0 || row as usize >= rows || col >= cols {
-                    continue;
-                }
-                if cursor_hidden
-                    && row == cursor_row
-                    && cell.cell.flags.contains(Flags::INVERSE)
-                    && !cell
-                        .cell
-                        .flags
-                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    match inverse_runs.last_mut() {
-                        Some((start, len)) if *start + *len == col => *len += 1,
-                        _ => inverse_runs.push((col, 1)),
+            // With any fold mapping the rows below come from the grid
+            // directly, so the display iterator has nothing to add.
+            if fold_map.is_none() {
+                for cell in content.display_iter {
+                    let row = cell.point.line.0 + display_offset;
+                    let col = cell.point.column.0;
+                    if row < 0 || row as usize >= rows || col >= cols {
+                        continue;
                     }
+                    if cursor_hidden
+                        && row == cursor_row
+                        && cell.cell.flags.contains(Flags::INVERSE)
+                        && !cell
+                            .cell
+                            .flags
+                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        match inverse_runs.last_mut() {
+                            Some((start, len)) if *start + *len == col => *len += 1,
+                            _ => inverse_runs.push((col, 1)),
+                        }
+                    }
+                    let rc =
+                        snapshot_cell(cell.cell, cell.point, &palette, colors, selection.as_ref());
+                    any_selected |= rc.selected;
+                    buf[row as usize * cols + col] = if dim < 1. {
+                        dim_cell(rc, dim, under)
+                    } else {
+                        rc
+                    };
                 }
-                let rc = snapshot_cell(cell.cell, cell.point, &palette, colors, selection.as_ref());
-                any_selected |= rc.selected;
-                buf[row as usize * cols + col] = if dim < 1. {
-                    dim_cell(rc, dim, under)
-                } else {
-                    rc
-                };
+            } else if let (Some(map), Some(tracker)) = (fold_map.as_ref(), tracker.as_deref()) {
+                paint_folded_rows(
+                    &term,
+                    tracker,
+                    map,
+                    buf,
+                    rows,
+                    cols,
+                    history_size,
+                    &palette,
+                    colors,
+                    selection.as_ref(),
+                    dim,
+                    under,
+                    &mut any_selected,
+                );
             }
 
-            if want_sliver && (display_offset as usize) < term.grid().history_size() {
+            // The sliver overlaps the row above the viewport during a
+            // fractional scroll; a folded window has no row above it in the
+            // mapping, so there is nothing to overlap with.
+            if fold_map.is_none()
+                && want_sliver
+                && (display_offset as usize) < term.grid().history_size()
+            {
                 let line = AlacLine(-display_offset - 1);
                 let mut row_buf = vec![RenderCell::default(); cols];
                 for (col, slot) in row_buf
@@ -1955,32 +1998,84 @@ impl TerminalElement {
                 sliver = Some(row_buf);
             }
 
-            let row = cursor_row;
             let col = cur.point.column.0;
-            if row >= 0 && (row as usize) < rows && col < cols {
-                // Snap the IME anchor to the fake caret when there is
-                // exactly one caret-sized inverse run on the row.
-                let ime_col = match inverse_runs.as_slice() {
-                    [(start, len)] if cursor_hidden && *len <= 2 => *start,
-                    _ => col,
-                };
-                cursor = Some(GridCursor {
-                    row: row as usize,
-                    col,
-                    ime_col,
-                    hidden: cursor_hidden,
-                    // Checked under the grid lock: `on_alt_screen` would take
-                    // it a second time.
-                    style: prompt_shape
-                        .filter(|_| !term.mode().contains(TermMode::ALT_SCREEN))
-                        .unwrap_or_else(|| cursor_style_from_shape(cur.shape)),
-                });
+            // A folded window maps the cursor through the same rows it
+            // paints; a cursor inside a collapsed span stays hidden.
+            if let Some(map) = fold_map.as_ref() {
+                let cursor_abs = history_size as i64 + i64::from(cur.point.line.0);
+                if let Some(pos) = map.iter().position(|&a| a == cursor_abs) {
+                    let srow = rows.saturating_sub(map.len()) + pos;
+                    if col < cols {
+                        cursor = Some(GridCursor {
+                            row: srow,
+                            col,
+                            ime_col: col,
+                            hidden: cursor_hidden,
+                            style: prompt_shape
+                                .filter(|_| !term.mode().contains(TermMode::ALT_SCREEN))
+                                .unwrap_or_else(|| cursor_style_from_shape(cur.shape)),
+                        });
+                    }
+                }
+            } else {
+                let row = cursor_row;
+                if row >= 0 && (row as usize) < rows && col < cols {
+                    // Snap the IME anchor to the fake caret when there is
+                    // exactly one caret-sized inverse run on the row.
+                    let ime_col = match inverse_runs.as_slice() {
+                        [(start, len)] if cursor_hidden && *len <= 2 => *start,
+                        _ => col,
+                    };
+                    cursor = Some(GridCursor {
+                        row: row as usize,
+                        col,
+                        ime_col,
+                        hidden: cursor_hidden,
+                        // Checked under the grid lock: `on_alt_screen` would take
+                        // it a second time.
+                        style: prompt_shape
+                            .filter(|_| !term.mode().contains(TermMode::ALT_SCREEN))
+                            .unwrap_or_else(|| cursor_style_from_shape(cur.shape)),
+                    });
+                }
             }
+
+            // Search matches and hovered links map through the same rows the
+            // window paints: the identity window by offset, a folded window
+            // through its mapping. Inside the lock scope: the folded mapping
+            // lives and dies with it.
+            (any_match, any_current) = match fold_map.as_ref() {
+                None => {
+                    let to_screen = |line: i32| {
+                        let srow = line + display_offset;
+                        (srow >= 0 && (srow as usize) < rows).then_some(srow as usize)
+                    };
+                    let lo = -display_offset;
+                    let hi = -display_offset + rows as i32 - 1;
+                    let (hit, current) =
+                        self.flag_search_matches(buf, cols, lo, hi, &to_screen, cx);
+                    self.flag_hovered_link(buf, cols, lo, hi, &to_screen, cx);
+                    (hit, current)
+                }
+                Some(map) => {
+                    let skip = rows.saturating_sub(map.len());
+                    let to_screen = |line: i32| {
+                        let abs = history_size as i64 + i64::from(line);
+                        map.iter().position(|&a| a == abs).map(|pos| skip + pos)
+                    };
+                    // Grid lines, like `lo`/`hi` above: absolute rows re-based on
+                    // the history the mapping was built against.
+                    let grid_line = |abs: i64| (abs - history_size as i64) as i32;
+                    let lo = map.first().map(|&a| grid_line(a)).unwrap_or(0);
+                    let hi = map.last().map(|&a| grid_line(a)).unwrap_or(-1);
+                    let (hit, current) =
+                        self.flag_search_matches(buf, cols, lo, hi, &to_screen, cx);
+                    self.flag_hovered_link(buf, cols, lo, hi, &to_screen, cx);
+                    (hit, current)
+                }
+            };
         }
 
-        let (any_match, any_current) =
-            self.flag_search_matches(buf, rows, cols, display_offset, cx);
-        self.flag_hovered_link(buf, rows, cols, display_offset, cx);
         Some(GridSnapshot {
             cursor,
             sliver,
@@ -1995,20 +2090,24 @@ impl TerminalElement {
     fn flag_hovered_link(
         &self,
         buf: &mut [RenderCell],
-        rows: usize,
         cols: usize,
-        display_offset: i32,
+        lo: i32,
+        hi: i32,
+        to_screen: &dyn Fn(i32) -> Option<usize>,
         cx: &App,
     ) {
         let Some(link) = self.view.read(cx).hovered_link.as_ref() else {
             return;
         };
         for &(start, end) in &link.runs {
-            let grid_row = start.line.0 + display_offset;
-            if grid_row < 0 || grid_row as usize >= rows {
+            if end.line.0 < lo || start.line.0 > hi {
                 continue;
             }
-            let row = grid_row as usize * cols;
+            // Single-row runs, as before: only the start row is painted.
+            let Some(srow) = to_screen(start.line.0) else {
+                continue;
+            };
+            let row = srow * cols;
             for col in start.column.0..=end.column.0.min(cols.saturating_sub(1)) {
                 let cell = &mut buf[row + col];
                 osc8_underline::unmark(cell);
@@ -2021,24 +2120,39 @@ impl TerminalElement {
     fn flag_search_matches(
         &self,
         buf: &mut [RenderCell],
-        rows: usize,
         cols: usize,
-        display_offset: i32,
+        lo: i32,
+        hi: i32,
+        to_screen: &dyn Fn(i32) -> Option<usize>,
         cx: &App,
     ) -> (bool, bool) {
         let Some(search) = self.view.read(cx).search.as_ref() else {
             return (false, false);
         };
         let (mut any_hit, mut any_current) = (false, false);
-        let first = search
-            .matches
-            .partition_point(|m| m.end().line.0 + display_offset < 0);
-        for (i, m) in search.matches.iter().enumerate().skip(first) {
+        for (i, m) in search.matches.iter().enumerate() {
             let is_current = search.current_index == Some(i);
             let start = *m.start();
             let end = *m.end();
-            if start.line.0 + display_offset >= rows as i32 {
+            if end.line.0 < lo {
+                continue;
+            }
+            if start.line.0 > hi {
                 break;
+            }
+            // Mapped first: a match hidden entirely inside folded rows
+            // reports nothing — flagging it would claim a visible hit with
+            // nothing highlighted.
+            let mut line = start.line.0;
+            let mut visible = false;
+            while !visible && line <= end.line.0 {
+                if line >= lo && line <= hi && to_screen(line).is_some() {
+                    visible = true;
+                }
+                line += 1;
+            }
+            if !visible {
+                continue;
             }
             if is_current {
                 any_current = true;
@@ -2047,8 +2161,14 @@ impl TerminalElement {
             }
             let mut line = start.line.0;
             while line <= end.line.0 {
-                let row = line + display_offset;
-                if row >= 0 && (row as usize) < rows {
+                let Some(srow) = (line >= lo && line <= hi)
+                    .then(|| to_screen(line))
+                    .flatten()
+                else {
+                    line += 1;
+                    continue;
+                };
+                {
                     let col_start = if line == start.line.0 {
                         start.column.0
                     } else {
@@ -2061,7 +2181,7 @@ impl TerminalElement {
                     };
                     let mut col = col_start;
                     while col <= col_end && col < cols {
-                        let rc = &mut buf[row as usize * cols + col];
+                        let rc = &mut buf[srow * cols + col];
                         if is_current {
                             rc.match_current = true;
                         } else {
@@ -2100,7 +2220,10 @@ impl TerminalElement {
                     // only a memory. Reading the grid now is what lets the
                     // menu name the file that was actually under the click.
                     match should_show_context_menu(v.mouse_mode(), mods.shift) {
-                        true => v.record_menu_link(col, row, cx),
+                        true => {
+                            v.record_menu_link(col, row, cx);
+                            v.record_menu_block(row);
+                        }
                         false => v.forget_menu_link(),
                     }
                 }
@@ -2190,6 +2313,100 @@ impl TerminalElement {
     }
 }
 
+/// Paints the window through a fold mapping: every visible absolute row comes
+/// from the grid directly (bottom-anchored, so the prompt stays put), and
+/// each folded span's first row carries its one-line summary.
+#[allow(clippy::too_many_arguments)]
+fn paint_folded_rows<T: alacritty_terminal::event::EventListener>(
+    term: &Term<T>,
+    tracker: &super::blocks::BlockTracker,
+    map: &[i64],
+    buf: &mut [RenderCell],
+    rows: usize,
+    cols: usize,
+    history_size: usize,
+    palette: &[Rgb; 256],
+    colors: &PaintColors,
+    selection: Option<&SelectionRange>,
+    dim: f32,
+    under: Rgba,
+    any_selected: &mut bool,
+) {
+    let skip = rows.saturating_sub(map.len());
+    for (i, abs) in map.iter().enumerate() {
+        let srow = skip + i;
+        let line = AlacLine((*abs - history_size as i64) as i32);
+        for (col, slot) in buf[srow * cols..(srow + 1) * cols]
+            .iter_mut()
+            .enumerate()
+            .take(term.columns().min(cols))
+        {
+            let point = AlacPoint::new(line, AlacColumn(col));
+            let mut rc = snapshot_cell(
+                &term.grid()[line][AlacColumn(col)],
+                point,
+                palette,
+                colors,
+                selection,
+            );
+            if dim < 1. {
+                rc = dim_cell(rc, dim, under);
+            }
+            *any_selected |= rc.selected;
+            *slot = rc;
+        }
+    }
+    // Folded spans collapse to their summary on their first (visible) row.
+    for span in tracker.spans() {
+        if !tracker.is_folded(span.seq) {
+            continue;
+        }
+        let Some(pos) = map.iter().position(|&a| a == span.start_abs) else {
+            continue;
+        };
+        let srow = skip + pos;
+        let summary = super::blocks::fold_summary(term, span, cols);
+        paint_summary_row(&mut buf[srow * cols..(srow + 1) * cols], &summary, colors);
+    }
+}
+
+/// Overwrites a painted row with a fold summary: same backgrounds (selection
+/// included), default foreground, no emphasis. Wide chars advance two cells
+/// with a spacer behind them, the way the grid lays them out.
+fn paint_summary_row(row: &mut [RenderCell], summary: &str, colors: &PaintColors) {
+    use unicode_width::UnicodeWidthChar as _;
+
+    let mut col = 0;
+    for ch in summary.chars().chain(std::iter::repeat(' ')) {
+        if col >= row.len() {
+            break;
+        }
+        let wide = ch.width().unwrap_or(1) == 2;
+        {
+            let cell = &mut row[col];
+            cell.c = ch;
+            cell.marks = None;
+            cell.fg = colors.default_fg;
+            cell.bold = false;
+            cell.italic = false;
+            cell.strikeout = false;
+            cell.underline = UnderlineKind::None;
+            cell.underline_color = None;
+            cell.spacer = false;
+            cell.match_hit = false;
+            cell.match_current = false;
+            cell.link_hover = false;
+            cell.osc8_dots = false;
+        }
+        col += 1;
+        if wide && col < row.len() {
+            row[col].spacer = true;
+            row[col].c = ' ';
+            col += 1;
+        }
+    }
+}
+
 impl IntoElement for TerminalElement {
     type Element = Self;
     fn into_element(self) -> Self::Element {
@@ -2273,6 +2490,9 @@ impl Element for TerminalElement {
                 window.scale_factor(),
                 cx,
             );
+            // Stashed for the surface-level right-click handler — see
+            // `menu_click_in_grid`.
+            view.grid_origin = Some(bounds.origin);
             // Whatever lays itself over the bottom rows (the composer)
             // measures up from the bottom, past this.
             let slack = bounds.size.height - line_height * fits as f32;

@@ -4031,6 +4031,7 @@ mod tests {
             at_prompt,
             remote_prompt_seen: false,
             bracketed_paste: None,
+            blocks: Vec::new(),
         }
     }
 
@@ -4058,6 +4059,7 @@ mod tests {
                 at_prompt,
                 remote_prompt_seen,
                 bracketed_paste: None,
+                blocks: Vec::new(),
             }),
         }
     }
@@ -4080,6 +4082,7 @@ mod tests {
                 at_prompt,
                 remote_prompt_seen: at_prompt == Some(true),
                 bracketed_paste: None,
+                blocks: Vec::new(),
             }),
         }
     }

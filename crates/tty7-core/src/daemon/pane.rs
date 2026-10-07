@@ -17,8 +17,8 @@ use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
 use crate::core::term_modes::TerminalModes;
 use crate::daemon::protocol::{
-    AuthResponse, DaemonMsg, LeaseRequest, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext,
-    RemoteKind, ShellSpec, WinSize,
+    AuthResponse, COMMAND_BLOCK_CAP, CommandBlock, DaemonMsg, LeaseRequest, MAX_FRAME,
+    NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec, WinSize,
 };
 use crate::daemon::shell_integration;
 
@@ -771,6 +771,15 @@ struct PaneState {
     agent_clock: AgentClock,
     alive: bool,
     exit_code: Option<i32>,
+    /// Closed command blocks, oldest first — the tracer's table, paired
+    /// `B`→`D` in [`note_block_marks`]. Entry-1 owns the schema (see
+    /// [`CommandBlock`]); later entries only consume it.
+    command_blocks: std::collections::VecDeque<CommandBlock>,
+    /// Next block id (1-based). Bumped only when a `D` closes a pending `B`,
+    /// so ids name closings, in closing order.
+    next_block_id: u64,
+    /// A `B` arrived outside the alternate screen and its `D` has not.
+    block_pending: bool,
 }
 
 /// When the agent session last heard from the agent, for the two conclusions
@@ -1830,6 +1839,9 @@ impl DaemonPane {
                 agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
+                command_blocks: std::collections::VecDeque::new(),
+                next_block_id: 0,
+                block_pending: false,
             },
             owner,
             on_dead,
@@ -2069,6 +2081,9 @@ impl DaemonPane {
                 agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
+                command_blocks: std::collections::VecDeque::new(),
+                next_block_id: 0,
+                block_pending: false,
             },
             carried.owner,
             on_dead,
@@ -2137,6 +2152,9 @@ impl DaemonPane {
             agent_clock: AgentClock::default(),
             alive: true,
             exit_code: None,
+            command_blocks: std::collections::VecDeque::new(),
+            next_block_id: 0,
+            block_pending: false,
         }));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(OutputGate::new());
@@ -2411,6 +2429,11 @@ impl DaemonPane {
                                     && st.osc_title.is_some()
                                     && (st.remote.is_some() || st.follow_nested));
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
+                            // Before `record_output`: `note_block_marks`
+                            // gates each mark on the modes as that mark found
+                            // them, folded from the pre-chunk state.
+                            let block_marks = std::mem::take(&mut signals.blocks);
+                            note_block_marks(&mut st, bytes, &block_marks);
                             record_output(&mut st, bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
                             apply_signals(&mut st, signals);
@@ -2682,6 +2705,7 @@ impl DaemonPane {
             at_prompt: st.shell.active.then_some(st.shell.mark_at_prompt),
             remote_prompt_seen: st.remote_prompt_seen,
             bracketed_paste: Some(st.modes.is_on(crate::core::term_modes::BRACKETED_PASTE)),
+            blocks: st.command_blocks.iter().cloned().collect(),
         }
     }
 
@@ -4166,6 +4190,98 @@ struct SniffSignals {
     shell: Vec<ShellState>,
     agent_events: Vec<crate::core::cli_agent::AgentEvent>,
     notification: Option<String>,
+    /// Block-table marks in stream order, each with the offset one past its
+    /// terminator (as [`OscTokenizer::feed_at`] reports) — see [`BlockMark`].
+    blocks: Vec<(usize, BlockMark)>,
+}
+
+/// A block-table mark: `B` opens a block, `D` closes it. `C` is commentary
+/// (the command's text) and deliberately never appears here — commands run
+/// with no `133;C` at all, so pairing is `B`→`D` or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockMark {
+    Open,
+    Close { exit_code: Option<i32> },
+}
+
+/// Reads the block mark out of an OSC 133 payload's tail (`B`, `D;0`, …).
+fn parse_block_mark(rest: &[u8]) -> Option<BlockMark> {
+    let (&kind, tail) = rest.split_first()?;
+    if !tail.is_empty() && tail.first() != Some(&b';') {
+        return None;
+    }
+    match kind {
+        b'B' => Some(BlockMark::Open),
+        b'D' => Some(BlockMark::Close {
+            exit_code: tail
+                .strip_prefix(b";")
+                .and_then(|c| std::str::from_utf8(c).ok())
+                .and_then(|s| s.trim().parse::<i32>().ok()),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether the alternate screen is on — blocks never span it.
+fn on_alt_screen(modes: &TerminalModes) -> bool {
+    modes.is_on(47) || modes.is_on(1047) || modes.is_on(1049)
+}
+
+/// Folds one read's block marks into the pane's block table. `bytes` is the
+/// chunk the marks were sniffed from, and each mark carries the offset one
+/// past its terminator, so the alternate-screen gate reads the modes as the
+/// mark itself found them: marks under a full-screen program are that
+/// program's, not a command's, so neither a `B` nor a `D` counts there.
+///
+/// Pairing is `B`→`D` only. An unpaired `D` (no `B` before it) closes
+/// nothing; a second `B` before the `D` re-arms the one pending block — a
+/// redrawn prompt is still one command run, not two.
+fn note_block_marks(st: &mut PaneState, bytes: &[u8], marks: &[(usize, BlockMark)]) {
+    if marks.is_empty() {
+        return;
+    }
+    // A scratch fold of the same modes over the same bytes, advanced mark by
+    // mark: `record_output` folds the whole chunk at once below, which would
+    // only say how the chunk ended. Starting from the pre-chunk state and
+    // feeding the same bytes lands on the same end state; the scratch copy is
+    // discarded.
+    let mut probe = st.modes.clone();
+    let mut prev = 0;
+    for (off, mark) in marks {
+        probe.feed(&bytes[prev..(*off).min(bytes.len())]);
+        prev = (*off).min(bytes.len());
+        if on_alt_screen(&probe) {
+            continue;
+        }
+        match mark {
+            BlockMark::Open => st.block_pending = true,
+            BlockMark::Close { exit_code } => {
+                if !std::mem::replace(&mut st.block_pending, false) {
+                    continue;
+                }
+                st.next_block_id += 1;
+                st.command_blocks.push_back(CommandBlock {
+                    id: st.next_block_id,
+                    exit_code: *exit_code,
+                    folded: false,
+                    truncated: false,
+                });
+                while st.command_blocks.len() > COMMAND_BLOCK_CAP {
+                    st.command_blocks.pop_front();
+                }
+            }
+        }
+    }
+}
+
+/// Drops the pane's block table. A tested helper with no production caller
+/// yet: clearing scrollback is a client-side grid reset today, and teaching
+/// the daemon about it needs a new `ClientMsg` channel (entry-5). Kept — and
+/// kept tested — so that wiring has a correct target.
+#[allow(dead_code)]
+fn clear_command_blocks(st: &mut PaneState) {
+    st.command_blocks.clear();
+    st.block_pending = false;
 }
 
 struct OscSniffer {
@@ -4192,7 +4308,7 @@ impl OscSniffer {
         let shell = &mut self.shell;
         let title_life = &mut self.title_life;
         let notes = &mut self.notes;
-        self.tok.feed(bytes, |payload| {
+        self.tok.feed_at(bytes, |off, payload| {
             // In stream order, so that a shell which re-titles itself right
             // after the `D` mark gets the last word over the retirement.
             if title_life.saw(payload) == crate::core::osc::TitleEffect::Retire {
@@ -4203,6 +4319,9 @@ impl OscSniffer {
             } else if let Some(title) = parse_osc_title(payload) {
                 signals.title = Some(title);
             } else if let Some(rest) = payload.strip_prefix(b"133;") {
+                if let Some(mark) = parse_block_mark(rest) {
+                    signals.blocks.push((off, mark));
+                }
                 if handle_osc133(shell, rest) {
                     match signals.shell.last_mut() {
                         Some(last) if last.at_prompt == shell.at_prompt => {
@@ -6096,6 +6215,165 @@ mod tests {
         Arc::new(Mutex::new(Box::new(std::io::sink())))
     }
 
+    /// Drives raw pty bytes through the sniffer and the block table the way
+    /// the reader thread does: sniff, gate on the modes as the chunk found
+    /// them, record, apply. Returns the state for the test to inspect.
+    fn feed_blocks(st: &mut PaneState, sniffer: &mut OscSniffer, bytes: &[u8]) {
+        let signals = sniffer.feed(bytes);
+        // Fan-out is skipped: these tests drive the block table only, and
+        // `apply_signals` wants a subscriber-carrying state shape.
+        note_block_marks(st, bytes, &signals.blocks);
+        record_output(st, bytes);
+    }
+
+    fn block_state() -> (PaneState, OscSniffer) {
+        (test_state(true), OscSniffer::new())
+    }
+
+    /// Matrix row: a normal command brackets exactly one block.
+    #[test]
+    fn command_blocks_pair_b_to_d() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07$ cargo build\x1b]133;C;cargo build\x07output\x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        let block = &st.command_blocks[0];
+        assert_eq!(block.id, 1);
+        assert_eq!(block.exit_code, Some(0));
+        assert!(!st.block_pending);
+    }
+
+    /// Matrix row: an interrupted command still closes, with its real code.
+    #[test]
+    fn command_blocks_record_interrupt_exit_codes() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07\x1b]133;C;sleep 60\x07^C\x1b]133;D;130\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].exit_code, Some(130));
+    }
+
+    /// Matrix row: output with no marks builds nothing.
+    #[test]
+    fn command_blocks_ignore_output_without_marks() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"plain output, no integration\r\nmore\r\n",
+        );
+        assert!(st.command_blocks.is_empty());
+        assert!(!st.block_pending);
+    }
+
+    /// Matrix row: marks under a full-screen program build nothing.
+    #[test]
+    fn command_blocks_ignore_marks_on_the_alternate_screen() {
+        let (mut st, mut sniffer) = block_state();
+        st.modes.feed(b"\x1b[?1049h");
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07tui noise\x1b]133;D;0\x07",
+        );
+        assert!(st.command_blocks.is_empty());
+        // …while the same marks off it pair normally.
+        st.modes.feed(b"\x1b[?1049l");
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07cmd\x1b]133;D;0\x07");
+        assert_eq!(st.command_blocks.len(), 1);
+    }
+
+    /// Matrix row: a `B` with no `D` yet (command still running) leaves the
+    /// table alone; the `D` closes it — with no `C` anywhere in between.
+    #[test]
+    fn command_blocks_close_without_a_c_mark() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07$ sleep 60");
+        assert!(st.command_blocks.is_empty());
+        assert!(st.block_pending);
+        feed_blocks(&mut st, &mut sniffer, b"output\x1b]133;D;0\x07");
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].id, 1);
+    }
+
+    /// A `D` with no `B` before it closes nothing — e.g. the shell's own
+    /// startup mark, or a replay that starts mid-command.
+    #[test]
+    fn command_blocks_ignore_an_unpaired_d() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;D;0\x07");
+        assert!(st.command_blocks.is_empty());
+        assert!(!st.block_pending);
+    }
+
+    /// A redrawn prompt re-arms the one pending block instead of opening a
+    /// second: one command run is one block.
+    #[test]
+    fn command_blocks_coalesce_a_second_b_before_the_d() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07\x1b]133;B\x07cmd\x1b]133;D;1\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].exit_code, Some(1));
+    }
+
+    /// An unparsable exit still closes the block; the code is just unknown.
+    #[test]
+    fn command_blocks_close_on_an_unparsable_exit_code() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07cmd\x1b]133;D;oops\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].exit_code, None);
+    }
+
+    /// Matrix row: clearing drops the table (and any pending open), so no
+    /// stale row survives into the next command.
+    #[test]
+    fn clear_command_blocks_drops_rows_and_pending_opens() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07a\x1b]133;D;0\x07\x1b]133;B\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert!(st.block_pending);
+        clear_command_blocks(&mut st);
+        assert!(st.command_blocks.is_empty());
+        assert!(!st.block_pending);
+        // The orphaned `D` of the cleared pending open closes nothing.
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;D;0\x07");
+        assert!(st.command_blocks.is_empty());
+    }
+
+    /// The table is bounded: the 201st closing evicts the oldest.
+    #[test]
+    fn command_blocks_evict_oldest_first_at_the_cap() {
+        let (mut st, mut sniffer) = block_state();
+        for _ in 0..COMMAND_BLOCK_CAP + 1 {
+            feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07c\x1b]133;D;0\x07");
+        }
+        assert_eq!(st.command_blocks.len(), COMMAND_BLOCK_CAP);
+        assert_eq!(st.command_blocks[0].id, 2);
+        assert_eq!(
+            st.command_blocks[COMMAND_BLOCK_CAP - 1].id,
+            (COMMAND_BLOCK_CAP + 1) as u64
+        );
+    }
+
     fn test_state(alive: bool) -> PaneState {
         PaneState {
             id: 0,
@@ -6125,6 +6403,9 @@ mod tests {
             agent_clock: AgentClock::default(),
             alive,
             exit_code: None,
+            command_blocks: std::collections::VecDeque::new(),
+            next_block_id: 0,
+            block_pending: false,
         }
     }
 

@@ -1393,6 +1393,8 @@ l10n_keys! {
     SidebarDropToPin,
     TabContextCloseTab,
     TerminalContextClear,
+    TerminalBlockJumpToStart,
+    TerminalBlockCopyBoth,
     TabContextCloseTabsBelow,
     TabContextMarkUnread,
     TabContextHibernate,
