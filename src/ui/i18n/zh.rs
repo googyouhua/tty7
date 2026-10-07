@@ -2162,6 +2162,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarDropToPin => "拖到此处固定",
         L10nKey::TabContextCloseTab => "关闭标签页",
         L10nKey::TerminalContextClear => "清屏",
+        L10nKey::TerminalBlockJumpToStart => "跳到块首",
+        L10nKey::TerminalBlockCopyBoth => "复制命令与输出",
         L10nKey::TabContextCloseTabsBelow => "关闭下方标签页",
         L10nKey::AppAgentHooksOpFailed => "失败：{error}",
         L10nKey::AppMenuEnterFullscreen => "进入全屏",

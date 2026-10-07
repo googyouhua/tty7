@@ -619,7 +619,44 @@ pub struct PaneContext {
     /// rather than assuming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bracketed_paste: Option<bool>,
+    /// The pane's closed command blocks, oldest first — see [`CommandBlock`].
+    /// Empty (and absent on the wire) until the first `D` closes one, and
+    /// silent from a daemon built before the field existed, which reads as
+    /// "this daemon cannot say", never as "no commands ran".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<CommandBlock>,
 }
+
+/// One command's run, bracketed by its OSC 133 `B` (prompt ready) and `D`
+/// (command finished) marks — the tracer's unit of scrollback (story
+/// tracer-plan, entry-1 owns this schema; later entries only consume it).
+///
+/// The daemon builds this table and hands it to clients inside
+/// [`PaneContext::blocks`]; the client's own spans pair against it in
+/// close order purely as enrichment (`daemon_id`/`truncated` land on spans
+/// nothing routes on yet). `folded` is client UI state carried along so a
+/// snapshot round-trips it; the daemon always sends `false`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandBlock {
+    /// 1-based, in the order the pane's `D` marks closed them.
+    pub id: u64,
+    /// The `D` mark's exit status, when it carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Whether the GUI currently folds this block to one line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub folded: bool,
+    /// Whether the ring evicted the block's early output. Always `false`
+    /// from this daemon revision: without per-block offsets there is no
+    /// honest way to say, and a guess would mislabel live blocks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// How many closed blocks a pane keeps. Oldest-first eviction, same order of
+/// magnitude as the replay ring: enough that close-order pairing against the
+/// client's own spans stays aligned.
+pub const COMMAND_BLOCK_CAP: usize = 200;
 
 fn default_term() -> String {
     "xterm-256color".to_string()

@@ -14,6 +14,7 @@ use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
 
 use super::TermSize;
+use super::blocks::{BlockSpan, block_text, screen_to_abs, visible_map};
 use super::cmd_editor::CmdEditor;
 use super::completion::{self, CandidateKind, CompletionSession};
 use super::element::{GridSnapshot, RenderCell, TerminalElement};
@@ -38,6 +39,11 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 pub(super) const GRID_PAD_X: f32 = 8.;
 pub(super) const GRID_PAD_Y: f32 = 4.;
+
+/// Width of the block gutter strip, measured from the surface's left edge —
+/// the grid itself starts at [`GRID_PAD_X`], so markers overhang its first
+/// cells by this minus that (a few pixels, on marked rows only).
+pub(super) const BLOCK_GUTTER_W: f32 = 14.;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputCaretPaint {
@@ -124,6 +130,8 @@ actions!(
         FindNext,
         FindPrevious,
         ClearScrollback,
+        JumpToBlockStart,
+        CopyBlock,
         InsertNewline,
         InsertNewlineFallback,
         OneKeyOpen,
@@ -402,6 +410,16 @@ pub struct TerminalView {
     /// the same reason [`context_menu_allowed`](Self::context_menu_allowed)
     /// is: by the time the menu is built the pointer is only a memory.
     menu_link: Option<super::search::LinkTarget>,
+    /// The grid's origin in window coordinates, stashed every prepaint so
+    /// the surface-level right-click handler can tell grid clicks (latched
+    /// exactly by the element's handler, which runs first) from padding
+    /// clicks (which reach no recorder and must clear the latch instead of
+    /// going stale).
+    pub(super) grid_origin: Option<gpui::Point<Pixels>>,
+    /// The command block the most recent right mouse-down landed in, latched
+    /// for the same reason: the block menu items and their actions resolve
+    /// through this rather than the live cursor. `None` hides them.
+    menu_block: Option<u64>,
     scroll_debt: f32,
     /// Lines travelled under the zoom modifier that have not yet added up to a
     /// font-size step. Kept apart from [`scroll_debt`](Self::scroll_debt) so
@@ -429,6 +447,10 @@ pub struct TerminalView {
     /// Whether a rescan is already waiting out the debounce. One task at a
     /// time, however fast the pane is printing.
     pub(super) search_scan_armed: bool,
+    /// When the daemon's block table was last adopted into the pane's spans.
+    /// Gated to a slow poll: adoption is a blocking round trip, and the ids
+    /// it carries enrich rather than route.
+    last_block_adopt: Option<std::time::Instant>,
     pub bell_flash: bool,
     /// Bumped by every bell, so only the timer armed by the latest one clears
     /// the flash: a burst of bells holds one steady flash instead of strobing.
@@ -1910,6 +1932,8 @@ impl TerminalView {
             link_repo_root_pending: false,
             context_menu_allowed: true,
             menu_link: None,
+            menu_block: None,
+            grid_origin: None,
             scroll_debt: 0.,
             zoom_debt: 0.,
             scroll_frac: 0.,
@@ -1926,6 +1950,7 @@ impl TerminalView {
             search_last_query: String::new(),
             search_scan_epoch: 0,
             search_scan_armed: false,
+            last_block_adopt: None,
             bell_flash: false,
             bell_epoch: 0,
             last_at_prompt: false,
@@ -3741,6 +3766,146 @@ impl TerminalView {
         }
     }
 
+    /// The closed span `seq` names, if the pane still holds it.
+    fn block_span(&self, seq: u64) -> Option<BlockSpan> {
+        self.terminal
+            .block_tracker()
+            .lock()
+            .ok()?
+            .spans()
+            .iter()
+            .find(|s| s.seq == seq)
+            .cloned()
+    }
+
+    /// The closed span under screen `row`, if any — resolved through the fold
+    /// mapping, so a folded window latches the span it shows rather than the
+    /// grid row beneath it.
+    fn block_at_screen_row(&self, row: usize) -> Option<BlockSpan> {
+        let rows = self.terminal.size().rows;
+        let term = self.terminal.term.try_lock_unfair()?;
+        // Block spans address the primary grid; under a full-screen program
+        // the grid on screen is the alternate one, so there is nothing of
+        // theirs to point at.
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return None;
+        }
+        let store = self.terminal.block_tracker();
+        let tracker = store.try_lock().ok()?;
+        let (top, _) = super::blocks::window_abs_range(&term, rows);
+        let map = visible_map(&term, &tracker, rows);
+        let abs = screen_to_abs(row, rows, top, map.as_deref())?;
+        tracker.span_at(abs).cloned()
+    }
+
+    /// Latches the block a right mouse-down landed in for the menu builder —
+    /// the same reason `record_menu_link` exists: by build time the pointer
+    /// is only a memory.
+    pub fn record_menu_block(&mut self, row: usize) {
+        self.menu_block = self.block_at_screen_row(row).map(|s| s.seq);
+    }
+
+    /// Whether a window-coordinates click lands inside the grid or its
+    /// gutter — the region whose right-clicks the element's handler (or a
+    /// gutter marker) latches exactly. Anything clearly outside it reaches no
+    /// recorder. Margins absorb the fractional scroll shift between the
+    /// stashed prepaint origin and the painted one.
+    fn menu_click_in_grid(&self, pos: gpui::Point<Pixels>) -> bool {
+        let Some(origin) = self.grid_origin else {
+            return false;
+        };
+        let cols = self.terminal.size().cols as f32;
+        let rows = self.terminal.size().rows as f32;
+        let lx = (pos.x - origin.x).as_f32();
+        let ly = (pos.y - origin.y).as_f32();
+        let lh = self.line_height.as_f32().max(1.);
+        let cw = self.cell_width.as_f32().max(1.);
+        lx >= -GRID_PAD_X
+            && lx < cols * cw + GRID_PAD_X
+            && ly >= -GRID_PAD_Y - lh
+            && ly < rows * lh + GRID_PAD_Y + lh
+    }
+
+    /// The viewport goes to the latched block's first line: at the top when
+    /// it is (or evicted into) the scrollback, at the bottom when it sits in
+    /// the live screen band.
+    pub fn jump_to_block_start(&mut self, cx: &mut Context<Self>) {
+        let Some(span) = self.menu_block.and_then(|seq| self.block_span(seq)) else {
+            return;
+        };
+        self.cancel_scroll_anim();
+        let mut term = self.terminal.term.lock();
+        term.selection = None;
+        let history = term.grid().history_size() as i64;
+        let line = span.start_abs - history;
+        let target = match line <= 0 {
+            true => (-line).min(history),
+            false => 0,
+        };
+        let current = term.grid().display_offset() as i64;
+        term.scroll_display(Scroll::Delta((target - current) as i32));
+        drop(term);
+        self.scroll_frac = 0.;
+        cx.notify();
+    }
+
+    /// Copies the latched block: command plus output as plain text, closed by
+    /// its exit line — the same plain-text semantics as `copy_selection`.
+    pub fn copy_block(&mut self, cx: &mut Context<Self>) {
+        let Some(span) = self.menu_block.and_then(|seq| self.block_span(seq)) else {
+            return;
+        };
+        let trim = cx.global::<Config>().clipboard_trim_trailing_spaces;
+        let term = self.terminal.term.lock();
+        let text = block_text(&term, &span, trim);
+        drop(term);
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Toggles the fold on the span `seq` names. Gutter-marker clicks route
+    /// here with the exact latched seq.
+    pub fn toggle_fold_by_seq(&mut self, seq: u64, cx: &mut Context<Self>) {
+        let store = self.terminal.block_tracker();
+        let Ok(mut tracker) = store.lock() else {
+            return;
+        };
+        if !tracker.spans().iter().any(|s| s.seq == seq) {
+            return;
+        }
+        let folded = !tracker.is_folded(seq);
+        if tracker.set_folded(seq, folded).is_some() {
+            drop(tracker);
+            cx.notify();
+        }
+    }
+
+    /// Adopts the daemon's block table into the pane's spans, at most every
+    /// few seconds. Best-effort enrichment (ids nothing routes on), so a
+    /// failed or empty poll is silence, not an error.
+    fn maybe_adopt_daemon_blocks(&mut self) {
+        const BLOCK_ADOPT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        if self
+            .last_block_adopt
+            .is_some_and(|t| now.duration_since(t) < BLOCK_ADOPT_INTERVAL)
+        {
+            return;
+        }
+        self.last_block_adopt = Some(now);
+        let procs = RemoteTerminal::query_procs(self.pane_id);
+        let Some(context) = procs.context else {
+            return;
+        };
+        if context.blocks.is_empty() {
+            return;
+        }
+        if let Ok(mut tracker) = self.terminal.block_tracker().lock() {
+            tracker.adopt(&context.blocks);
+        }
+    }
+
     pub fn copy_contextual(&mut self, clear_on_copy: bool, cx: &mut Context<Self>) -> bool {
         if self.input_active() {
             if let Some(text) = self.cmd.selected_text() {
@@ -4170,6 +4335,12 @@ impl TerminalView {
         // behind the term's back would leave pointing at rows that no longer
         // exist.
         self.terminal.term.lock().clear_screen(ClearMode::Saved);
+        // Absolute rows were rebirthed with the grid, so every span points at
+        // rows that no longer exist. Drop them; the resync this arms keeps the
+        // next adoption from pairing new spans against pre-clear daemon ids.
+        if let Ok(mut tracker) = self.terminal.block_tracker().lock() {
+            tracker.clear_blocks();
+        }
         // Image placements are anchored in absolute scrollback rows, so the
         // rows we just discarded moved every anchor. Drop them; the daemon does
         // not replay out-of-band image frames, so a browser redraws on its next
@@ -4258,6 +4429,7 @@ impl TerminalView {
         if self.terminal.exited {
             return;
         }
+        self.maybe_adopt_daemon_blocks();
         let at_prompt = self.terminal.at_prompt();
 
         if self
@@ -6521,6 +6693,114 @@ impl TerminalView {
             .child(Scrollbar::vertical(&self.scroll_handle).id("terminal-scrollbar"))
     }
 
+    /// One marker per visible screen row: the closed span starting there, if
+    /// any — `▾` while its rows show, `▸` while folded to one line. Laid down
+    /// the left padding beside the grid, the same absolutely positioned
+    /// overlay pattern as [`render_scrollbar`](Self::render_scrollbar): only
+    /// rows with a span get a child, so an integration-less pane renders
+    /// nothing at all.
+    ///
+    /// The strip is marker paint only — clicks toggle the fold from the
+    /// element's mouse handler, which owns the cell geometry.
+    fn render_block_gutter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let markers = self.block_gutter_markers();
+        let line_height = self.line_height;
+        let view = cx.entity();
+        div()
+            .absolute()
+            .top(px(GRID_PAD_Y))
+            .left_0()
+            .w(px(BLOCK_GUTTER_W))
+            .h(line_height * self.terminal.size().rows as f32)
+            .children(
+                markers
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(move |(row, marker)| {
+                        let (seq, folded) = marker?;
+                        let left = view.clone();
+                        let right = view.clone();
+                        Some(
+                            div()
+                                .absolute()
+                                .top(line_height * row as f32)
+                                .left_0()
+                                .w(px(BLOCK_GUTTER_W))
+                                .h(line_height)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                // The strip sits mostly outside the element's
+                                // hitbox, so without this the click would only
+                                // focus: occlude the grid behind (whose handler
+                                // then stands down) and fold here instead.
+                                .occlude()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    move |_ev: &MouseDownEvent,
+                                          _window: &mut Window,
+                                          cx: &mut App| {
+                                        left.update(cx, |v, cx| v.toggle_fold_by_seq(seq, cx));
+                                    },
+                                )
+                                // Right-click parity with the element's
+                                // handler: latch the link and the block the
+                                // menu is about.
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    move |_ev: &MouseDownEvent,
+                                          _window: &mut Window,
+                                          cx: &mut App| {
+                                        right.update(cx, |v, cx| {
+                                            v.record_menu_link(0, row, cx);
+                                            v.menu_block = Some(seq);
+                                        });
+                                    },
+                                )
+                                .child(match folded {
+                                    true => "▸",
+                                    false => "▾",
+                                }),
+                        )
+                    }),
+            )
+    }
+
+    /// The gutter's markers, one per screen row — see
+    /// [`render_block_gutter`](Self::render_block_gutter).
+    fn block_gutter_markers(&self) -> Vec<Option<(u64, bool)>> {
+        let rows = self.terminal.size().rows;
+        let Some(term) = self.terminal.term.try_lock_unfair() else {
+            return Vec::new();
+        };
+        // See `block_at_screen_row`: spans address the primary grid only.
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return Vec::new();
+        }
+        let store = self.terminal.block_tracker();
+        let Ok(tracker) = store.try_lock() else {
+            return Vec::new();
+        };
+        if tracker.spans().is_empty() {
+            return Vec::new();
+        }
+        let mut starts = std::collections::HashMap::new();
+        for span in tracker.spans() {
+            starts
+                .entry(span.start_abs)
+                .or_insert((span.seq, tracker.is_folded(span.seq)));
+        }
+        let (top, _) = super::blocks::window_abs_range(&term, rows);
+        let map = visible_map(&term, &tracker, rows);
+        (0..rows)
+            .map(|row| {
+                screen_to_abs(row, rows, top, map.as_deref())
+                    .and_then(|abs| starts.get(&abs).copied())
+            })
+            .collect()
+    }
+
     fn grid_line(
         term: &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
         row: usize,
@@ -6580,9 +6860,10 @@ impl TerminalView {
         };
     }
 
-    /// Drops a latched link, for a right click the application is taking.
+    /// Drops latched links, for a right click the application is taking.
     pub fn forget_menu_link(&mut self) {
         self.menu_link = None;
+        self.menu_block = None;
     }
 
     /// The path the context menu is about, if it is about one.
@@ -8058,6 +8339,13 @@ impl Render for TerminalView {
                 cx.listener(|this, ev: &MouseDownEvent, _window, _cx| {
                     this.context_menu_allowed =
                         should_show_context_menu(this.mouse_mode(), ev.modifiers.shift);
+                    // Padding clicks reach neither the element's handler nor a
+                    // gutter marker, so a latch from an earlier click would go
+                    // stale — clear it. Grid clicks are left alone: the
+                    // element's handler runs first and re-records them exactly.
+                    if !this.menu_click_in_grid(ev.position) {
+                        this.forget_menu_link();
+                    }
                 }),
             )
             .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().drag_border.opacity(0.12)))
@@ -8109,6 +8397,10 @@ impl Render for TerminalView {
                 this.step_match(Direction::Left, cx);
             }))
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
+            .on_action(
+                cx.listener(|this, _: &JumpToBlockStart, _w, cx| this.jump_to_block_start(cx)),
+            )
+            .on_action(cx.listener(|this, _: &CopyBlock, _w, cx| this.copy_block(cx)))
             .on_action(cx.listener(|this, _: &OneKeyOpen, _w, cx| this.open_onekey_picker(cx)))
             .on_action(cx.listener(|this, _: &OneKeyFillUsername, _w, cx| {
                 this.fill_onekey(tty7_core::core::onekey::OneKeyFill::Username, cx)
@@ -8150,6 +8442,7 @@ impl Render for TerminalView {
             .child(TerminalElement::new(entity))
             .children(composer_docked)
             .child(self.render_scrollbar())
+            .child(self.render_block_gutter(cx))
             .children(search_bar)
             .children(input_bar)
             .children(completion_menu)
@@ -8232,8 +8525,19 @@ impl Render for TerminalView {
                     .menu(t(L10nKey::AppMenuFind), Box::new(FindInTerminal))
                     // Inside the terminal, what gets cleared goes without
                     // saying; the menu bar keeps the full "Clear Scrollback".
-                    .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback))
-                    .menu("OneKey Autofill…", Box::new(OneKeyOpen));
+                    .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback));
+                // Block items hide (never grey) with no block under the
+                // click — the latch is what the actions resolve through too.
+                let menu = match menu_view.read(cx).menu_block {
+                    Some(_) => menu
+                        .menu(
+                            t(L10nKey::TerminalBlockJumpToStart),
+                            Box::new(JumpToBlockStart),
+                        )
+                        .menu(t(L10nKey::TerminalBlockCopyBoth), Box::new(CopyBlock)),
+                    None => menu,
+                };
+                let menu = menu.menu("OneKey Autofill…", Box::new(OneKeyOpen));
 
                 // `fork_label` is tty7-core's capability probe, and core has no
                 // locale table — take the answer, not its English wording.
