@@ -1587,6 +1587,39 @@ mod tests {
     }
 
     #[test]
+    fn restored_screen_with_no_screen_drops_folds_too() {
+        use crate::daemon::scrollback::tests::{lock_fs, pin_config_dir};
+        use crate::daemon::scrollback::{load, save, save_blocks};
+
+        let _fs = lock_fs();
+        pin_config_dir();
+        let pane = 917_003;
+        save(pane, &[], Some("t"));
+        save_blocks(
+            pane,
+            &[crate::daemon::protocol::CommandBlock {
+                id: 1,
+                exit_code: Some(0),
+                folded: true,
+                truncated: false,
+            }],
+        );
+
+        assert!(
+            restored_screen(crate::daemon::protocol::RestoreFrom {
+                pane_id: pane,
+                banner: None,
+            })
+            .is_none(),
+            "a snapshot holding nothing is not a screen to hand over"
+        );
+        assert!(
+            load(pane).is_none() && crate::daemon::scrollback::load_blocks(pane).is_none(),
+            "one-shot handoff: folds without a screen are forgotten, not kept"
+        );
+    }
+
+    #[test]
     fn alloc_id_is_monotonic_from_one() {
         let reg = Registry::new();
         assert_eq!(reg.alloc_id(), 1);

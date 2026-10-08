@@ -1158,6 +1158,28 @@ mod tests {
             tracker.dirty.contains(&1),
             "a genuine flip still arms its push"
         );
+        tracker.dirty.clear();
+        // The unfold direction is symmetric: redundant `false -> false`
+        // converges nothing, a real unfold arms.
+        tracker.set_folded(1, false);
+        assert!(
+            tracker.dirty.is_empty(),
+            "a redundant unfold must not arm a push either"
+        );
+        assert_eq!(
+            tracker.set_folded(1, false),
+            Some(false),
+            "redundant sets still report the state"
+        );
+        assert_eq!(
+            tracker.set_folded(99, true),
+            None,
+            "unknown seq resolves to nothing"
+        );
+        assert!(
+            !tracker.dirty.contains(&99),
+            "unknown seq leaves dirty untouched"
+        );
     }
 
     /// Entry-5: the unfold direction converges too — a span unfolded before
