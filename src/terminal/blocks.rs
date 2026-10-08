@@ -95,6 +95,15 @@ pub struct BlockTracker {
     /// the pane (not the view) so a relink keeps it, and it keys off `seq`
     /// so eviction below drops it with its span.
     folded: HashSet<u64>,
+    /// Spans whose local fold the daemon table has not echoed back yet
+    /// (entry-5, CAP-5). A toggle lands locally first and rides
+    /// fire-and-forget to the daemon; until an adoption sees the daemon row
+    /// agree, the refresh below keeps the local value instead of clobbering
+    /// it with the stale row — so a fold made while the daemon is
+    /// unreachable (or its message still in flight) survives the next
+    /// adoption instead of flickering off. Keyed off `seq`, dropped with
+    /// its span like [`BlockTracker::folded`](Self::folded).
+    dirty: HashSet<u64>,
     /// Highest daemon id consumed (or seen across a resync). Pairing only
     /// ever moves forward from here.
     watermark: u64,
@@ -149,6 +158,7 @@ impl BlockTracker {
         while self.spans.len() > BLOCK_SPAN_CAP {
             let evicted = self.spans.remove(0);
             self.folded.remove(&evicted.seq);
+            self.dirty.remove(&evicted.seq);
         }
     }
 
@@ -192,6 +202,7 @@ impl BlockTracker {
         });
         for seq in dropped {
             self.folded.remove(&seq);
+            self.dirty.remove(&seq);
         }
     }
 
@@ -203,6 +214,7 @@ impl BlockTracker {
     pub fn clear_blocks(&mut self) {
         self.spans.clear();
         self.folded.clear();
+        self.dirty.clear();
         self.open = None;
         self.resync = true;
     }
@@ -214,6 +226,7 @@ impl BlockTracker {
     pub fn reset_for_relink(&mut self) {
         self.spans.clear();
         self.folded.clear();
+        self.dirty.clear();
         self.open = None;
     }
 
@@ -225,14 +238,47 @@ impl BlockTracker {
     /// (or never saw) simply keeps `daemon_id: None`, and nothing routes on
     /// the ids either way. Idempotent — adopting the same snapshot twice
     /// pairs nothing new.
-    pub fn adopt(&mut self, blocks: &[CommandBlock]) {
+    ///
+    /// Folded flags (entry-5, CAP-5) ride the same call: spans already paired
+    /// by an earlier adopt refresh their fold from the daemon row (the daemon
+    /// is truth — a restart restores the same folded rows this way), except
+    /// spans with a newer local toggle the daemon has not echoed back yet
+    /// (see `dirty`): those keep the local value so an unacked toggle does
+    /// not flicker off on the next adoption. Newly paired spans keep their
+    /// local fold for the same reason. Returns the newly paired spans whose
+    /// local fold disagrees with the daemon row, as
+    /// `(seq, daemon_id, local_folded)`, so the caller can push them up and
+    /// converge the daemon to what the GUI shows.
+    pub fn adopt(&mut self, blocks: &[CommandBlock]) -> Vec<(u64, u64, bool)> {
         let max_id = blocks.iter().map(|b| b.id).max().unwrap_or(self.watermark);
         if self.resync {
             // Post-clear: the snapshot may still hold pre-clear rows the GUI
             // no longer shows — chase the watermark past them, pair nothing.
             self.watermark = self.watermark.max(max_id);
             self.resync = false;
-            return;
+            return Vec::new();
+        }
+        // Refresh already-paired spans from the daemon table first: the rows
+        // are keyed by id, so eviction elsewhere in the table cannot shift
+        // them. A span with a local toggle the daemon has not echoed back
+        // keeps the local value — the push is in flight (or the daemon
+        // unreachable), and clobbering it would flicker the user's fold off.
+        for span in self.spans.iter_mut() {
+            let Some(id) = span.daemon_id else {
+                continue;
+            };
+            if let Some(row) = blocks.iter().find(|b| b.id == id) {
+                span.truncated = row.truncated;
+                let local = self.folded.contains(&span.seq);
+                if row.folded == local {
+                    self.dirty.remove(&span.seq);
+                } else if !self.dirty.contains(&span.seq) {
+                    match row.folded {
+                        true => self.folded.insert(span.seq),
+                        false => self.folded.remove(&span.seq),
+                    };
+                }
+            }
         }
         let mut fresh: Vec<&CommandBlock> =
             blocks.iter().filter(|b| b.id > self.watermark).collect();
@@ -246,6 +292,7 @@ impl BlockTracker {
             .collect();
         // Suffix pairing: the newest unpaired span takes the newest fresh id.
         let n = unpaired.len().min(fresh.len());
+        let mut newly = Vec::with_capacity(n);
         for (span_idx, block) in unpaired[unpaired.len() - n..]
             .iter()
             .zip(&fresh[fresh.len() - n..])
@@ -253,8 +300,19 @@ impl BlockTracker {
             let span = &mut self.spans[*span_idx];
             span.daemon_id = Some(block.id);
             span.truncated = block.truncated;
+            // Newly paired: a local fold the daemon row disagrees with stays
+            // dirty and is reported so the caller pushes it up; an agreeing
+            // pair is already converged.
+            let local = self.folded.contains(&span.seq);
+            if local == block.folded {
+                self.dirty.remove(&span.seq);
+            } else {
+                self.dirty.insert(span.seq);
+                newly.push((span.seq, block.id, local));
+            }
         }
         self.watermark = self.watermark.max(max_id);
+        newly
     }
 
     /// The closed span covering `abs`, if any. A still-running command (open,
@@ -277,7 +335,10 @@ impl BlockTracker {
     }
 
     /// Folds (`true`) or unfolds a closed span. Returns the new state, or
-    /// `None` when `seq` names no closed span.
+    /// `None` when `seq` names no closed span. A successful toggle marks the
+    /// span dirty (entry-5, CAP-5): the daemon learns about it
+    /// fire-and-forget, so adoptions keep the local value until the daemon
+    /// row echoes it back.
     pub fn set_folded(&mut self, seq: u64, folded: bool) -> Option<bool> {
         if !self.spans.iter().any(|s| s.seq == seq) {
             return None;
@@ -286,6 +347,7 @@ impl BlockTracker {
             true => self.folded.insert(seq),
             false => self.folded.remove(&seq),
         };
+        self.dirty.insert(seq);
         Some(folded)
     }
 
@@ -804,5 +866,87 @@ mod tests {
         tracker.note_d(20, Some(0), Some("cmd".into()));
         assert!(!tracker.verify_all(&|_| None));
         assert!(tracker.spans.is_empty());
+    }
+
+    fn folded_daemon(id: u64) -> CommandBlock {
+        CommandBlock {
+            id,
+            exit_code: Some(0),
+            folded: true,
+            truncated: false,
+        }
+    }
+
+    /// Entry-5: a restart restores folds — already-paired spans refresh their
+    /// fold from the daemon row.
+    #[test]
+    fn adopt_refreshes_folds_for_already_paired_spans() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_d(20, Some(0), None);
+        tracker.adopt(&[daemon(1)]);
+        assert!(!tracker.is_folded(1));
+        tracker.adopt(&[folded_daemon(1)]);
+        assert!(tracker.is_folded(1), "the daemon is truth after a restore");
+        tracker.adopt(&[daemon(1)]);
+        assert!(!tracker.is_folded(1), "an unfold propagates the same way");
+    }
+
+    /// Entry-5: a toggle made before the first adoption survives pairing, and
+    /// the caller learns the newly paired rows so it can push the fold up.
+    #[test]
+    fn adopt_keeps_pre_adoption_folds_and_reports_new_pairs() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_d(20, Some(0), None);
+        tracker.set_folded(1, true);
+        let newly = tracker.adopt(&[daemon(1)]);
+        assert!(tracker.is_folded(1), "pairing must not clobber the local fold");
+        assert_eq!(newly, vec![(1, 1, true)]);
+        // The same snapshot adopted twice reports nothing new.
+        let again = tracker.adopt(&[daemon(1)]);
+        assert!(again.is_empty());
+        assert!(tracker.is_folded(1));
+    }
+
+    /// Entry-5: once the daemon echoes the pushed fold, the span is converged —
+    /// a later daemon unfold applies again instead of sticking.
+    #[test]
+    fn daemon_echo_clears_the_pending_toggle() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_d(20, Some(0), None);
+        tracker.set_folded(1, true);
+        assert_eq!(tracker.adopt(&[daemon(1)]), vec![(1, 1, true)]);
+        // The push landed: the daemon row agrees, so the span is converged.
+        let again = tracker.adopt(&[folded_daemon(1)]);
+        assert!(again.is_empty());
+        assert!(tracker.is_folded(1));
+        // And a genuine daemon-side unfold now propagates.
+        tracker.adopt(&[daemon(1)]);
+        assert!(!tracker.is_folded(1));
+    }
+
+    /// Entry-5: the unfold direction converges too — a span unfolded before
+    /// pairing is reported so the caller pushes the unfold up, and re-adopts
+    /// keep it until the daemon echoes.
+    #[test]
+    fn adopt_reports_pre_adoption_unfolds_against_folded_rows() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_d(20, Some(0), None);
+        // Paired while the daemon still shows folded: local unfold is newer.
+        let newly = tracker.adopt(&[folded_daemon(1)]);
+        assert!(!tracker.is_folded(1));
+        assert_eq!(newly, vec![(1, 1, false)]);
+        let again = tracker.adopt(&[folded_daemon(1)]);
+        assert!(again.is_empty());
+        assert!(!tracker.is_folded(1), "an unacked unfold must not flicker back on");
+        // The push landed: the daemon row agrees, so the span is converged —
+        // and a genuine daemon-side fold now propagates.
+        tracker.adopt(&[daemon(1)]);
+        assert!(!tracker.is_folded(1));
+        tracker.adopt(&[folded_daemon(1)]);
+        assert!(tracker.is_folded(1));
     }
 }

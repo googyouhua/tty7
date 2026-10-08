@@ -2008,6 +2008,24 @@ impl RemoteTerminal {
         }
     }
 
+    /// Report a local fold toggle to the daemon (entry-5, CAP-5).
+    /// Fire-and-forget like [`Self::set_follow_nested`]: the local view
+    /// already updated, and an unknown id on the far side is silence.
+    pub fn set_block_folded(&self, pane_id: u64, block_id: u64, folded: bool) {
+        self.link.send(ClientMsg::SetBlockFolded {
+            pane_id,
+            block_id,
+            folded,
+        });
+    }
+
+    /// Tell the daemon its block table is stale (entry-5, CAP-5): the GUI
+    /// cleared its scrollback. Fire-and-forget; the local spans already
+    /// dropped through the clear path.
+    pub fn clear_command_blocks(&self, pane_id: u64) {
+        self.link.send(ClientMsg::ClearCommandBlocks { pane_id });
+    }
+
     pub fn resize(&mut self, size: TermSize, cell_w: u16, cell_h: u16) {
         let echoed = self.resize_echoed();
         // The cell size has to be part of the early-out, not just cols/rows: it

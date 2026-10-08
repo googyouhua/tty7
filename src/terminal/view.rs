@@ -3871,12 +3871,17 @@ impl TerminalView {
         let Ok(mut tracker) = store.lock() else {
             return;
         };
-        if !tracker.spans().iter().any(|s| s.seq == seq) {
-            return;
-        }
+        let daemon_id = tracker.spans().iter().find(|s| s.seq == seq).and_then(|s| s.daemon_id);
         let folded = !tracker.is_folded(seq);
         if tracker.set_folded(seq, folded).is_some() {
             drop(tracker);
+            // Server-side truth (entry-5, CAP-5): report the toggle so a
+            // restart restores the same folded rows. Best effort — the local
+            // view already updated, and a span the daemon never saw (no id
+            // yet) converges on the next adoption's push-back instead.
+            if let Some(block_id) = daemon_id {
+                self.terminal.set_block_folded(self.pane_id, block_id, folded);
+            }
             cx.notify();
         }
     }
@@ -3902,7 +3907,19 @@ impl TerminalView {
             return;
         }
         if let Ok(mut tracker) = self.terminal.block_tracker().lock() {
-            tracker.adopt(&context.blocks);
+            // Newly paired spans whose local fold disagrees with the daemon
+            // row are reported back: push them up so the daemon converges to
+            // what the GUI shows (entry-5, CAP-5). Both directions — a
+            // pre-adoption fold and a pre-adoption unfold alike.
+            let newly = tracker.adopt(&context.blocks);
+            let pushes: Vec<(u64, bool)> = newly
+                .into_iter()
+                .map(|(_, block_id, folded)| (block_id, folded))
+                .collect();
+            drop(tracker);
+            for (block_id, folded) in pushes {
+                self.terminal.set_block_folded(self.pane_id, block_id, folded);
+            }
         }
     }
 
@@ -4341,6 +4358,11 @@ impl TerminalView {
         if let Ok(mut tracker) = self.terminal.block_tracker().lock() {
             tracker.clear_blocks();
         }
+        // The daemon's rows name output no longer on any grid (entry-5,
+        // CAP-5): tell it to drop the table too, so the next adoption cannot
+        // pair new spans against these stale ids. Best effort — the local
+        // view already cleared.
+        self.terminal.clear_command_blocks(self.pane_id);
         // Image placements are anchored in absolute scrollback rows, so the
         // rows we just discarded moved every anchor. Drop them; the daemon does
         // not replay out-of-band image frames, so a browser redraws on its next
