@@ -3,7 +3,7 @@ title: '块模型 tracer：配对建块贯通折叠与菜单脚手架'
 type: 'feature'
 ticket: 1
 created: '2026-10-07'
-status: 'built'
+status: 'done'
 baseline_revision: '4f0e140'
 route: 'full'
 route_source: 'auto'
