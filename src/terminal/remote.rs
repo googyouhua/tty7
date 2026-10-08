@@ -6189,6 +6189,38 @@ mod tests {
         }
     }
 
+    /// Entry-5: the fold/clear push actually emits the addressed frames. The
+    /// view loop and toggles call these two helpers; if either sent the wrong
+    /// ids — or nothing — the daemon table would silently never converge.
+    #[test]
+    fn block_fold_and_clear_emit_the_addressed_frames() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        term.set_block_folded(7, 42, true);
+        term.clear_command_blocks(7);
+
+        match ClientMsg::read(&mut daemon_side).unwrap() {
+            ClientMsg::SetBlockFolded {
+                pane_id,
+                block_id,
+                folded,
+            } => assert_eq!(
+                (pane_id, block_id, folded),
+                (7, 42, true),
+                "the fold push names its pane, row and direction"
+            ),
+            other => panic!("expected SetBlockFolded, got {other:?}"),
+        }
+        match ClientMsg::read(&mut daemon_side).unwrap() {
+            ClientMsg::ClearCommandBlocks { pane_id } => {
+                assert_eq!(pane_id, 7, "the clear push names its pane")
+            }
+            other => panic!("expected ClearCommandBlocks, got {other:?}"),
+        }
+    }
+
     /// A peer that holds the link open and stops reading is what the router
     /// looks like from here when the far end is congested: `copy_bidirectional`
     /// stops draining our half and the send buffer fills. The socket is
