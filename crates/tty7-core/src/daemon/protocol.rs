@@ -634,8 +634,9 @@ pub struct PaneContext {
 /// The daemon builds this table and hands it to clients inside
 /// [`PaneContext::blocks`]; the client's own spans pair against it in
 /// close order purely as enrichment (`daemon_id`/`truncated` land on spans
-/// nothing routes on yet). `folded` is client UI state carried along so a
-/// snapshot round-trips it; the daemon always sends `false`.
+/// nothing routes on yet). `folded` is server-side truth (entry-5, CAP-5):
+/// the GUI reports folds over [`ClientMsg::SetBlockFolded`] and the daemon
+/// persists them with the pane, so a restart restores the same folded rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandBlock {
     /// 1-based, in the order the pane's `D` marks closed them.
@@ -1033,6 +1034,20 @@ pub enum ClientMsg {
     QueryProcs {
         pane_id: u64,
     },
+    /// Fold (`true`) or unfold one closed command block on the daemon's table.
+    /// Sent fire-and-forget by the GUI after a local fold toggles; an unknown
+    /// block id is silence, not an error. Entry-5, CAP-5.
+    SetBlockFolded {
+        pane_id: u64,
+        block_id: u64,
+        folded: bool,
+    },
+    /// Drop the daemon's command-block table (GUI cleared its scrollback, so
+    /// absolute rows were rebirthed and every span pointed at rows that no
+    /// longer exist). Entry-5, CAP-5: the deferred entry-1 clear wiring.
+    ClearCommandBlocks {
+        pane_id: u64,
+    },
     OnWorkspace(Box<WorkspaceRequest>),
     Version,
     /// Only after the daemon advertised [`FEATURE_SIZE_LEASE`].
@@ -1140,6 +1155,10 @@ mod kind {
     pub const LEASE: u8 = 57;
     pub const AGENT_EVENT: u8 = 58;
     pub const SET_FOLLOW_NESTED: u8 = 59;
+    /// [`ClientMsg::SetBlockFolded`], entry-5 (CAP-5).
+    pub const SET_BLOCK_FOLDED: u8 = 64;
+    /// [`ClientMsg::ClearCommandBlocks`], entry-5 (CAP-5).
+    pub const CLEAR_COMMAND_BLOCKS: u8 = 65;
 
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
@@ -1428,6 +1447,18 @@ impl ClientMsg {
             ClientMsg::QueryProcs { pane_id } => {
                 write_frame(w, kind::QUERY_PROCS, &to_json(pane_id)?)
             }
+            ClientMsg::SetBlockFolded {
+                pane_id,
+                block_id,
+                folded,
+            } => write_frame(
+                w,
+                kind::SET_BLOCK_FOLDED,
+                &to_json(&(pane_id, block_id, folded))?,
+            ),
+            ClientMsg::ClearCommandBlocks { pane_id } => {
+                write_frame(w, kind::CLEAR_COMMAND_BLOCKS, &to_json(pane_id)?)
+            }
             ClientMsg::ListForwards { pane_id } => {
                 write_frame(w, kind::LIST_FORWARDS, &to_json(pane_id)?)
             }
@@ -1552,6 +1583,17 @@ impl ClientMsg {
                 pane_id: from_json(&payload)?,
             },
             kind::QUERY_PROCS => ClientMsg::QueryProcs {
+                pane_id: from_json(&payload)?,
+            },
+            kind::SET_BLOCK_FOLDED => {
+                let (pane_id, block_id, folded) = from_json(&payload)?;
+                ClientMsg::SetBlockFolded {
+                    pane_id,
+                    block_id,
+                    folded,
+                }
+            }
+            kind::CLEAR_COMMAND_BLOCKS => ClientMsg::ClearCommandBlocks {
                 pane_id: from_json(&payload)?,
             },
             kind::ADD_FORWARD => {
@@ -1877,6 +1919,17 @@ mod tests {
             ClientMsg::Detach,
             ClientMsg::SetFollowNested(true),
             ClientMsg::SetFollowNested(false),
+            ClientMsg::SetBlockFolded {
+                pane_id: 7,
+                block_id: 3,
+                folded: true,
+            },
+            ClientMsg::SetBlockFolded {
+                pane_id: 7,
+                block_id: 3,
+                folded: false,
+            },
+            ClientMsg::ClearCommandBlocks { pane_id: 7 },
             ClientMsg::Kill { pane_id: 7 },
             ClientMsg::List,
             ClientMsg::Shutdown,
