@@ -3,7 +3,7 @@ title: '整块纯文本复制三项'
 type: 'feature'
 ticket: 3
 created: '2026-10-08'
-status: 'built'
+status: 'done'
 baseline_revision: 'b06ab5cf36ba32d442132d64fb12aa2377ad6e87'
 route: 'full'
 route_source: 'auto'

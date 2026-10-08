@@ -3,7 +3,7 @@ title: '失败红标与 Ctrl-C 成块'
 type: 'feature'
 ticket: 4
 created: '2026-10-08'
-status: 'built'
+status: 'done'
 baseline_revision: 'b06ab5cf36ba32d442132d64fb12aa2377ad6e87'
 route: 'oneshot'
 route_source: 'auto'
