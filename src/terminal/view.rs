@@ -6743,18 +6743,23 @@ impl TerminalView {
     }
 
     /// One marker per visible screen row: the closed span starting there, if
-    /// any — `▾` while its rows show, `▸` while folded to one line. Laid down
-    /// the left padding beside the grid, the same absolutely positioned
-    /// overlay pattern as [`render_scrollbar`](Self::render_scrollbar): only
-    /// rows with a span get a child, so an integration-less pane renders
-    /// nothing at all.
+    /// any — `▾` while its rows show, `▸` while folded to one line. A span
+    /// that failed (any non-zero exit, Ctrl-C's 130 included) paints its
+    /// marker in the theme danger red with a red bar at the strip's left
+    /// edge — the block-start red bar. Laid down the left padding beside
+    /// the grid, the same absolutely positioned overlay pattern as
+    /// [`render_scrollbar`](Self::render_scrollbar): only rows with a span
+    /// get a child, so an integration-less pane renders nothing at all.
     ///
     /// The strip is marker paint only — clicks toggle the fold from the
-    /// element's mouse handler, which owns the cell geometry.
+    /// element's mouse handler, which owns the cell geometry. Hover only
+    /// underlines the marker glyph itself: no overlay is ever raised, so a
+    /// hover can never cover the block's first line.
     fn render_block_gutter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let markers = self.block_gutter_markers();
         let line_height = self.line_height;
         let view = cx.entity();
+        let danger = cx.theme().danger;
         div()
             .absolute()
             .top(px(GRID_PAD_Y))
@@ -6766,7 +6771,7 @@ impl TerminalView {
                     .into_iter()
                     .enumerate()
                     .filter_map(move |(row, marker)| {
-                        let (seq, folded) = marker?;
+                        let (seq, folded, failed) = marker?;
                         let left = view.clone();
                         let right = view.clone();
                         Some(
@@ -6785,6 +6790,10 @@ impl TerminalView {
                                 // focus: occlude the grid behind (whose handler
                                 // then stands down) and fold here instead.
                                 .occlude()
+                                // Glyph-only hover: an underline on the marker
+                                // repaints nothing outside this strip, so the
+                                // block's first line stays visible.
+                                .hover(|s| s.underline())
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     move |_ev: &MouseDownEvent,
@@ -6807,6 +6816,19 @@ impl TerminalView {
                                         });
                                     },
                                 )
+                                // Failed spans redden the marker and raise the
+                                // block-start red bar, both in theme danger.
+                                .when(failed, |d| {
+                                    d.text_color(danger).child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(px(3.))
+                                            .bg(danger),
+                                    )
+                                })
                                 .child(match folded {
                                     true => "▸",
                                     false => "▾",
@@ -6816,9 +6838,9 @@ impl TerminalView {
             )
     }
 
-    /// The gutter's markers, one per screen row — see
-    /// [`render_block_gutter`](Self::render_block_gutter).
-    fn block_gutter_markers(&self) -> Vec<Option<(u64, bool)>> {
+    /// The gutter's markers, one per screen row: `(seq, folded, failed)` —
+    /// see [`render_block_gutter`](Self::render_block_gutter).
+    fn block_gutter_markers(&self) -> Vec<Option<(u64, bool, bool)>> {
         let rows = self.terminal.size().rows;
         let Some(term) = self.terminal.term.try_lock_unfair() else {
             return Vec::new();
@@ -6836,9 +6858,11 @@ impl TerminalView {
         }
         let mut starts = std::collections::HashMap::new();
         for span in tracker.spans() {
-            starts
-                .entry(span.start_abs)
-                .or_insert((span.seq, tracker.is_folded(span.seq)));
+            starts.entry(span.start_abs).or_insert((
+                span.seq,
+                tracker.is_folded(span.seq),
+                span.is_failed(),
+            ));
         }
         let (top, _) = super::blocks::window_abs_range(&term, rows);
         let map = visible_map(&term, &tracker, rows);
