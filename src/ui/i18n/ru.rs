@@ -1866,6 +1866,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::TerminalBlockCopyBoth => "Скопировать команду и вывод",
         L10nKey::TerminalBlockFold => "Свернуть блок",
         L10nKey::TerminalBlockUnfold => "Развернуть блок",
+        L10nKey::TerminalBlockCopyCommand => "Скопировать команду",
+        L10nKey::TerminalBlockCopyOutput => "Скопировать вывод",
         L10nKey::TabContextCloseTabsBelow => "Закрыть вкладки ниже",
         L10nKey::TabContextMarkUnread => "Отметить непрочитанной",
         L10nKey::TabContextHibernate => "Перевести в спящий режим",
