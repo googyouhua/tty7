@@ -80,6 +80,13 @@ impl BlockSpan {
             None => "exit ?".to_string(),
         }
     }
+
+    /// Whether the span closed with a failure — any non-zero exit status,
+    /// including an interrupt (Ctrl-C surfaces as 130). A missing status is
+    /// unknown, not failure, so it never reddens.
+    pub fn is_failed(&self) -> bool {
+        self.exit_code.is_some_and(|code| code != 0)
+    }
 }
 
 /// The pane's spans plus its fold state, shared between the reader thread
@@ -566,6 +573,20 @@ mod tests {
         tracker.note_d(20, Some(130), None);
         assert_eq!(tracker.spans[0].exit_code, Some(130));
         assert_eq!(tracker.spans[0].exit_line(), "exit 130");
+    }
+
+    /// Only real failures redden: any non-zero status — including Ctrl-C's
+    /// 130 and signal codes — reads as failed, while success and a missing
+    /// status (bare `D`) never do.
+    #[test]
+    fn only_nonzero_exit_reads_as_failed() {
+        let mut tracker = BlockTracker::default();
+        for (end, code) in [(20, Some(1)), (30, Some(130)), (40, Some(0)), (50, None)] {
+            tracker.note_b(end - 5);
+            tracker.note_d(end, code, None);
+        }
+        let failed: Vec<bool> = tracker.spans.iter().map(|s| s.is_failed()).collect();
+        assert_eq!(failed, vec![true, true, false, false]);
     }
 
     /// Close-order pairing: oldest unpaired span takes the smallest fresh id,
