@@ -14,7 +14,7 @@ use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
 
 use super::TermSize;
-use super::blocks::{BlockSpan, block_text, screen_to_abs, visible_map};
+use super::blocks::{BlockSpan, block_command_text, block_output_text, block_text, screen_to_abs, visible_map};
 use super::cmd_editor::CmdEditor;
 use super::completion::{self, CandidateKind, CompletionSession};
 use super::element::{GridSnapshot, RenderCell, TerminalElement};
@@ -132,6 +132,8 @@ actions!(
         ClearScrollback,
         JumpToBlockStart,
         CopyBlock,
+        CopyBlockCommand,
+        CopyBlockOutput,
         InsertNewline,
         InsertNewlineFallback,
         OneKeyOpen,
@@ -3852,12 +3854,38 @@ impl TerminalView {
     /// Copies the latched block: command plus output as plain text, closed by
     /// its exit line — the same plain-text semantics as `copy_selection`.
     pub fn copy_block(&mut self, cx: &mut Context<Self>) {
+        self.copy_block_with(cx, block_text);
+    }
+
+    /// Copies the latched block's command line plus the exit line.
+    pub fn copy_block_command(&mut self, cx: &mut Context<Self>) {
+        self.copy_block_with(cx, block_command_text);
+    }
+
+    /// Copies the latched block's output lines plus the exit line.
+    pub fn copy_block_output(&mut self, cx: &mut Context<Self>) {
+        self.copy_block_with(cx, block_output_text);
+    }
+
+    /// Shared latch for the three block-copy items: resolves `menu_block`,
+    /// reads the grid's absolute rows (never the fold mapping, so folded
+    /// spans copy in full), and writes nothing when the span is gone or the
+    /// text is empty.
+    fn copy_block_with(
+        &mut self,
+        cx: &mut Context<Self>,
+        text_of: fn(
+            &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
+            &BlockSpan,
+            bool,
+        ) -> Option<String>,
+    ) {
         let Some(span) = self.menu_block.and_then(|seq| self.block_span(seq)) else {
             return;
         };
         let trim = cx.global::<Config>().clipboard_trim_trailing_spaces;
         let term = self.terminal.term.lock();
-        let text = block_text(&term, &span, trim);
+        let text = text_of(&term, &span, trim);
         drop(term);
         if let Some(text) = text.filter(|t| !t.is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -8401,6 +8429,12 @@ impl Render for TerminalView {
                 cx.listener(|this, _: &JumpToBlockStart, _w, cx| this.jump_to_block_start(cx)),
             )
             .on_action(cx.listener(|this, _: &CopyBlock, _w, cx| this.copy_block(cx)))
+            .on_action(cx.listener(|this, _: &CopyBlockCommand, _w, cx| {
+                this.copy_block_command(cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyBlockOutput, _w, cx| {
+                this.copy_block_output(cx)
+            }))
             .on_action(cx.listener(|this, _: &OneKeyOpen, _w, cx| this.open_onekey_picker(cx)))
             .on_action(cx.listener(|this, _: &OneKeyFillUsername, _w, cx| {
                 this.fill_onekey(tty7_core::core::onekey::OneKeyFill::Username, cx)
@@ -8534,7 +8568,15 @@ impl Render for TerminalView {
                             t(L10nKey::TerminalBlockJumpToStart),
                             Box::new(JumpToBlockStart),
                         )
-                        .menu(t(L10nKey::TerminalBlockCopyBoth), Box::new(CopyBlock)),
+                        .menu(t(L10nKey::TerminalBlockCopyBoth), Box::new(CopyBlock))
+                        .menu(
+                            t(L10nKey::TerminalBlockCopyCommand),
+                            Box::new(CopyBlockCommand),
+                        )
+                        .menu(
+                            t(L10nKey::TerminalBlockCopyOutput),
+                            Box::new(CopyBlockOutput),
+                        ),
                     None => menu,
                 };
                 let menu = menu.menu("OneKey Autofill…", Box::new(OneKeyOpen));

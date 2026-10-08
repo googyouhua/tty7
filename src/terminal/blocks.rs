@@ -451,15 +451,10 @@ fn truncate_cols(text: &str, cols: usize) -> String {
     out
 }
 
-/// The plain text of `span`'s rows, closed by its exit line — the block copy.
-///
-/// Read through [`Term::bounds_to_string`], the same function `capture
-/// --plain` uses, so wrapped lines join instead of splitting at an invented
-/// newline. `trim_trailing` trims trailing spaces per line exactly like
-/// `copy_selection` (which it follows when its config is on); blank edges
-/// stay either way (the range is the block, verbatim). Returns `None` when
-/// the grid no longer holds the span's rows.
-pub fn block_text<T: EventListener>(
+/// The plain grid text of `span`'s rows, without the exit line — the shared
+/// source every block-copy item reads through. `None` when the grid no longer
+/// holds the span's rows.
+fn block_grid_text<T: EventListener>(
     term: &Term<T>,
     span: &BlockSpan,
     trim_trailing: bool,
@@ -478,15 +473,67 @@ pub fn block_text<T: EventListener>(
         Point::new(Line(start as i32), Column(0)),
         Point::new(Line(end as i32), term.last_column()),
     );
-    let mut text = match trim_trailing {
+    Some(match trim_trailing {
         true => trim_trailing_spaces(&text),
         false => text,
-    };
-    if !text.is_empty() {
-        text.push('\n');
+    })
+}
+
+/// Appends the exit line to grid text, uniformly for every copy item.
+fn with_exit_line(mut grid: String, span: &BlockSpan) -> String {
+    if !grid.is_empty() {
+        grid.push('\n');
     }
-    text.push_str(&span.exit_line());
-    Some(text)
+    grid.push_str(&span.exit_line());
+    grid
+}
+
+/// The plain text of `span`'s rows, closed by its exit line — the block copy.
+///
+/// Read through [`Term::bounds_to_string`], the same function `capture
+/// --plain` uses, so wrapped lines join instead of splitting at an invented
+/// newline. `trim_trailing` trims trailing spaces per line exactly like
+/// `copy_selection` (which it follows when its config is on); blank edges
+/// stay either way (the range is the block, verbatim). Reads the grid's
+/// absolute rows, never the fold mapping, so a folded span copies in full.
+/// Returns `None` when the grid no longer holds the span's rows.
+pub fn block_text<T: EventListener>(
+    term: &Term<T>,
+    span: &BlockSpan,
+    trim_trailing: bool,
+) -> Option<String> {
+    block_grid_text(term, span, trim_trailing).map(|grid| with_exit_line(grid, span))
+}
+
+/// The block's command line (its first logical line) plus the exit line.
+///
+/// The split runs on the already-joined grid text, so a command the terminal
+/// wrapped across rows stays one line. Same plain-text source as
+/// [`block_text`]; folded-state independent; `None` exactly when it is.
+pub fn block_command_text<T: EventListener>(
+    term: &Term<T>,
+    span: &BlockSpan,
+    trim_trailing: bool,
+) -> Option<String> {
+    block_grid_text(term, span, trim_trailing).map(|grid| {
+        let first = grid.lines().next().unwrap_or("").to_string();
+        with_exit_line(first, span)
+    })
+}
+
+/// The block's output lines (everything past the command line) plus the exit
+/// line. A command with no output copies just the exit line. Same source,
+/// fold-independence and `None` contract as [`block_command_text`].
+pub fn block_output_text<T: EventListener>(
+    term: &Term<T>,
+    span: &BlockSpan,
+    trim_trailing: bool,
+) -> Option<String> {
+    block_grid_text(term, span, trim_trailing).map(|grid| {
+        let mut lines = grid.lines();
+        let _ = lines.next();
+        with_exit_line(lines.collect::<Vec<_>>().join("\n"), span)
+    })
 }
 
 /// Trims trailing spaces and tabs per line, like `copy_selection`.
@@ -739,6 +786,127 @@ mod tests {
             fp: String::new(),
         };
         assert_eq!(block_text(&term, &span, true), None);
+    }
+
+    /// The three copy items share one source: command takes the first logical
+    /// line, output takes the rest, both takes all — each closed by the same
+    /// exit line, and a wrapped command stays one line.
+    #[test]
+    fn block_parts_split_command_output_and_both_share_the_exit_line() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::Config;
+
+        let size = crate::terminal::size::TermSize::new(10, 8);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        // 10 columns: the 14-char command wraps 10+4 but stays one line.
+        parser.advance(&mut term, b"0123456789ABCD\r\nsecond\r\n");
+        let history = term.grid().history_size() as i64;
+        let span = BlockSpan {
+            seq: 1,
+            start_abs: history,
+            end_abs: history + 2,
+            exit_code: Some(0),
+            daemon_id: None,
+            truncated: false,
+            fp: String::new(),
+        };
+        assert_eq!(
+            block_command_text(&term, &span, true).as_deref(),
+            Some("0123456789ABCD\nexit 0")
+        );
+        assert_eq!(
+            block_output_text(&term, &span, true).as_deref(),
+            Some("second\nexit 0")
+        );
+        assert_eq!(
+            block_text(&term, &span, true).as_deref(),
+            Some("0123456789ABCD\nsecond\nexit 0")
+        );
+    }
+
+    /// Output with nothing past the command line copies just the exit line,
+    /// and eviction reads as `None` on every item, not a panic.
+    #[test]
+    fn block_output_without_output_rows_is_just_the_exit_line() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::Config;
+
+        let size = crate::terminal::size::TermSize::new(40, 8);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut term, b"$ true\r\n");
+        let history = term.grid().history_size() as i64;
+        let span = BlockSpan {
+            seq: 1,
+            start_abs: history,
+            end_abs: history,
+            exit_code: Some(1),
+            daemon_id: None,
+            truncated: false,
+            fp: String::new(),
+        };
+        assert_eq!(
+            block_command_text(&term, &span, true).as_deref(),
+            Some("$ true\nexit 1")
+        );
+        assert_eq!(
+            block_output_text(&term, &span, true).as_deref(),
+            Some("exit 1")
+        );
+        let gone = BlockSpan {
+            seq: 2,
+            start_abs: history - 100,
+            end_abs: history - 90,
+            exit_code: Some(0),
+            daemon_id: None,
+            truncated: false,
+            fp: String::new(),
+        };
+        assert_eq!(block_command_text(&term, &gone, true), None);
+        assert_eq!(block_output_text(&term, &gone, true), None);
+    }
+
+    /// Copies read the grid's absolute rows, never the fold mapping: a folded
+    /// span copies exactly what the unfolded one does.
+    #[test]
+    fn block_copies_of_a_folded_span_match_the_unfolded_text() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::Config;
+
+        let size = crate::terminal::size::TermSize::new(40, 8);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut term, b"$ cmd\r\nout1\r\nout2\r\n");
+        let history = term.grid().history_size() as i64;
+        let span = BlockSpan {
+            seq: 1,
+            start_abs: history,
+            end_abs: history + 2,
+            exit_code: Some(0),
+            daemon_id: None,
+            truncated: false,
+            fp: String::new(),
+        };
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span.clone());
+        tracker.set_folded(1, true);
+        assert!(tracker.is_folded(1));
+        assert_eq!(
+            block_text(&term, &span, true).as_deref(),
+            Some("$ cmd\nout1\nout2\nexit 0")
+        );
+        assert_eq!(
+            block_command_text(&term, &span, true).as_deref(),
+            Some("$ cmd\nexit 0")
+        );
+        assert_eq!(
+            block_output_text(&term, &span, true).as_deref(),
+            Some("out1\nout2\nexit 0")
+        );
     }
 
     /// The fold summary names the first line, the row count and the exit.

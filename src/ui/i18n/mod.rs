@@ -1395,6 +1395,8 @@ l10n_keys! {
     TerminalContextClear,
     TerminalBlockJumpToStart,
     TerminalBlockCopyBoth,
+    TerminalBlockCopyCommand,
+    TerminalBlockCopyOutput,
     TabContextCloseTabsBelow,
     TabContextMarkUnread,
     TabContextHibernate,
