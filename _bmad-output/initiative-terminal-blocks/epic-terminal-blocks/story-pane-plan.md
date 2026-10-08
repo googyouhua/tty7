@@ -3,7 +3,7 @@ title: '折叠持久化随 pane'
 type: 'feature'
 ticket: 5
 created: '2026-10-08'
-status: 'built'
+status: 'done'
 baseline_revision: 'b06ab5c'
 route: 'full'
 route_source: 'auto'
