@@ -1811,12 +1811,7 @@ impl DaemonPane {
                 }
                 ring.append(&restore_preamble(restore.banner.as_deref()));
                 let next = restored_next_block_id(&restore.blocks);
-                (
-                    ring,
-                    restore.title,
-                    restore.blocks.into(),
-                    next,
-                )
+                (ring, restore.title, restore.blocks.into(), next)
             }
             None => (
                 ReplayRing::new(size),
@@ -2846,7 +2841,13 @@ impl DaemonPane {
     /// periodic snapshot writer. Small (capped at [`COMMAND_BLOCK_CAP`]),
     /// so the keeper writes it unconditionally.
     pub fn block_table_snapshot(&self) -> Vec<CommandBlock> {
-        self.state.lock().unwrap().command_blocks.iter().cloned().collect()
+        self.state
+            .lock()
+            .unwrap()
+            .command_blocks
+            .iter()
+            .cloned()
+            .collect()
     }
 
     fn hangup(&self) {
@@ -6451,8 +6452,18 @@ mod tests {
     fn restored_next_block_id_continues_past_the_carried_table() {
         assert_eq!(restored_next_block_id(&[]), 0);
         let blocks = vec![
-            CommandBlock { id: 3, exit_code: Some(0), folded: true, truncated: false },
-            CommandBlock { id: 7, exit_code: Some(1), folded: false, truncated: false },
+            CommandBlock {
+                id: 3,
+                exit_code: Some(0),
+                folded: true,
+                truncated: false,
+            },
+            CommandBlock {
+                id: 7,
+                exit_code: Some(1),
+                folded: false,
+                truncated: false,
+            },
         ];
         assert_eq!(restored_next_block_id(&blocks), 8);
     }

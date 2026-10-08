@@ -596,8 +596,13 @@ mod tests {
         let _fs = lock_fs();
         pin_config_dir();
         let pane = 90_008;
-        std::fs::create_dir_all(blocks_path_for(pane).expect("a path").parent().expect("a parent"))
-            .unwrap();
+        std::fs::create_dir_all(
+            blocks_path_for(pane)
+                .expect("a path")
+                .parent()
+                .expect("a parent"),
+        )
+        .unwrap();
         std::fs::write(blocks_path_for(pane).expect("a path"), b"NOT JSON WE WROTE").unwrap();
         assert!(
             load_blocks(pane).is_none(),

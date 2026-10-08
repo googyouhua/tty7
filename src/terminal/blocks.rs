@@ -1106,7 +1106,10 @@ mod tests {
         tracker.note_d(20, Some(0), None);
         tracker.set_folded(1, true);
         let newly = tracker.adopt(&[daemon(1)]);
-        assert!(tracker.is_folded(1), "pairing must not clobber the local fold");
+        assert!(
+            tracker.is_folded(1),
+            "pairing must not clobber the local fold"
+        );
         assert_eq!(newly, vec![(1, 1, true)]);
         // The same snapshot adopted twice reports nothing new.
         let again = tracker.adopt(&[daemon(1)]);
@@ -1146,7 +1149,10 @@ mod tests {
         assert_eq!(newly, vec![(1, 1, false)]);
         let again = tracker.adopt(&[folded_daemon(1)]);
         assert!(again.is_empty());
-        assert!(!tracker.is_folded(1), "an unacked unfold must not flicker back on");
+        assert!(
+            !tracker.is_folded(1),
+            "an unacked unfold must not flicker back on"
+        );
         // The push landed: the daemon row agrees, so the span is converged —
         // and a genuine daemon-side fold now propagates.
         tracker.adopt(&[daemon(1)]);

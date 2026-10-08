@@ -14,7 +14,9 @@ use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
 
 use super::TermSize;
-use super::blocks::{BlockSpan, block_command_text, block_output_text, block_text, screen_to_abs, visible_map};
+use super::blocks::{
+    BlockSpan, block_command_text, block_output_text, block_text, screen_to_abs, visible_map,
+};
 use super::cmd_editor::CmdEditor;
 use super::completion::{self, CandidateKind, CompletionSession};
 use super::element::{GridSnapshot, RenderCell, TerminalElement};
@@ -3900,7 +3902,11 @@ impl TerminalView {
         let Ok(mut tracker) = store.lock() else {
             return;
         };
-        let daemon_id = tracker.spans().iter().find(|s| s.seq == seq).and_then(|s| s.daemon_id);
+        let daemon_id = tracker
+            .spans()
+            .iter()
+            .find(|s| s.seq == seq)
+            .and_then(|s| s.daemon_id);
         let folded = !tracker.is_folded(seq);
         if tracker.set_folded(seq, folded).is_some() {
             drop(tracker);
@@ -3909,7 +3915,8 @@ impl TerminalView {
             // view already updated, and a span the daemon never saw (no id
             // yet) converges on the next adoption's push-back instead.
             if let Some(block_id) = daemon_id {
-                self.terminal.set_block_folded(self.pane_id, block_id, folded);
+                self.terminal
+                    .set_block_folded(self.pane_id, block_id, folded);
             }
             cx.notify();
         }
@@ -3967,7 +3974,8 @@ impl TerminalView {
                 .collect();
             drop(tracker);
             for (block_id, folded) in pushes {
-                self.terminal.set_block_folded(self.pane_id, block_id, folded);
+                self.terminal
+                    .set_block_folded(self.pane_id, block_id, folded);
             }
         }
     }
@@ -8499,12 +8507,10 @@ impl Render for TerminalView {
             .on_action(
                 cx.listener(|this, _: &ToggleBlockFold, _w, cx| this.toggle_menu_block_fold(cx)),
             )
-            .on_action(cx.listener(|this, _: &CopyBlockCommand, _w, cx| {
-                this.copy_block_command(cx)
-            }))
-            .on_action(cx.listener(|this, _: &CopyBlockOutput, _w, cx| {
-                this.copy_block_output(cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &CopyBlockCommand, _w, cx| this.copy_block_command(cx)),
+            )
+            .on_action(cx.listener(|this, _: &CopyBlockOutput, _w, cx| this.copy_block_output(cx)))
             .on_action(cx.listener(|this, _: &OneKeyOpen, _w, cx| this.open_onekey_picker(cx)))
             .on_action(cx.listener(|this, _: &OneKeyFillUsername, _w, cx| {
                 this.fill_onekey(tty7_core::core::onekey::OneKeyFill::Username, cx)
