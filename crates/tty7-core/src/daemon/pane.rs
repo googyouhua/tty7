@@ -1404,6 +1404,12 @@ pub struct Carried {
     pub agent_argv: Option<Vec<String>>,
     pub agent_session: Option<crate::core::cli_agent::AgentSessionState>,
     pub follow_nested: bool,
+    /// The pane's closed command blocks (entry-5, CAP-5): `folded` flags ride
+    /// the handoff so an exec upgrade keeps the same folded rows.
+    pub command_blocks: Vec<CommandBlock>,
+    /// Next block id, carried so ids keep naming closings in closing order
+    /// across the exec.
+    pub next_block_id: u64,
 }
 
 /// A pty master this process inherited from its own previous image.
@@ -1632,6 +1638,10 @@ pub struct Restore {
     /// the capped snapshot, so replaying the segments alone brings the screen
     /// back under the default name.
     pub title: Option<String>,
+    /// The pane's closed command blocks at snapshot time (entry-5, CAP-5).
+    /// Replayed output rebuilds the client's spans from its marks; this table
+    /// restores the server-side `folded` flags those spans adopt.
+    pub blocks: Vec<CommandBlock>,
 }
 
 /// The OSC that puts a restored pane's title back.
@@ -1790,16 +1800,30 @@ impl DaemonPane {
         let reader_handle = pair.master.try_clone_reader()?;
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
 
-        let (ring, restored_title) = match restore {
+        // Blocks arrive with the restore (entry-5, CAP-5); the replayed marks
+        // rebuild the client's spans, and this table restores their folded
+        // flags on adopt. Fresh panes start empty.
+        let (ring, restored_title, command_blocks, next_block_id) = match restore {
             Some(restore) => {
                 let mut ring = ReplayRing::seeded(restore.segments, size);
                 if let Some(title) = restore.title.as_deref() {
                     ring.append(&retitle(title));
                 }
                 ring.append(&restore_preamble(restore.banner.as_deref()));
-                (ring, restore.title)
+                let next = restored_next_block_id(&restore.blocks);
+                (
+                    ring,
+                    restore.title,
+                    restore.blocks.into(),
+                    next,
+                )
             }
-            None => (ReplayRing::new(size), None),
+            None => (
+                ReplayRing::new(size),
+                None,
+                std::collections::VecDeque::new(),
+                0,
+            ),
         };
 
         Ok(Self::over_pty(
@@ -1839,8 +1863,8 @@ impl DaemonPane {
                 agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
-                command_blocks: std::collections::VecDeque::new(),
-                next_block_id: 0,
+                command_blocks,
+                next_block_id,
                 block_pending: false,
             },
             owner,
@@ -1995,6 +2019,8 @@ impl DaemonPane {
             agent: st.agent,
             agent_argv: st.agent_argv.clone(),
             agent_session: st.agent_session.clone(),
+            command_blocks: st.command_blocks.iter().cloned().collect(),
+            next_block_id: st.next_block_id,
         })
     }
 
@@ -2081,8 +2107,8 @@ impl DaemonPane {
                 agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
-                command_blocks: std::collections::VecDeque::new(),
-                next_block_id: 0,
+                command_blocks: carried.command_blocks.into(),
+                next_block_id: carried.next_block_id,
                 block_pending: false,
             },
             carried.owner,
@@ -2796,6 +2822,31 @@ impl DaemonPane {
     /// fallback also serves local panes whose shells stopped reporting.
     pub fn set_follow_nested(&self, on: bool) {
         self.state.lock().unwrap().follow_nested = on;
+    }
+
+    /// Fold (`true`) or unfold one closed command block (entry-5, CAP-5).
+    /// Returns whether `block_id` named a row. Unknown ids are silence —
+    /// the GUI sends fire-and-forget after a local toggle, and a row the
+    /// daemon evicted (or never closed) is not an error.
+    pub fn set_block_folded(&self, block_id: u64, folded: bool) -> bool {
+        let mut st = self.state.lock().unwrap();
+        set_block_folded(&mut st, block_id, folded)
+    }
+
+    /// Drop the pane's block table (entry-5, CAP-5): the GUI cleared its
+    /// scrollback, so absolute rows were rebirthed and every span pointed at
+    /// rows that no longer exist. Also drops a pending open, like the
+    /// matrix row the helper was kept tested for.
+    pub fn clear_command_blocks(&self) {
+        let mut st = self.state.lock().unwrap();
+        clear_command_blocks(&mut st);
+    }
+
+    /// A clone of the pane's closed command blocks, oldest first, for the
+    /// periodic snapshot writer. Small (capped at [`COMMAND_BLOCK_CAP`]),
+    /// so the keeper writes it unconditionally.
+    pub fn block_table_snapshot(&self) -> Vec<CommandBlock> {
+        self.state.lock().unwrap().command_blocks.iter().cloned().collect()
     }
 
     fn hangup(&self) {
@@ -4274,14 +4325,32 @@ fn note_block_marks(st: &mut PaneState, bytes: &[u8], marks: &[(usize, BlockMark
     }
 }
 
-/// Drops the pane's block table. A tested helper with no production caller
-/// yet: clearing scrollback is a client-side grid reset today, and teaching
-/// the daemon about it needs a new `ClientMsg` channel (entry-5). Kept — and
-/// kept tested — so that wiring has a correct target.
-#[allow(dead_code)]
+/// Drops the pane's block table. Wired to [`ClientMsg::ClearCommandBlocks`]
+/// (entry-5, CAP-5): the GUI cleared its scrollback, so the daemon's rows
+/// name output the client no longer shows.
 fn clear_command_blocks(st: &mut PaneState) {
     st.command_blocks.clear();
     st.block_pending = false;
+}
+
+/// Folds or unfolds one closed block by id (entry-5, CAP-5). Returns whether
+/// `block_id` named a row; unknown ids are silence, not an error.
+fn set_block_folded(st: &mut PaneState, block_id: u64, folded: bool) -> bool {
+    match st.command_blocks.iter_mut().find(|b| b.id == block_id) {
+        Some(block) => {
+            block.folded = folded;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The next block id for a restored table (entry-5, CAP-5): one past the
+/// highest carried id, so restored ids keep naming closings in closing order
+/// and a fresh closing never aliases a restored row. Empty tables restart
+/// at 0 — matching the fresh-pane path, where the first `D` bumps 0 to 1.
+fn restored_next_block_id(blocks: &[CommandBlock]) -> u64 {
+    blocks.iter().map(|b| b.id + 1).max().unwrap_or(0)
 }
 
 struct OscSniffer {
@@ -6357,6 +6426,48 @@ mod tests {
         // The orphaned `D` of the cleared pending open closes nothing.
         feed_blocks(&mut st, &mut sniffer, b"\x1b]133;D;0\x07");
         assert!(st.command_blocks.is_empty());
+    }
+
+    /// Entry-5: folding one row leaves the rest alone; unknown ids are
+    /// silence so a fire-and-forget toggle against an evicted row is not an
+    /// error.
+    #[test]
+    fn set_block_folded_toggles_one_row_and_ignores_unknown_ids() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07a\x1b]133;D;0\x07");
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07b\x1b]133;D;1\x07");
+        assert!(set_block_folded(&mut st, 1, true));
+        assert!(st.command_blocks[0].folded);
+        assert!(!st.command_blocks[1].folded);
+        assert!(set_block_folded(&mut st, 1, false));
+        assert!(!st.command_blocks[0].folded);
+        assert!(!set_block_folded(&mut st, 999, true));
+    }
+
+    /// Entry-5: a restore continues ids past the carried table so a fresh
+    /// closing never aliases a restored row; empty tables restart like fresh
+    /// panes.
+    #[test]
+    fn restored_next_block_id_continues_past_the_carried_table() {
+        assert_eq!(restored_next_block_id(&[]), 0);
+        let blocks = vec![
+            CommandBlock { id: 3, exit_code: Some(0), folded: true, truncated: false },
+            CommandBlock { id: 7, exit_code: Some(1), folded: false, truncated: false },
+        ];
+        assert_eq!(restored_next_block_id(&blocks), 8);
+    }
+
+    /// Entry-5: clearing drops folded flags with the rows — no stale fold
+    /// survives into the next command.
+    #[test]
+    fn clear_command_blocks_drops_folded_flags_with_the_rows() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07a\x1b]133;D;0\x07");
+        assert!(set_block_folded(&mut st, 1, true));
+        clear_command_blocks(&mut st);
+        assert!(st.command_blocks.is_empty());
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07b\x1b]133;D;0\x07");
+        assert!(!st.command_blocks[0].folded);
     }
 
     /// The table is bounded: the 201st closing evicts the oldest.
