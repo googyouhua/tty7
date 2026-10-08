@@ -1526,6 +1526,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn restored_screen_carries_folds_into_the_restore() {
+        use crate::daemon::scrollback::tests::{lock_fs, pin_config_dir};
+        use crate::daemon::scrollback::{Segment, load, save, save_blocks};
+
+        let _fs = lock_fs();
+        pin_config_dir();
+        let pane = 917_001;
+        let size = crate::daemon::protocol::WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 17,
+        };
+        let blocks = vec![
+            crate::daemon::protocol::CommandBlock {
+                id: 1,
+                exit_code: Some(0),
+                folded: true,
+                truncated: false,
+            },
+            crate::daemon::protocol::CommandBlock {
+                id: 2,
+                exit_code: Some(1),
+                folded: false,
+                truncated: false,
+            },
+        ];
+        save(
+            pane,
+            &[Segment {
+                size,
+                bytes: b"a screen worth restoring".to_vec(),
+            }],
+            Some("t"),
+        );
+        save_blocks(pane, &blocks);
+
+        let restore = restored_screen(crate::daemon::protocol::RestoreFrom {
+            pane_id: pane,
+            banner: None,
+        })
+        .expect("a saved screen restores");
+        assert_eq!(
+            restore.blocks, blocks,
+            "the same rows come back folded after a restart"
+        );
+        assert!(
+            restored_screen(crate::daemon::protocol::RestoreFrom {
+                pane_id: pane,
+                banner: None,
+            })
+            .is_none(),
+            "the handoff is one-shot: loaded files are forgotten"
+        );
+        assert!(
+            load(pane).is_none(),
+            "no snapshot left for a second restore"
+        );
+    }
+
+    #[test]
     fn alloc_id_is_monotonic_from_one() {
         let reg = Registry::new();
         assert_eq!(reg.alloc_id(), 1);
@@ -1675,6 +1736,129 @@ mod tests {
                 other => panic!("expected Error, got {other:?}"),
             }
             h.join().unwrap();
+        }
+
+        /// Entry-5: the fold/clear dispatch arms are not no-ops. A block
+        /// closed through echoed marks folds over `SetBlockFolded` and
+        /// vanishes over `ClearCommandBlocks`, as observed through
+        /// `QueryProcs` — deleting any arm body breaks this test while
+        /// every pane-helper test stays green.
+        #[test]
+        fn block_fold_and_clear_round_trip_through_the_conn() {
+            use crate::daemon::pane::DaemonPane;
+            use crate::daemon::protocol::ShellSpec;
+
+            let reg = Arc::new(Registry::new());
+            let pane = DaemonPane::spawn(
+                917_002,
+                Some(std::path::PathBuf::from("/")),
+                SIZE,
+                Some(ShellSpec {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exec cat".into()],
+                    args_are_tty7_defaults: false,
+                }),
+                None,
+                None,
+                None,
+                false,
+                || {},
+            )
+            .expect("spawn pane");
+            reg.insert(pane);
+
+            // One connection per request, the way CLI polling talks to the
+            // daemon: the opening dispatch answers a single frame and closes.
+            fn ask(reg: &Arc<Registry>, msg: ClientMsg) -> Option<DaemonMsg> {
+                let (mut client, server) = UnixStream::pair().unwrap();
+                let reg = reg.clone();
+                let h = thread::spawn(move || {
+                    let _ = handle_conn(server, reg);
+                });
+                msg.encode(&mut client).unwrap();
+                let reply = DaemonMsg::read(&mut client).ok();
+                drop(client);
+                h.join().unwrap();
+                reply
+            }
+
+            fn procs(reg: &Arc<Registry>) -> crate::daemon::protocol::PaneProcs {
+                match ask(reg, ClientMsg::QueryProcs { pane_id: 917_002 }) {
+                    Some(DaemonMsg::Procs(procs)) => procs,
+                    other => panic!("expected Procs, got {other:?}"),
+                }
+            }
+
+            // Marks in through `cat`'s echo pair one block on the daemon.
+            // Retried: bytes sent before `cat` replaces the starting shell
+            // are consumed as shell input, not echoed — a later round lands
+            // while `cat` holds the pty and comes straight back.
+            let marks = b"\x1b]133;B\x07\x1b]133;C;echo%20hi\x07hi\r\n\x1b]133;D;0\x07".to_vec();
+            let mut id = None;
+            for _ in 0..10 {
+                assert!(
+                    matches!(
+                        ask(
+                            &reg,
+                            ClientMsg::SendInput {
+                                pane_id: 917_002,
+                                bytes: marks.clone(),
+                            }
+                        ),
+                        Some(DaemonMsg::InputAck { .. })
+                    ),
+                    "echo input is accepted"
+                );
+                for _ in 0..25 {
+                    let procs = procs(&reg);
+                    let blocks = &procs.context.expect("pane reports a context").blocks;
+                    if let Some(b) = blocks.first() {
+                        id = Some(b.id);
+                        assert!(!b.folded, "fresh blocks arrive unfolded");
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                if id.is_some() {
+                    break;
+                }
+            }
+            let id = id.expect("the echoed marks paired one block");
+
+            // Fire-and-forget arms send no reply; the next poll showing the
+            // effect is what proves the arm ran.
+            ask(
+                &reg,
+                ClientMsg::SetBlockFolded {
+                    pane_id: 917_002,
+                    block_id: id,
+                    folded: true,
+                },
+            );
+            let mut folded = false;
+            for _ in 0..100 {
+                let procs = procs(&reg);
+                let blocks = &procs.context.expect("pane reports a context").blocks;
+                if blocks.iter().any(|b| b.id == id && b.folded) {
+                    folded = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(folded, "the fold arm actually folded the row");
+
+            ask(&reg, ClientMsg::ClearCommandBlocks { pane_id: 917_002 });
+            let mut cleared = false;
+            for _ in 0..100 {
+                let procs = procs(&reg);
+                let blocks = &procs.context.expect("pane reports a context").blocks;
+                if blocks.is_empty() {
+                    cleared = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(cleared, "the clear arm actually dropped the table");
         }
 
         #[test]

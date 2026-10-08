@@ -247,6 +247,12 @@ pub fn save_blocks(pane_id: u64, blocks: &[crate::daemon::protocol::CommandBlock
     let Some(path) = blocks_path_for(pane_id) else {
         return;
     };
+    if blocks.is_empty() {
+        // No rows means no folds to restore: drop a stale sidecar instead of
+        // writing `"[]"` over it every keeper pass.
+        let _ = std::fs::remove_file(path);
+        return;
+    };
     let bytes = serde_json::to_vec(blocks).unwrap_or_default();
     if bytes.is_empty() {
         return;
@@ -342,7 +348,7 @@ fn sweep_in(dir: &Path, keep: &HashSet<u64>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn size(cols: u16, rows: u16) -> WinSize {
@@ -419,8 +425,8 @@ mod tests {
     /// The same shared temp directory every other module's tests pin, by the
     /// same name: the override is a process-wide `OnceLock`, so the first
     /// caller decides for all of them and agreeing on the path is what keeps
-    /// that harmless.
-    fn pin_config_dir() {
+    /// that harmless. `pub(crate)` so `server.rs` tests pin the same dir.
+    pub(crate) fn pin_config_dir() {
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         crate::core::config::set_config_dir(dir);
@@ -430,9 +436,10 @@ mod tests {
     /// one test deletes whatever snapshot files exist — including another
     /// test's, mid-flight. Serialize the tests that touch the scrollback
     /// directory; the pure encode/decode tests need no lock.
-    static FS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// `pub(crate)` so `server.rs` tests reuse the same lock and pin.
+    pub(crate) static FS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn lock_fs() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn lock_fs() -> std::sync::MutexGuard<'static, ()> {
         FS_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -607,6 +614,34 @@ mod tests {
         assert!(
             load_blocks(pane).is_none(),
             "a damaged sidecar costs only the folds, never the screen"
+        );
+        forget_blocks(pane);
+    }
+
+    #[test]
+    fn saving_an_empty_table_deletes_the_sidecar() {
+        let _fs = lock_fs();
+        pin_config_dir();
+        let pane = 90_010;
+        let blocks = vec![crate::daemon::protocol::CommandBlock {
+            id: 1,
+            exit_code: Some(0),
+            folded: true,
+            truncated: false,
+        }];
+        save_blocks(pane, &blocks);
+        assert!(
+            load_blocks(pane).is_some(),
+            "a pane with folds has a sidecar"
+        );
+        save_blocks(pane, &[]);
+        assert!(
+            load_blocks(pane).is_none(),
+            "an unfolded table leaves no sidecar behind, not an empty JSON array"
+        );
+        assert!(
+            blocks_path_for(pane).is_none_or(|p| !p.exists()),
+            "no stale file for the sweeps to carry"
         );
         forget_blocks(pane);
     }

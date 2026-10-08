@@ -350,11 +350,14 @@ impl BlockTracker {
         if !self.spans.iter().any(|s| s.seq == seq) {
             return None;
         }
-        match folded {
+        let changed = match folded {
             true => self.folded.insert(seq),
             false => self.folded.remove(&seq),
         };
-        self.dirty.insert(seq);
+        // Same-state sets converge nothing: only a real flip arms a push.
+        if changed {
+            self.dirty.insert(seq);
+        }
         Some(folded)
     }
 
@@ -1133,6 +1136,28 @@ mod tests {
         // And a genuine daemon-side unfold now propagates.
         tracker.adopt(&[daemon(1)]);
         assert!(!tracker.is_folded(1));
+    }
+
+    #[test]
+    fn same_state_set_folded_arms_no_push() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_d(20, Some(0), None);
+        // A real flip arms exactly one push.
+        tracker.set_folded(1, true);
+        assert!(tracker.dirty.contains(&1));
+        tracker.dirty.clear();
+        // Repeating the same state converges nothing: no push armed.
+        tracker.set_folded(1, true);
+        assert!(
+            tracker.dirty.is_empty(),
+            "a redundant fold must not emit a spurious SetBlockFolded"
+        );
+        tracker.set_folded(1, false);
+        assert!(
+            tracker.dirty.contains(&1),
+            "a genuine flip still arms its push"
+        );
     }
 
     /// Entry-5: the unfold direction converges too — a span unfolded before
