@@ -670,6 +670,22 @@ mod tests {
         assert!(!tracker.has_folds());
     }
 
+    /// Menu fold and gutter fold share one path: folding then unfolding the
+    /// same seq returns to unfolded with no leftover fold state.
+    #[test]
+    fn fold_toggle_round_trip_returns_to_unfolded() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_d(20, Some(0), None);
+        let seq = tracker.spans()[0].seq;
+        assert_eq!(tracker.set_folded(seq, true), Some(true));
+        assert!(tracker.is_folded(seq));
+        assert!(tracker.has_folds());
+        assert_eq!(tracker.set_folded(seq, false), Some(false));
+        assert!(!tracker.is_folded(seq));
+        assert!(!tracker.has_folds());
+    }
+
     /// The visible mapping is identity without folds, and collapses folded
     /// spans to their first line, pulling earlier rows into view.
     #[test]

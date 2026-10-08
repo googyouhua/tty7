@@ -132,6 +132,7 @@ actions!(
         ClearScrollback,
         JumpToBlockStart,
         CopyBlock,
+        ToggleBlockFold,
         InsertNewline,
         InsertNewlineFallback,
         OneKeyOpen,
@@ -3878,6 +3879,26 @@ impl TerminalView {
         if tracker.set_folded(seq, folded).is_some() {
             drop(tracker);
             cx.notify();
+        }
+    }
+
+    /// Whether the span `seq` names is folded. The context menu reads this
+    /// to label its fold item; the toggle itself goes through
+    /// [`Self::toggle_fold_by_seq`], the same path gutter clicks take.
+    fn block_folded(&self, seq: u64) -> bool {
+        self.terminal
+            .block_tracker()
+            .lock()
+            .map(|tracker| tracker.is_folded(seq))
+            .unwrap_or(false)
+    }
+
+    /// Toggles the fold on the latched menu block. Menu fold/unfold routes
+    /// here; gutter-marker clicks route to [`Self::toggle_fold_by_seq`]
+    /// with the same seq, so the two stay equivalent by construction.
+    pub fn toggle_menu_block_fold(&mut self, cx: &mut Context<Self>) {
+        if let Some(seq) = self.menu_block {
+            self.toggle_fold_by_seq(seq, cx);
         }
     }
 
@@ -8401,6 +8422,9 @@ impl Render for TerminalView {
                 cx.listener(|this, _: &JumpToBlockStart, _w, cx| this.jump_to_block_start(cx)),
             )
             .on_action(cx.listener(|this, _: &CopyBlock, _w, cx| this.copy_block(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleBlockFold, _w, cx| this.toggle_menu_block_fold(cx)),
+            )
             .on_action(cx.listener(|this, _: &OneKeyOpen, _w, cx| this.open_onekey_picker(cx)))
             .on_action(cx.listener(|this, _: &OneKeyFillUsername, _w, cx| {
                 this.fill_onekey(tty7_core::core::onekey::OneKeyFill::Username, cx)
@@ -8528,13 +8552,23 @@ impl Render for TerminalView {
                     .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback));
                 // Block items hide (never grey) with no block under the
                 // click — the latch is what the actions resolve through too.
+                // The fold item shares the gutter's toggle path, so menu and
+                // gutter stay equivalent by construction; its label follows
+                // the latched span's fold state.
                 let menu = match menu_view.read(cx).menu_block {
-                    Some(_) => menu
-                        .menu(
+                    Some(seq) => {
+                        let folded = menu_view.read(cx).block_folded(seq);
+                        let fold_key = match folded {
+                            true => L10nKey::TerminalBlockUnfold,
+                            false => L10nKey::TerminalBlockFold,
+                        };
+                        menu.menu(
                             t(L10nKey::TerminalBlockJumpToStart),
                             Box::new(JumpToBlockStart),
                         )
-                        .menu(t(L10nKey::TerminalBlockCopyBoth), Box::new(CopyBlock)),
+                        .menu(t(fold_key), Box::new(ToggleBlockFold))
+                        .menu(t(L10nKey::TerminalBlockCopyBoth), Box::new(CopyBlock))
+                    }
                     None => menu,
                 };
                 let menu = menu.menu("OneKey Autofill…", Box::new(OneKeyOpen));
