@@ -264,7 +264,10 @@ fn spawn_snapshot_keeper(registry: Arc<Registry>) {
                         // disk even when the pane printed nothing. The table
                         // is capped and tiny, so it rides every pass
                         // unconditionally (entry-5, CAP-5).
-                        crate::daemon::scrollback::save_blocks(pane.id, &pane.block_table_snapshot());
+                        crate::daemon::scrollback::save_blocks(
+                            pane.id,
+                            &pane.block_table_snapshot(),
+                        );
                         continue;
                     }
                     let (segments, title, mark) = pane.scrollback_snapshot();
