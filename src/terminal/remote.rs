@@ -6199,6 +6199,7 @@ mod tests {
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
 
         term.set_block_folded(7, 42, true);
+        term.set_block_folded(7, 42, false);
         term.clear_command_blocks(7);
 
         match ClientMsg::read(&mut daemon_side).unwrap() {
@@ -6210,6 +6211,18 @@ mod tests {
                 (pane_id, block_id, folded),
                 (7, 42, true),
                 "the fold push names its pane, row and direction"
+            ),
+            other => panic!("expected SetBlockFolded, got {other:?}"),
+        }
+        match ClientMsg::read(&mut daemon_side).unwrap() {
+            ClientMsg::SetBlockFolded {
+                pane_id,
+                block_id,
+                folded,
+            } => assert_eq!(
+                (pane_id, block_id, folded),
+                (7, 42, false),
+                "the unfold direction travels the same addressed frame"
             ),
             other => panic!("expected SetBlockFolded, got {other:?}"),
         }

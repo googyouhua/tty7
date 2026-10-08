@@ -250,7 +250,14 @@ pub fn save_blocks(pane_id: u64, blocks: &[crate::daemon::protocol::CommandBlock
     if blocks.is_empty() {
         // No rows means no folds to restore: drop a stale sidecar instead of
         // writing `"[]"` over it every keeper pass.
-        let _ = std::fs::remove_file(path);
+        if let Err(e) = std::fs::remove_file(path) {
+            // Best-effort like every fs op here; a surviving stale file only
+            // costs folds, and `load_blocks` empty-maps anything unreadable.
+            // Not-found is the common case (a pane that never folded).
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::debug!("stale blocks sidecar kept for {pane_id}: {e}");
+            }
+        }
         return;
     };
     let bytes = serde_json::to_vec(blocks).unwrap_or_default();
@@ -644,5 +651,33 @@ pub(crate) mod tests {
             "no stale file for the sweeps to carry"
         );
         forget_blocks(pane);
+    }
+
+    #[test]
+    fn sweep_blocks_keeps_referenced_sidecars_drops_the_rest() {
+        use std::collections::HashSet;
+
+        let _fs = lock_fs();
+        pin_config_dir();
+        let kept = 90_011;
+        let stale = 90_012;
+        let block = vec![crate::daemon::protocol::CommandBlock {
+            id: 1,
+            exit_code: Some(0),
+            folded: true,
+            truncated: false,
+        }];
+        save_blocks(kept, &block);
+        save_blocks(stale, &block);
+        sweep_blocks(&HashSet::from([kept]));
+        assert!(
+            load_blocks(kept).is_some(),
+            "a referenced pane keeps its folds"
+        );
+        assert!(
+            load_blocks(stale).is_none(),
+            "an unreferenced sidecar is terminal output on disk no more"
+        );
+        forget_blocks(kept);
     }
 }
