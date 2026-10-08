@@ -2325,6 +2325,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TerminalBlockCopyBoth => "Copy Command and Output",
         L10nKey::TerminalBlockFold => "Fold Block",
         L10nKey::TerminalBlockUnfold => "Unfold Block",
+        L10nKey::TerminalBlockCopyCommand => "Copy Command",
+        L10nKey::TerminalBlockCopyOutput => "Copy Output",
         L10nKey::TabContextCloseTabsBelow => "Close Tabs Below",
         L10nKey::AppAgentHooksOpFailed => "Failed: {error}",
         L10nKey::AppMenuEnterFullscreen => "Enter Full Screen",

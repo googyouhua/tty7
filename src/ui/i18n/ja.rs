@@ -2396,6 +2396,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TerminalBlockCopyBoth => "コマンドと出力をコピー",
         L10nKey::TerminalBlockFold => "ブロックを折りたたむ",
         L10nKey::TerminalBlockUnfold => "ブロックを展開する",
+        L10nKey::TerminalBlockCopyCommand => "コマンドをコピー",
+        L10nKey::TerminalBlockCopyOutput => "出力をコピー",
         L10nKey::TabContextCloseTabsBelow => "下のタブを閉じる",
         L10nKey::AppAgentHooksOpFailed => "失敗: {error}",
         L10nKey::AppMenuEnterFullscreen => "全画面表示",
