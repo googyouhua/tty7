@@ -16,3 +16,16 @@
   summary: gutter marker (seq,folded,failed) 映射缺单测（wiring 已人工验对：is_failed() 直通第三元组）。
   evidence: 同上，待 view harness。
   revisit_when: 同上；复验=failed/success/None 三 span 第三元组。
+- source_plan: `_bmad-output/initiative-terminal-blocks/epic-terminal-blocks/story-perf-plan.md`
+  summary: B 轨 GUI 真跑未跑——Xvfb 下 baseline 二进制 vs 现二进制 11MB cat 五次平均，无数据；A 轨已过门，不阻塞收 epic。
+  evidence: bench harness 系 macOS-only（zsh driver `scripts/bench/run_one.sh`、`/Applications` 路径）；本容器无 zsh、无 release 二进制（仅 debug 产物），time-box 内未起构建。A 轨数据见 plan Implementation Notes。
+  revisit_when: macOS 本机且 `scripts/bench/setup.sh` 语料就绪；复验=下述复现命令跑通并记录两组五次平均（门限：现二进制 ≤ 1.10 × baseline）。
+  reproduce:
+    - `scripts/bench/setup.sh`
+    - `cargo build --release`
+    - `git worktree add /tmp/tty7-perf-base 4f0e140` （1.1 前代码基线）
+    - `cargo build --release --manifest-path /tmp/tty7-perf-base/Cargo.toml`
+    - `scripts/bench/run_one.sh tty7 io` （现二进制 5 次平均 → `.bench/results/io-tty7.txt`）
+    - `cp .bench/results/io-tty7.txt /tmp/io-head.txt`
+    - `TTY7_BIN=/tmp/tty7-perf-base/target/release/tty7-app scripts/bench/run_one.sh tty7 io` （baseline → `.bench/results/io-tty7.txt`，与 `/tmp/io-head.txt` 对比）
+    - `git worktree remove /tmp/tty7-perf-base`
