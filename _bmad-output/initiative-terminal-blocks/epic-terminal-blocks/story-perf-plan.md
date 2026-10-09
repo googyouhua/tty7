@@ -3,7 +3,7 @@ title: '性能门：吞吐与交互验收'
 type: 'chore'
 ticket: 8
 created: '2026-10-09'
-status: 'built'
+status: 'done'
 baseline_revision: '3e1c754'
 route: 'oneshot'
 route_source: 'auto'
