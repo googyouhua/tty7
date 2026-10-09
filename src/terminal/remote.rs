@@ -1285,6 +1285,11 @@ impl RemoteTerminal {
                 let mut command_tok = OscTokenizer::new(&[b"133"]);
                 let mut command_cursor = CommandCursorStyle::default();
                 let mut prompt_break = PromptBreak::default();
+                // The block table's twin of the daemon's scratch mode fold:
+                // persistent across batches (split sequences carry), folded
+                // cut by cut so a full-screen program inside one batch voids
+                // before the cuts past it are acted on.
+                let mut alt_probe = TerminalModes::new();
                 // A new link replays the pane from scratch, 2031 included
                 // (`term_modes` restores it ahead of the ring).
                 let mut modes = TerminalModes::new();
@@ -1373,6 +1378,13 @@ impl RemoteTerminal {
                                     });
                                 }
                                 command_cuts(&mut command_tok, &out_batch, &mut cuts);
+                                // Fold the same bytes for alternate-screen
+                                // touch in cut order: a program that started
+                                // and exited inside this batch voids before
+                                // the cuts past it are acted on, which the
+                                // grid's endpoint mode alone cannot see.
+                                let alt_voids = alt_void_flags(&mut alt_probe, &out_batch, &cuts);
+                                let mut alt_cut = 0usize;
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let Some(waited) = feed_grid(
@@ -1381,17 +1393,25 @@ impl RemoteTerminal {
                                         &out_batch,
                                         cuts,
                                         &quit,
-                                        |term, cut| match cut {
-                                            ReaderCut::Parked(cut) => {
-                                                parked_cursor.apply(term, cut)
-                                            }
-                                            ReaderCut::Command(mark, _) => {
-                                                command_cursor.apply(&mut *term, mark);
-                                                note_block_cut(&mut *term, &blocks, &cut);
-                                            }
-                                            ReaderCut::Prompt(mark) => {
-                                                prompt_break.apply(&mut *term, mark);
-                                                note_block_cut(&mut *term, &blocks, &cut);
+                                        |term, cut| {
+                                            let i = alt_cut;
+                                            alt_cut += 1;
+                                            void_blocks_on_touch(
+                                                &blocks,
+                                                alt_voids.get(i).is_some_and(|v| *v),
+                                            );
+                                            match cut {
+                                                ReaderCut::Parked(cut) => {
+                                                    parked_cursor.apply(term, cut)
+                                                }
+                                                ReaderCut::Command(mark, _) => {
+                                                    command_cursor.apply(&mut *term, mark);
+                                                    note_block_cut(&mut *term, &blocks, &cut);
+                                                }
+                                                ReaderCut::Prompt(mark) => {
+                                                    prompt_break.apply(&mut *term, mark);
+                                                    note_block_cut(&mut *term, &blocks, &cut);
+                                                }
                                             }
                                         },
                                     ) else {
@@ -1402,6 +1422,16 @@ impl RemoteTerminal {
                                         tr_adv_t += t0.elapsed() - waited;
                                     }
                                 }
+                                // The tail past the last cut can still hold a
+                                // program that started and exited with no
+                                // further mark in this batch.
+                                void_blocks_on_touch(
+                                    &blocks,
+                                    alt_voids.last().is_some_and(|v| *v),
+                                );
+                                // A full-screen program between two marks owns
+                                // the open runs even though no cut said so.
+                                void_blocks_on_alt(&term, &blocks);
                                 if let Ok(mut notes) = osc_notes.lock() {
                                     osc.feed(&out_batch, &mut *notes);
                                 }
@@ -1541,8 +1571,18 @@ impl RemoteTerminal {
                                 // comes back with the prompt's cursor.
                                 let mut cuts: Vec<(usize, ReaderCut)> = Vec::new();
                                 command_cuts(&mut command_tok, &bytes, &mut cuts);
+                                // As in the live batch: a program inside the
+                                // replay voids before the cuts past it act.
+                                let alt_voids = alt_void_flags(&mut alt_probe, &bytes, &cuts);
+                                let mut alt_cut = 0usize;
                                 let fed =
                                     feed_grid(&term, &mut processor, &bytes, cuts, &quit, |term, cut| {
+                                        let i = alt_cut;
+                                        alt_cut += 1;
+                                        void_blocks_on_touch(
+                                            &blocks,
+                                            alt_voids.get(i).is_some_and(|v| *v),
+                                        );
                                         match cut {
                                             ReaderCut::Command(mark, _) => {
                                                 command_cursor.apply(&mut *term, mark);
@@ -1558,6 +1598,16 @@ impl RemoteTerminal {
                                 if fed.is_none() {
                                     return;
                                 }
+                                // The tail past the last cut, as in the live
+                                // batch.
+                                void_blocks_on_touch(
+                                    &blocks,
+                                    alt_voids.last().is_some_and(|v| *v),
+                                );
+                                // The replay may end mid-program: what it
+                                // leaves on the alternate screen still owns
+                                // the open runs.
+                                void_blocks_on_alt(&term, &blocks);
                                 if processor.sync_timeout().sync_timeout().is_some() {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
@@ -2632,6 +2682,24 @@ impl RemoteTerminal {
         }
         query(pane_id).unwrap_or_default()
     }
+
+    /// The same table through this pane's own route: a pane on a remote host
+    /// is owned by the daemon at the far end of [`Self::route`], and only a
+    /// query sent down that link can see its blocks. Unreachable links read
+    /// as empty, with the same silent-default error semantics as
+    /// [`Self::query_procs`] — adoption enriches spans, so a failed poll is
+    /// silence, never a stall.
+    pub fn query_procs_routed(&self, pane_id: u64) -> PaneProcs {
+        fn query(route: &PaneRoute, pane_id: u64) -> anyhow::Result<PaneProcs> {
+            let mut stream = connect_routed(route)?;
+            ClientMsg::QueryProcs { pane_id }.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::Procs(procs) => Ok(procs),
+                other => Err(anyhow::anyhow!("unexpected reply to QueryProcs: {other:?}")),
+            }
+        }
+        query(&self.route, pane_id).unwrap_or_default()
+    }
 }
 
 fn daemon_not_listening(err: &anyhow::Error) -> bool {
@@ -3704,6 +3772,7 @@ mod block_tests {
         processor: ansi::Processor,
         tok: OscTokenizer,
         store: BlockStore,
+        alt: TerminalModes,
     }
 
     impl Harness {
@@ -3719,12 +3788,17 @@ mod block_tests {
                 processor: ansi::Processor::new(),
                 tok: OscTokenizer::new(&[b"133"]),
                 store: BlockStore::default(),
+                alt: TerminalModes::new(),
             }
         }
 
         fn feed(&mut self, bytes: &[u8]) {
             let mut cuts = Vec::new();
             command_cuts(&mut self.tok, bytes, &mut cuts);
+            // The same cut-ordered alt fold the live batches and the replay
+            // take, so the harness voids the same stretches they do.
+            let voids = alt_void_flags(&mut self.alt, bytes, &cuts);
+            let mut at_cut = 0usize;
             let quit = AtomicBool::new(false);
             let fed = feed_grid(
                 &self.term,
@@ -3732,9 +3806,16 @@ mod block_tests {
                 bytes,
                 cuts,
                 &quit,
-                |term, cut| note_block_cut(&mut *term, &self.store, &cut),
+                |term, cut| {
+                    let i = at_cut;
+                    at_cut += 1;
+                    void_blocks_on_touch(&self.store, voids.get(i).is_some_and(|v| *v));
+                    note_block_cut(&mut *term, &self.store, &cut)
+                },
             );
             assert!(fed.is_some());
+            void_blocks_on_touch(&self.store, voids.last().is_some_and(|v| *v));
+            void_blocks_on_alt(&self.term, &self.store);
         }
 
         fn spans(&self) -> Vec<crate::terminal::blocks::BlockSpan> {
@@ -3776,6 +3857,72 @@ mod block_tests {
         let mut h = Harness::new();
         h.feed(b"\x1b]133;C;sleep 60\x07output\r\n\x1b]133;D;0\x07");
         assert!(h.spans().is_empty());
+    }
+
+    /// One nested layer builds three spans through the real reader path — the
+    /// same mark sequence the daemon test pairs into three blocks, so both
+    /// ends agree on the same stream.
+    #[test]
+    fn one_nested_layer_builds_three_spans() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ ssh far\r\n");
+        h.feed(b"\x1b]133;C;ssh far\x07");
+        h.feed(b"\x1b]133;B\x07$ first\r\nfirst-out\r\n\x1b]133;D;0\x07");
+        h.feed(b"\x1b]133;B\x07$ second\r\nsecond-out\r\n\x1b]133;D;3\x07");
+        h.feed(b"back home\r\n\x1b]133;D;0\x07");
+        let spans = h.spans();
+        assert_eq!(spans.len(), 3);
+        let exits: Vec<Option<i32>> = spans.iter().map(|s| s.exit_code).collect();
+        assert_eq!(exits, vec![Some(0), Some(3), Some(0)]);
+        // Close order, outer first-started: the inners land before it.
+        assert!(spans[2].start_abs < spans[0].start_abs);
+        assert!(spans[0].end_abs <= spans[1].start_abs);
+    }
+
+    /// A second layer of nesting voids both pending runs: later `D`s close
+    /// nothing, and the next command starts over.
+    #[test]
+    fn a_second_nesting_layer_voids_both_pending_runs() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ ssh far\r\n\x1b]133;C;ssh far\x07");
+        h.feed(b"\x1b]133;B\x07$ ssh deeper\r\n\x1b]133;C;ssh deeper\x07");
+        h.feed(b"\x1b]133;B\x07too deep\r\n");
+        h.feed(b"lost\x1b]133;D;0\x07more lost\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+        h.feed(b"\x1b]133;B\x07$ recovered\r\nback\r\n\x1b]133;D;0\x07");
+        assert_eq!(h.spans().len(), 1);
+    }
+
+    /// A full-screen program between a `B` and its `D` voids the pending run:
+    /// no span spans the alternate screen.
+    #[test]
+    fn a_full_screen_program_between_b_and_d_builds_no_span() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ nvim x\r\n\x1b]133;C;nvim x\x07");
+        h.feed(b"\x1b[?1049h");
+        h.feed(b"screen paint");
+        h.feed(b"\x1b[?1049l");
+        h.feed(b"after\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+    }
+
+    /// A program that starts and exits inside one batch voids the pending run
+    /// too: the grid's endpoint mode never saw it, so only the cut-ordered
+    /// fold catches it — the client's twin of the server's single-chunk case.
+    #[test]
+    fn a_full_screen_program_inside_one_batch_builds_no_span() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ nvim x\r\n\x1b]133;C;nvim x\x07");
+        h.feed(b"\x1b[?1049hpaint\x1b[?1049l");
+        h.feed(b"after\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+        // Mixed into one batch with the marks around it, the `D` past the
+        // program still lands orphaned — while a later command pairs again.
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ nvim x\r\n\x1b]133;C;nvim x\x07\x1b[?1049hpaint\x1b[?1049lafter\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+        h.feed(b"\x1b]133;B\x07$ recovered\r\nback\r\n\x1b]133;D;0\x07");
+        assert_eq!(h.spans().len(), 1);
     }
 
     /// A `D` landing mid-scroll must anchor at the true absolute row
@@ -3895,10 +4042,12 @@ fn command_cuts(tok: &mut OscTokenizer, bytes: &[u8], cuts: &mut Vec<(usize, Rea
 /// Notes a command/prompt mark on the pane's block table. Shared by the live
 /// batch and the replay: a relink rebuilds spans from the same marks.
 ///
-/// `B` opens a span, `D` closes the pending one for any pending `B`, and `C`
-/// is commentary — exactly like the daemon. Each mark is gated on the
-/// alternate screen as the cut finds it: marks under a full-screen program
-/// are that program's, not a command's.
+/// `B` opens a span, `D` closes the topmost one for any pending `B`, and `C`
+/// annotates the topmost open slot (the watershed between a redrawn prompt's
+/// `B` and a nested command's `B`) — exactly like the daemon. Each mark is
+/// gated on the alternate screen as the cut finds it: marks under a
+/// full-screen program are that program's, not a command's, and void both
+/// pending slots with them.
 ///
 /// Every `B` and `D` also re-verifies all spans against the grid *before*
 /// acting: any start row that changed (or left the grid) proves scroll-cap
@@ -3910,6 +4059,9 @@ fn note_block_cut<T: EventListener>(term: &mut Term<T>, blocks: &BlockStore, cut
     use crate::terminal::blocks::row_text;
 
     if term.mode().contains(TermMode::ALT_SCREEN) {
+        if let Ok(mut tracker) = blocks.lock() {
+            tracker.void_pending();
+        }
         return;
     }
     let Ok(mut tracker) = blocks.lock() else {
@@ -3919,6 +4071,9 @@ fn note_block_cut<T: EventListener>(term: &mut Term<T>, blocks: &BlockStore, cut
         ReaderCut::Prompt(PromptMark::Ready) => {
             tracker.verify_all(&|abs| row_text(term, abs));
             tracker.note_b(cut_anchor(term));
+        }
+        ReaderCut::Command(CommandMark::Started, _) => {
+            tracker.note_c();
         }
         ReaderCut::Command(CommandMark::Finished, exit) => {
             tracker.verify_all(&|abs| row_text(term, abs));
@@ -3930,6 +4085,61 @@ fn note_block_cut<T: EventListener>(term: &mut Term<T>, blocks: &BlockStore, cut
         _ => return,
     }
     tracker.prune_before(prune_top_abs(term));
+}
+
+/// Voids the pane's pending block slots when the grid stands on the alternate
+/// screen: a full-screen program owns the stretch, so no open run may become
+/// a span. Batches with no marks never reach [`note_block_cut`], yet a
+/// program that started between two marks still spans the open runs — hence
+/// this, after every batch the reader parses.
+fn void_blocks_on_alt<T: EventListener>(term: &FairMutex<Term<T>>, blocks: &BlockStore) {
+    if !term.lock().mode().contains(TermMode::ALT_SCREEN) {
+        return;
+    }
+    if let Ok(mut tracker) = blocks.lock() {
+        tracker.void_pending();
+    }
+}
+
+/// Folds `bytes` through the pane's mode probe in cut order and reports, per
+/// cut, whether the alternate screen was touched since the previous cut (the
+/// batch start for the first one). The trailing entry covers the tail past
+/// the last cut, so a program that started and exited with no mark of its own
+/// still voids. The probe is the caller's to keep across batches; split
+/// sequences carry, exactly like the grid's own parse.
+///
+/// Mirrors the daemon's per-segment fold: the endpoint mode the grid is left
+/// in cannot see a program that started and exited inside one batch, and
+/// without this the client would pair a span the server voided.
+fn alt_void_flags(
+    probe: &mut TerminalModes,
+    bytes: &[u8],
+    cuts: &[(usize, ReaderCut)],
+) -> Vec<bool> {
+    let mut flags = Vec::with_capacity(cuts.len() + 1);
+    let mut at = 0;
+    for (off, _) in cuts {
+        // Cuts arrive in ascending order, but never let a stray one panic
+        // the slice: a backward cut folds nothing.
+        let end = (*off).min(bytes.len()).max(at);
+        flags.push(probe.feed_alt_touched(&bytes[at..end]));
+        at = end;
+    }
+    flags.push(probe.feed_alt_touched(&bytes[at..]));
+    flags
+}
+
+/// Voids the pane's pending block slots when `touched` says the alternate
+/// screen owned the stretch just parsed — the per-cut counterpart to
+/// [`void_blocks_on_alt`], run before the cut's own mark is acted on so a `B`
+/// past the stretch opens fresh and a `D` past it lands orphaned.
+fn void_blocks_on_touch(blocks: &BlockStore, touched: bool) {
+    if !touched {
+        return;
+    }
+    if let Ok(mut tracker) = blocks.lock() {
+        tracker.void_pending();
+    }
 }
 
 /// How much output the reader parses per hold of the grid lock. Every UI-thread
@@ -5377,6 +5587,18 @@ mod tests {
         assert!(route.header().is_none(), "nothing to route to");
         let err = connect_routed(&route).expect_err("must not reach the local daemon");
         assert!(err.to_string().contains("cannot be routed"), "{err}");
+    }
+
+    /// A routed procs query an unreachable link answers as empty: adoption
+    /// enriches spans, so a failed poll is silence with the same
+    /// silent-default semantics as the local query — never a stall.
+    #[test]
+    fn a_routed_procs_query_without_a_link_reads_as_empty() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.route = PaneRoute::Unroutable("no ssh details".into());
+        assert_eq!(term.query_procs_routed(7), PaneProcs::default());
     }
 
     #[test]
