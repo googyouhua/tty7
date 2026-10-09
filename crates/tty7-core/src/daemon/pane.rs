@@ -778,8 +778,13 @@ struct PaneState {
     /// Next block id (1-based). Bumped only when a `D` closes a pending `B`,
     /// so ids name closings, in closing order.
     next_block_id: u64,
-    /// A `B` arrived outside the alternate screen and its `D` has not.
-    block_pending: bool,
+    /// The outer command's pending `B`: a `B` arrived outside the alternate
+    /// screen and its `D` has not. Only one layer of nesting is kept (see
+    /// [`note_block_marks`]); `None` while no outer command is running.
+    block_outer: Option<BlockSlot>,
+    /// The one nested command's pending `B`, opened by a `B` past the outer
+    /// slot's `C`. `None` while no nested command is running.
+    block_nested: Option<BlockSlot>,
 }
 
 /// When the agent session last heard from the agent, for the two conclusions
@@ -1860,7 +1865,8 @@ impl DaemonPane {
                 exit_code: None,
                 command_blocks,
                 next_block_id,
-                block_pending: false,
+                block_outer: None,
+                block_nested: None,
             },
             owner,
             on_dead,
@@ -2104,7 +2110,8 @@ impl DaemonPane {
                 exit_code: None,
                 command_blocks: carried.command_blocks.into(),
                 next_block_id: carried.next_block_id,
-                block_pending: false,
+                block_outer: None,
+                block_nested: None,
             },
             carried.owner,
             on_dead,
@@ -2175,7 +2182,8 @@ impl DaemonPane {
             exit_code: None,
             command_blocks: std::collections::VecDeque::new(),
             next_block_id: 0,
-            block_pending: false,
+            block_outer: None,
+            block_nested: None,
         }));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(OutputGate::new());
@@ -4247,16 +4255,24 @@ struct SniffSignals {
     blocks: Vec<(usize, BlockMark)>,
 }
 
-/// A block-table mark: `B` opens a block, `D` closes it. `C` is commentary
-/// (the command's text) and deliberately never appears here — commands run
-/// with no `133;C` at all, so pairing is `B`→`D` or nothing.
+/// A block-table mark: `B` opens a block, `C` says its command started, `D`
+/// closes it. `C` never opens or closes on its own — it is the watershed that
+/// tells a redrawn prompt's `B` (before any `C`, still the same run) apart
+/// from a nested command's `B` (past the `C`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockMark {
     Open,
+    Command,
     Close { exit_code: Option<i32> },
 }
 
-/// Reads the block mark out of an OSC 133 payload's tail (`B`, `D;0`, …).
+/// One pending `B`: whether its command text (`C`) has arrived yet.
+#[derive(Debug, Clone, Copy, Default)]
+struct BlockSlot {
+    has_c: bool,
+}
+
+/// Reads the block mark out of an OSC 133 payload's tail (`B`, `C`, `D;0`, …).
 fn parse_block_mark(rest: &[u8]) -> Option<BlockMark> {
     let (&kind, tail) = rest.split_first()?;
     if !tail.is_empty() && tail.first() != Some(&b';') {
@@ -4264,6 +4280,7 @@ fn parse_block_mark(rest: &[u8]) -> Option<BlockMark> {
     }
     match kind {
         b'B' => Some(BlockMark::Open),
+        b'C' => Some(BlockMark::Command),
         b'D' => Some(BlockMark::Close {
             exit_code: tail
                 .strip_prefix(b";")
@@ -4283,15 +4300,23 @@ fn on_alt_screen(modes: &TerminalModes) -> bool {
 /// chunk the marks were sniffed from, and each mark carries the offset one
 /// past its terminator, so the alternate-screen gate reads the modes as the
 /// mark itself found them: marks under a full-screen program are that
-/// program's, not a command's, so neither a `B` nor a `D` counts there.
+/// program's, not a command's, so none of `B`, `C` or `D` counts there.
 ///
-/// Pairing is `B`→`D` only. An unpaired `D` (no `B` before it) closes
-/// nothing; a second `B` before the `D` re-arms the one pending block — a
-/// redrawn prompt is still one command run, not two.
+/// Only one layer of nesting is kept, across two slots (outer + one nested),
+/// with `C` as the watershed. A `B` with no outer slot opens the outer one;
+/// a `B` before the outer slot's `C` refreshes it (a redrawn prompt is still
+/// one command run, not two); a `B` past it opens the nested slot, whose own
+/// pre-`C` redraws refresh it the same way. A `B` past both slots' `C` —
+/// outer past its `C` with the nested slot taken past its own — is a second
+/// layer of nesting, which is not paired: both slots are voided instead, so the stretch records no blocks
+/// rather than wrong ones, and the next `B` starts over. `C` annotates the
+/// topmost open slot; `D` closes it. An unpaired `D` (no slot open) closes
+/// nothing.
+///
+/// A slot the alternate screen touches is voided on the spot — blocks never
+/// span it — even when the program started and exited inside one read with no
+/// mark of its own, and even in a read that carried no marks at all.
 fn note_block_marks(st: &mut PaneState, bytes: &[u8], marks: &[(usize, BlockMark)]) {
-    if marks.is_empty() {
-        return;
-    }
     // A scratch fold of the same modes over the same bytes, advanced mark by
     // mark: `record_output` folds the whole chunk at once below, which would
     // only say how the chunk ended. Starting from the pre-chunk state and
@@ -4299,18 +4324,56 @@ fn note_block_marks(st: &mut PaneState, bytes: &[u8], marks: &[(usize, BlockMark
     // discarded.
     let mut probe = st.modes.clone();
     let mut prev = 0;
+    // Voids every pending slot: the alternate screen touched the stretch, or
+    // a second layer of nesting showed up. Either way the open runs stop
+    // meaning anything a block could honestly name.
+    let void_slots = |st: &mut PaneState| {
+        st.block_outer = None;
+        st.block_nested = None;
+    };
     for (off, mark) in marks {
-        probe.feed(&bytes[prev..(*off).min(bytes.len())]);
-        prev = (*off).min(bytes.len());
+        let end = (*off).min(bytes.len());
+        if probe.feed_alt_touched(&bytes[prev..end]) {
+            void_slots(st);
+        }
+        prev = end;
         if on_alt_screen(&probe) {
             continue;
         }
         match mark {
-            BlockMark::Open => st.block_pending = true,
-            BlockMark::Close { exit_code } => {
-                if !std::mem::replace(&mut st.block_pending, false) {
-                    continue;
+            BlockMark::Open => {
+                if st.block_outer.is_none() {
+                    st.block_outer = Some(BlockSlot::default());
+                } else if !st.block_outer.is_some_and(|slot| slot.has_c) {
+                    // Still before the outer command's `C`: a redrawn prompt,
+                    // still one run.
+                    st.block_outer = Some(BlockSlot::default());
+                } else if st.block_nested.is_none() {
+                    st.block_nested = Some(BlockSlot::default());
+                } else if !st.block_nested.is_some_and(|slot| slot.has_c) {
+                    // Same redraw one level down: the nested prompt redrawn
+                    // before its own `C` is still one inner run, not a layer.
+                    st.block_nested = Some(BlockSlot::default());
+                } else {
+                    // A second layer of nesting: void both slots rather than
+                    // pair wrong blocks. The `B` itself is dropped with them.
+                    void_slots(st);
                 }
+            }
+            BlockMark::Command => {
+                if let Some(slot) = st.block_nested.as_mut() {
+                    slot.has_c = true;
+                } else if let Some(slot) = st.block_outer.as_mut() {
+                    slot.has_c = true;
+                }
+            }
+            BlockMark::Close { exit_code } => {
+                let open = match (&st.block_nested, &st.block_outer) {
+                    (Some(_), _) => &mut st.block_nested,
+                    (None, Some(_)) => &mut st.block_outer,
+                    (None, None) => continue,
+                };
+                *open = None;
                 st.next_block_id += 1;
                 st.command_blocks.push_back(CommandBlock {
                     id: st.next_block_id,
@@ -4324,6 +4387,11 @@ fn note_block_marks(st: &mut PaneState, bytes: &[u8], marks: &[(usize, BlockMark
             }
         }
     }
+    // The tail past the last mark can still hold a full-screen program that
+    // started (and maybe exited) with no further mark in this read.
+    if probe.feed_alt_touched(&bytes[prev..]) {
+        void_slots(st);
+    }
 }
 
 /// Drops the pane's block table. Wired to [`ClientMsg::ClearCommandBlocks`]
@@ -4331,7 +4399,8 @@ fn note_block_marks(st: &mut PaneState, bytes: &[u8], marks: &[(usize, BlockMark
 /// name output the client no longer shows.
 fn clear_command_blocks(st: &mut PaneState) {
     st.command_blocks.clear();
-    st.block_pending = false;
+    st.block_outer = None;
+    st.block_nested = None;
 }
 
 /// Folds or unfolds one closed block by id (entry-5, CAP-5). Returns whether
@@ -6313,7 +6382,7 @@ mod tests {
         let block = &st.command_blocks[0];
         assert_eq!(block.id, 1);
         assert_eq!(block.exit_code, Some(0));
-        assert!(!st.block_pending);
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
     }
 
     /// Matrix row: an interrupted command still closes, with its real code.
@@ -6339,7 +6408,7 @@ mod tests {
             b"plain output, no integration\r\nmore\r\n",
         );
         assert!(st.command_blocks.is_empty());
-        assert!(!st.block_pending);
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
     }
 
     /// Matrix row: marks under a full-screen program build nothing.
@@ -6366,7 +6435,7 @@ mod tests {
         let (mut st, mut sniffer) = block_state();
         feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07$ sleep 60");
         assert!(st.command_blocks.is_empty());
-        assert!(st.block_pending);
+        assert!(st.block_outer.is_some());
         feed_blocks(&mut st, &mut sniffer, b"output\x1b]133;D;0\x07");
         assert_eq!(st.command_blocks.len(), 1);
         assert_eq!(st.command_blocks[0].id, 1);
@@ -6379,7 +6448,7 @@ mod tests {
         let (mut st, mut sniffer) = block_state();
         feed_blocks(&mut st, &mut sniffer, b"\x1b]133;D;0\x07");
         assert!(st.command_blocks.is_empty());
-        assert!(!st.block_pending);
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
     }
 
     /// A redrawn prompt re-arms the one pending block instead of opening a
@@ -6394,6 +6463,146 @@ mod tests {
         );
         assert_eq!(st.command_blocks.len(), 1);
         assert_eq!(st.command_blocks[0].exit_code, Some(1));
+    }
+
+    /// One nested layer pairs three blocks: each inner `B…D` closes on its
+    /// own `D`, and the outer `D` still finds the outer `B` afterwards — the
+    /// mismatch this entry fixes (the first inner `D` used to close the
+    /// outer run and drop the whole outer command).
+    #[test]
+    fn command_blocks_pair_one_nested_layer() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07\
+              \x1b]133;B\x07inner-1\x1b]133;C;first\x07out-1\x1b]133;D;0\x07\
+              \x1b]133;B\x07inner-2\x1b]133;C;second\x07out-2\x1b]133;D;3\x07\
+              \x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 3);
+        let exits: Vec<Option<i32>> = st.command_blocks.iter().map(|b| b.exit_code).collect();
+        assert_eq!(exits, vec![Some(0), Some(3), Some(0)]);
+        let ids: Vec<u64> = st.command_blocks.iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+    }
+
+    /// A `B` past the outer `C` with no nested slot opens one — even when the
+    /// nested command itself sends no `C`: `C` is a watershed, never a gate.
+    #[test]
+    fn command_blocks_nest_without_an_inner_c() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07\
+              \x1b]133;B\x07inner-output\x1b]133;D;0\x07\
+              \x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 2);
+    }
+
+    /// A `C` with no open slot annotates nothing and opens nothing: inner raw
+    /// output under an outer command leaves just the outer block.
+    #[test]
+    fn command_blocks_ignore_a_c_with_no_open_slot() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07raw inner output\x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+    }
+
+    /// A second layer of nesting voids both slots: the stretch records no
+    /// blocks rather than wrong ones, later `D`s close nothing, and the next
+    /// `B` starts over.
+    #[test]
+    fn command_blocks_void_both_slots_on_a_second_layer() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07\
+              \x1b]133;B\x07inner\x1b]133;C;ssh deeper\x07\
+              \x1b]133;B\x07too deep\x07",
+        );
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+        // The inner and outer `D`s arrive at voided slots: nothing closes.
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"lost output\x1b]133;D;0\x07more lost\x1b]133;D;0\x07",
+        );
+        assert!(st.command_blocks.is_empty());
+        // A fresh `B` starts over with clean ids.
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07recovered\x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].id, 1);
+    }
+
+    /// A redrawn prompt past no `C` is still one run — the `C` watershed only
+    /// splits once the command actually started.
+    #[test]
+    fn command_blocks_coalesce_redraws_before_the_c() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07\x1b]133;B\x07cmd\x1b]133;C;cmd\x07out\x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+    }
+
+    /// The nested prompt redrawn before its own `C` is still one inner run,
+    /// not a second layer: redraws coalesce per slot.
+    #[test]
+    fn command_blocks_coalesce_nested_redraws_before_the_c() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07\
+              \x1b]133;B\x07\x1b]133;B\x07inner\x1b]133;C;cmd\x07out\x1b]133;D;0\x07\
+              \x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 2);
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+    }
+
+    /// A full-screen program between a `B` and its `D` voids the pending run —
+    /// blocks never span the alternate screen — even when it starts and exits
+    /// inside one read, and even when the read carries no marks at all.
+    #[test]
+    fn command_blocks_void_pending_runs_across_the_alternate_screen() {
+        for chunked in [false, true] {
+            let (mut st, mut sniffer) = block_state();
+            feed_blocks(
+                &mut st,
+                &mut sniffer,
+                b"\x1b]133;B\x07edit\x1b]133;C;nvim x\x07",
+            );
+            assert!(st.block_outer.is_some());
+            if chunked {
+                feed_blocks(&mut st, &mut sniffer, b"\x1b[?1049h");
+                feed_blocks(&mut st, &mut sniffer, b"screen paint");
+                feed_blocks(&mut st, &mut sniffer, b"\x1b[?1049l");
+            } else {
+                feed_blocks(&mut st, &mut sniffer, b"\x1b[?1049hpaint\x1b[?1049l");
+            }
+            assert!(
+                st.block_outer.is_none() && st.block_nested.is_none(),
+                "chunked={chunked}"
+            );
+            feed_blocks(&mut st, &mut sniffer, b"after\x1b]133;D;0\x07");
+            assert!(st.command_blocks.is_empty(), "chunked={chunked}");
+        }
     }
 
     /// An unparsable exit still closes the block; the code is just unknown.
@@ -6420,10 +6629,10 @@ mod tests {
             b"\x1b]133;B\x07a\x1b]133;D;0\x07\x1b]133;B\x07",
         );
         assert_eq!(st.command_blocks.len(), 1);
-        assert!(st.block_pending);
+        assert!(st.block_outer.is_some());
         clear_command_blocks(&mut st);
         assert!(st.command_blocks.is_empty());
-        assert!(!st.block_pending);
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
         // The orphaned `D` of the cleared pending open closes nothing.
         feed_blocks(&mut st, &mut sniffer, b"\x1b]133;D;0\x07");
         assert!(st.command_blocks.is_empty());
@@ -6527,7 +6736,8 @@ mod tests {
             exit_code: None,
             command_blocks: std::collections::VecDeque::new(),
             next_block_id: 0,
-            block_pending: false,
+            block_outer: None,
+            block_nested: None,
         }
     }
 

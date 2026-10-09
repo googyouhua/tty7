@@ -89,6 +89,26 @@ impl BlockSpan {
     }
 }
 
+/// One pending `B`: the absolute row it landed on, and whether its command
+/// text (`C`) has arrived yet — the watershed between a redrawn prompt's `B`
+/// (same run) and a nested command's `B` (the nested slot). Mirrors the
+/// daemon's slots in [`note_block_marks`]: the same byte stream must build
+/// the same pairing on both ends.
+#[derive(Debug, Clone, Copy)]
+struct BlockSlot {
+    start_abs: i64,
+    has_c: bool,
+}
+
+impl BlockSlot {
+    fn fresh(start_abs: i64) -> Self {
+        Self {
+            start_abs,
+            has_c: false,
+        }
+    }
+}
+
 /// The pane's spans plus its fold state, shared between the reader thread
 /// (which opens/closes spans) and the UI thread (which folds, jumps, copies
 /// and adopts daemon ids).
@@ -96,8 +116,10 @@ impl BlockSpan {
 pub struct BlockTracker {
     spans: Vec<BlockSpan>,
     next_seq: u64,
-    /// Absolute row of the pending `B`, if a command is running.
-    open: Option<i64>,
+    /// The outer command's pending `B`, if one is running.
+    outer: Option<BlockSlot>,
+    /// The one nested command's pending `B`, if one is running.
+    nested: Option<BlockSlot>,
     /// Folded spans, by `seq`. Fold state is view-local UI state: it rides
     /// the pane (not the view) so a relink keeps it, and it keys off `seq`
     /// so eviction below drops it with its span.
@@ -121,33 +143,84 @@ pub struct BlockTracker {
 }
 
 impl BlockTracker {
-    /// A `B` mark landed on `abs`: a command started. Re-arms a pending open
-    /// (a redrawn prompt is still one command run, mirroring the daemon).
+    /// A `B` mark landed on `abs`: a command started. Before the outer slot's
+    /// `C` it refreshes that slot (a redrawn prompt is still one command run,
+    /// mirroring the daemon); past it, it opens the nested slot, whose own
+    /// pre-`C` redraws refresh it the same way. A `B` while the nested slot
+    /// is taken past its `C` is a second layer of nesting and voids both
+    /// slots instead — the stretch records nothing rather than wrong spans,
+    /// and the next `B` starts over.
     pub fn note_b(&mut self, abs: i64) {
-        self.open = Some(abs);
+        if self.outer.is_none() {
+            self.outer = Some(BlockSlot::fresh(abs));
+        } else if !self.outer.is_some_and(|slot| slot.has_c) {
+            self.outer = Some(BlockSlot::fresh(abs));
+        } else if self.nested.is_none() {
+            self.nested = Some(BlockSlot::fresh(abs));
+        } else if !self.nested.is_some_and(|slot| slot.has_c) {
+            // Same redraw one level down: the nested prompt redrawn before
+            // its own `C` is still one inner run, not a second layer.
+            self.nested = Some(BlockSlot::fresh(abs));
+        } else {
+            self.outer = None;
+            self.nested = None;
+        }
     }
 
-    /// The pending `B`'s absolute row, if a command is running — so the caller
-    /// can fingerprint the rows the span will be verified against.
+    /// A `C` mark landed: the topmost pending command started. Annotates that
+    /// slot; with no pending `B` there is nothing to annotate.
+    pub fn note_c(&mut self) {
+        if let Some(slot) = self.nested.as_mut() {
+            slot.has_c = true;
+        } else if let Some(slot) = self.outer.as_mut() {
+            slot.has_c = true;
+        }
+    }
+
+    /// Voids both pending slots: the alternate screen touched the stretch, so
+    /// neither open run may become a span — blocks never span it.
+    pub fn void_pending(&mut self) {
+        self.outer = None;
+        self.nested = None;
+    }
+
+    /// Whether any command is running (an outer or nested `B` with no `D`
+    /// yet).
+    pub fn has_pending(&self) -> bool {
+        self.outer.is_some() || self.nested.is_some()
+    }
+
+    /// The topmost pending `B`'s absolute row, if a command is running — so
+    /// the caller can fingerprint the rows the span will be verified against.
     pub fn open_start(&self) -> Option<i64> {
-        self.open
+        self.nested
+            .map(|slot| slot.start_abs)
+            .or_else(|| self.outer.map(|slot| slot.start_abs))
     }
 
-    /// A `D` mark landed on `abs`: the pending command finished. With no
-    /// pending `B` there is nothing to close — the shell's own startup mark,
-    /// or a replay that starts mid-command.
+    /// A `D` mark landed on `abs`: the topmost pending command finished.
+    /// With no pending `B` there is nothing to close — the shell's own
+    /// startup mark, or a replay that starts mid-command.
     ///
-    /// `fp` is the start row's text as it stands now (see [`row_text`]);
-    /// `None` when the row is already gone, which [`verify_all`](Self::verify_all)
-    /// will read as eviction.
+    /// `fp` is the topmost start row's text as it stands now (see
+    /// [`row_text`]); `None` when the row is already gone, which
+    /// [`verify_all`](Self::verify_all) will read as eviction.
     ///
-    /// `C` never appears here on purpose: it is commentary (the command's
-    /// text), and commands run with no `133;C` at all, so `D` closes for any
-    /// pending `B`, exactly like the daemon.
+    /// `C` never appears here on purpose: it only annotates (see
+    /// [`BlockTracker::note_c`]), and commands run with no `133;C` at all,
+    /// so `D` closes the topmost pending `B` either way, exactly like the
+    /// daemon.
     pub fn note_d(&mut self, abs: i64, exit_code: Option<i32>, fp: Option<String>) {
-        let Some(start) = self.open.take() else {
-            return;
+        let start = match (&self.nested, &self.outer) {
+            (Some(slot), _) => slot.start_abs,
+            (None, Some(slot)) => slot.start_abs,
+            (None, None) => return,
         };
+        if self.nested.is_some() {
+            self.nested = None;
+        } else {
+            self.outer = None;
+        }
         // Marks arrive in stream order, so `end` never precedes `start` —
         // but a grid reset between the two (clear, relink) rebirths absolute
         // rows, and clamping beats recording a backwards span.
@@ -194,8 +267,15 @@ impl BlockTracker {
     }
 
     /// Drops every span fully above `top_abs` — the scroll-limit eviction
-    /// already forgot those rows, so spans pointing at them are stale.
+    /// already forgot those rows, so spans pointing at them are stale — and
+    /// voids any pending slot whose start row it forgot too.
     pub fn prune_before(&mut self, top_abs: i64) {
+        if self.outer.is_some_and(|slot| slot.start_abs < top_abs) {
+            self.outer = None;
+        }
+        if self.nested.is_some_and(|slot| slot.start_abs < top_abs) {
+            self.nested = None;
+        }
         if self.spans.is_empty() {
             return;
         }
@@ -222,7 +302,8 @@ impl BlockTracker {
         self.spans.clear();
         self.folded.clear();
         self.dirty.clear();
-        self.open = None;
+        self.outer = None;
+        self.nested = None;
         self.resync = true;
     }
 
@@ -234,7 +315,8 @@ impl BlockTracker {
         self.spans.clear();
         self.folded.clear();
         self.dirty.clear();
-        self.open = None;
+        self.outer = None;
+        self.nested = None;
     }
 
     /// Enriches unpaired spans with the daemon table's ids. Pairs newest to
@@ -675,6 +757,133 @@ mod tests {
         tracker.note_d(20, Some(1), None);
         assert_eq!(tracker.spans.len(), 1);
         assert_eq!(tracker.spans[0].start_abs, 14);
+    }
+
+    /// One nested layer builds three spans in close order: each inner `D`
+    /// closes its own inner `B`, and the outer `D` still finds the outer `B`.
+    /// Mirrors the daemon's nested test over the same mark sequence, so both
+    /// ends pair the same stream the same way.
+    #[test]
+    fn one_nested_layer_builds_three_spans_in_close_order() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_c();
+        tracker.note_b(20);
+        tracker.note_c();
+        tracker.note_d(30, Some(0), None);
+        tracker.note_b(40);
+        tracker.note_c();
+        tracker.note_d(50, Some(3), None);
+        tracker.note_d(60, Some(0), None);
+        assert_eq!(tracker.spans.len(), 3);
+        let bounds: Vec<(i64, i64)> = tracker
+            .spans
+            .iter()
+            .map(|s| (s.start_abs, s.end_abs))
+            .collect();
+        assert_eq!(bounds, vec![(20, 30), (40, 50), (10, 60)]);
+        let exits: Vec<Option<i32>> = tracker.spans.iter().map(|s| s.exit_code).collect();
+        assert_eq!(exits, vec![Some(0), Some(3), Some(0)]);
+        assert!(!tracker.has_pending());
+    }
+
+    /// `C` annotates the topmost open slot: the nested `C` does not mark the
+    /// outer run, and a later outer `B` past the outer `C` still nests.
+    #[test]
+    fn c_annotates_the_topmost_open_slot() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_c();
+        tracker.note_b(20);
+        tracker.note_c();
+        // The nested slot is taken: this `B` is a second layer, voiding both.
+        tracker.note_b(30);
+        assert!(!tracker.has_pending());
+        tracker.note_d(40, Some(0), None);
+        assert!(tracker.spans.is_empty());
+    }
+
+    /// A second layer of nesting voids both slots: later `D`s close nothing,
+    /// and the next `B` starts over.
+    #[test]
+    fn a_second_nesting_layer_voids_both_slots() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_c();
+        tracker.note_b(20);
+        tracker.note_c();
+        tracker.note_b(30);
+        assert!(!tracker.has_pending());
+        tracker.note_d(40, Some(0), None);
+        tracker.note_d(50, Some(0), None);
+        assert!(tracker.spans.is_empty());
+        tracker.note_b(60);
+        tracker.note_d(70, Some(0), None);
+        assert_eq!(tracker.spans.len(), 1);
+        assert_eq!(
+            (tracker.spans[0].start_abs, tracker.spans[0].end_abs),
+            (60, 70)
+        );
+    }
+
+    /// A `C` with no pending `B` annotates nothing and opens nothing.
+    #[test]
+    fn c_without_b_opens_nothing() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_c();
+        assert!(!tracker.has_pending());
+        tracker.note_d(20, Some(0), None);
+        assert!(tracker.spans.is_empty());
+    }
+
+    /// The nested prompt redrawn before its own `C` coalesces like the
+    /// outer one: same stream as the daemon's nested-redraw test.
+    #[test]
+    fn nested_redraws_before_the_c_coalesce() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.note_c();
+        tracker.note_b(20);
+        tracker.note_b(21);
+        tracker.note_c();
+        tracker.note_d(30, Some(0), None);
+        tracker.note_d(40, Some(0), None);
+        assert_eq!(tracker.spans.len(), 2);
+        let bounds: Vec<(i64, i64)> = tracker
+            .spans
+            .iter()
+            .map(|s| (s.start_abs, s.end_abs))
+            .collect();
+        assert_eq!(bounds, vec![(21, 30), (10, 40)]);
+    }
+
+    /// The fingerprint reads the topmost start: with a nested run open, the
+    /// inner `D` fingerprints the inner row, not the outer one.
+    #[test]
+    fn open_start_names_the_topmost_pending_b() {
+        let mut tracker = BlockTracker::default();
+        assert_eq!(tracker.open_start(), None);
+        tracker.note_b(10);
+        assert_eq!(tracker.open_start(), Some(10));
+        tracker.note_c();
+        tracker.note_b(20);
+        assert_eq!(tracker.open_start(), Some(20));
+        tracker.note_d(30, Some(0), None);
+        assert_eq!(tracker.open_start(), Some(10));
+        tracker.note_d(40, Some(0), None);
+        assert_eq!(tracker.open_start(), None);
+    }
+
+    /// A pending slot whose start row the scroll-limit eviction already forgot
+    /// is voided with the spans pointing at those rows.
+    #[test]
+    fn prune_before_voids_a_pending_slot_below_the_line() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(10);
+        tracker.prune_before(25);
+        assert!(!tracker.has_pending());
+        tracker.note_d(30, Some(0), None);
+        assert!(tracker.spans.is_empty());
     }
 
     /// Ctrl-C still closes, with its real code.

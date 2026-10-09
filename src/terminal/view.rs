@@ -3955,7 +3955,14 @@ impl TerminalView {
             return;
         }
         self.last_block_adopt = Some(now);
-        let procs = RemoteTerminal::query_procs(self.pane_id);
+        // The table lives where the pane lives: a local pane's daemon answers
+        // the direct query, while a remote pane's table is only visible down
+        // its own route. Either way a failed or empty poll is silence, and
+        // the push-back below already rides the pane's own link.
+        let procs = match self.host_id.is_local() {
+            true => RemoteTerminal::query_procs(self.pane_id),
+            false => self.terminal.query_procs_routed(self.pane_id),
+        };
         let Some(context) = procs.context else {
             return;
         };
