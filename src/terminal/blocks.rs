@@ -1418,4 +1418,48 @@ mod tests {
         tracker.adopt(&[folded_daemon(1)]);
         assert!(tracker.is_folded(1));
     }
+
+    /// Perf gate A-track (client): building the fold visibility map over a
+    /// full 200-span table plus toggling folds must land under 100 ms.
+    /// Microseconds in practice — this is smoke, not a benchmark — but the
+    /// number is printed so the gate rests on data, not on a bare pass.
+    #[test]
+    fn fold_map_build_over_full_span_table_is_under_100ms() {
+        let mut tracker = BlockTracker::default();
+        for i in 0..BLOCK_SPAN_CAP as i64 {
+            tracker.note_b(i * 10);
+            tracker.note_d(i * 10 + 5, Some(0), None);
+        }
+        assert_eq!(tracker.spans().len(), BLOCK_SPAN_CAP);
+        let seqs: Vec<u64> = tracker.spans().iter().map(|s| s.seq).collect();
+        let bottom = tracker.spans().last().map(|s| s.end_abs).unwrap_or(0);
+
+        let start = std::time::Instant::now();
+        for (i, seq) in seqs.iter().enumerate() {
+            if i % 2 == 0 {
+                tracker.set_folded(*seq, true);
+            }
+        }
+        let folded_map = tracker.map_visible(bottom, 40);
+        for seq in &seqs {
+            tracker.set_folded(*seq, false);
+        }
+        let unfolded_map = tracker.map_visible(bottom, 40);
+        let elapsed = start.elapsed();
+
+        println!(
+            "fold_map_build 200 spans: fold-half + 2 map_visible + unfold-all took {:.3} ms",
+            elapsed.as_secs_f64() * 1000.0,
+        );
+        assert_eq!(unfolded_map.len(), 40);
+        assert!(
+            folded_map.len() <= 40 && !folded_map.is_empty(),
+            "a folded map must still name visible rows"
+        );
+        assert!(
+            elapsed.as_millis() < 100,
+            "fold map build + toggles took {} ms",
+            elapsed.as_millis()
+        );
+    }
 }

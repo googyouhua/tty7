@@ -6368,6 +6368,91 @@ mod tests {
         (test_state(true), OscSniffer::new())
     }
 
+    /// Perf gate A-track (daemon): an 11 MB `cat`-like feed with block marks
+    /// paired must cost <=10% over the same feed without marks (5-run
+    /// average). Deterministic and CI-runnable; the gate reads the increment's
+    /// share of the total feed time, which is the only part a user could
+    /// perceive. Prints the averages and the share — the numbers, not just a
+    /// pass, are the evidence.
+    #[test]
+    fn perf_gate_block_pairing_overhead_within_ten_percent() {
+        const TOTAL: usize = 11 * 1024 * 1024;
+        const CHUNK: usize = 64 * 1024;
+        const RUNS: usize = 5;
+        const COMMANDS: usize = 200;
+
+        const LINE: &[u8] =
+            b"the quick brown fox jumps over the lazy dog 0123456789 !@#$%^&*()\r\n";
+        const MARK_B: &[u8] = b"\x1b]133;B\x07";
+        const MARK_C: &[u8] = b"\x1b]133;C;cat shakespeare.txt\x07";
+        const MARK_D: &[u8] = b"\x1b]133;D;0\x07";
+
+        // The same text in both payloads: `marked` only adds the B/C/D
+        // triples (one per command), so the delta is the pairing cost itself.
+        let mut text = Vec::with_capacity(TOTAL);
+        while text.len() < TOTAL {
+            let take = (TOTAL - text.len()).min(LINE.len());
+            text.extend_from_slice(&LINE[..take]);
+        }
+        assert_eq!(text.len(), TOTAL);
+        let per = TOTAL / COMMANDS;
+        let mut marked = Vec::with_capacity(TOTAL + 8192);
+        for piece in text.chunks(per) {
+            marked.extend_from_slice(MARK_B);
+            marked.extend_from_slice(MARK_C);
+            marked.extend_from_slice(piece);
+            marked.extend_from_slice(MARK_D);
+        }
+
+        // One pass through the reader thread's hot path per chunk: sniff,
+        // pair the block marks against the modes as the chunk found them,
+        // record, apply — exactly the order the live reader uses.
+        fn feed_once(payload: &[u8]) -> (std::time::Duration, usize) {
+            let mut st = test_state(true);
+            let mut sniffer = OscSniffer::new();
+            let start = std::time::Instant::now();
+            for chunk in payload.chunks(CHUNK) {
+                let mut signals = sniffer.feed(chunk);
+                let blocks = std::mem::take(&mut signals.blocks);
+                note_block_marks(&mut st, chunk, &blocks);
+                record_output(&mut st, chunk);
+                apply_signals(&mut st, signals);
+            }
+            (start.elapsed(), st.command_blocks.len())
+        }
+
+        // Warm up once so a cold allocator does not bill the first timed run.
+        feed_once(&text[..CHUNK]);
+
+        let mut plain_sum = std::time::Duration::ZERO;
+        let mut marked_sum = std::time::Duration::ZERO;
+        let mut paired = 0;
+        for _ in 0..RUNS {
+            let (dt, _) = feed_once(&text);
+            plain_sum += dt;
+            let (dt, blocks) = feed_once(&marked);
+            marked_sum += dt;
+            paired = blocks;
+        }
+        assert_eq!(
+            paired, COMMANDS,
+            "the marked feed must actually pair every command"
+        );
+        let plain = plain_sum.as_secs_f64() / RUNS as f64;
+        let marked_avg = marked_sum.as_secs_f64() / RUNS as f64;
+        let share = (marked_avg - plain) / marked_avg;
+        println!(
+            "perf_gate daemon 11MB feed ({RUNS}-run avg): plain {plain:.3}s, \
+             marked {marked_avg:.3}s, increment {:.3}s ({:.2}% of feed total)",
+            marked_avg - plain,
+            share * 100.0,
+        );
+        assert!(
+            share <= 0.10,
+            "block pairing took {share:.2}% of the feed time (plain {plain:.3}s, marked {marked_avg:.3}s)"
+        );
+    }
+
     /// Matrix row: a normal command brackets exactly one block.
     #[test]
     fn command_blocks_pair_b_to_d() {
