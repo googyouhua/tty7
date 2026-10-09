@@ -6388,7 +6388,9 @@ mod tests {
         const MARK_D: &[u8] = b"\x1b]133;D;0\x07";
 
         // The same text in both payloads: `marked` only adds the B/C/D
-        // triples (one per command), so the delta is the pairing cost itself.
+        // triples (one per command), so the delta is the pairing cost plus
+        // the bytes of the marks themselves (conservative: it overstates
+        // pairing alone).
         let mut text = Vec::with_capacity(TOTAL);
         while text.len() < TOTAL {
             let take = (TOTAL - text.len()).min(LINE.len());
@@ -6448,7 +6450,7 @@ mod tests {
             share * 100.0,
         );
         assert!(
-            share <= 0.10,
+            (0.0..=0.10).contains(&share),
             "block pairing took {share:.2}% of the feed time (plain {plain:.3}s, marked {marked_avg:.3}s)"
         );
     }
