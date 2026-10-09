@@ -55,7 +55,7 @@ context: []
 
 B 轨结论：deferred 手工项（本容器跑不通：harness 系 macOS-only、无 zsh、无 release 二进制），
 精确复现命令已记入 `initiative-terminal-blocks/deferred-work.md`（source_plan 为本 plan）。
-基线映射：frontmatter `baseline_revision: 3e1c754` 即 B 轨复现命令中的 baseline；A 轨无跨版本基线，
+基线映射：B 轨复现命令中的 baseline 是 `4f0e140`（1.1 前代码）；frontmatter `baseline_revision: 3e1c754` 是本 ticket 自身构建基线（1.7(AB) 后），两者不同——前者是性能对照基线，后者是工作基线；A 轨无跨版本基线，
 其“基线”是同负载无 marks 的 feed（诚实记录：测的是增量占比，不是跨版本回归）。
 
 ## Verification

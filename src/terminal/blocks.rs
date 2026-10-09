@@ -1457,9 +1457,9 @@ mod tests {
             "a folded map must still name visible rows"
         );
         assert!(
-            elapsed.as_millis() < 100,
-            "fold map build + toggles took {} ms",
-            elapsed.as_millis()
+            elapsed.as_secs_f64() * 1000.0 < 100.0,
+            "fold map build + toggles took {:.3} ms",
+            elapsed.as_secs_f64() * 1000.0
         );
     }
 }
