@@ -2837,9 +2837,9 @@ impl DaemonPane {
     }
 
     /// Drop the pane's block table (entry-5, CAP-5): the GUI cleared its
-    /// scrollback, so absolute rows were rebirthed and every span pointed at
-    /// rows that no longer exist. Also drops a pending open, like the
-    /// matrix row the helper was kept tested for.
+    /// scrollback, so absolute rows were rebirthed and every span points at
+    /// rows that no longer exist. Also drops a pending open, so a `D`
+    /// arriving after the clear closes nothing.
     pub fn clear_command_blocks(&self) {
         let mut st = self.state.lock().unwrap();
         clear_command_blocks(&mut st);
@@ -4308,8 +4308,9 @@ fn on_alt_screen(modes: &TerminalModes) -> bool {
 /// one command run, not two); a `B` past it opens the nested slot, whose own
 /// pre-`C` redraws refresh it the same way. A `B` past both slots' `C` —
 /// outer past its `C` with the nested slot taken past its own — is a second
-/// layer of nesting, which is not paired: both slots are voided instead, so the stretch records no blocks
-/// rather than wrong ones, and the next `B` starts over. `C` annotates the
+/// layer of nesting, which is not paired: both slots are voided instead, so
+/// the stretch records no blocks rather than wrong ones, and the next `B`
+/// starts over. `C` annotates the
 /// topmost open slot; `D` closes it. An unpaired `D` (no slot open) closes
 /// nothing.
 ///
@@ -4342,15 +4343,13 @@ fn note_block_marks(st: &mut PaneState, bytes: &[u8], marks: &[(usize, BlockMark
         }
         match mark {
             BlockMark::Open => {
-                if st.block_outer.is_none() {
-                    st.block_outer = Some(BlockSlot::default());
-                } else if !st.block_outer.is_some_and(|slot| slot.has_c) {
-                    // Still before the outer command's `C`: a redrawn prompt,
-                    // still one run.
+                // No outer slot, or still before the outer command's `C`: a
+                // redrawn prompt is still one run.
+                if st.block_outer.is_none_or(|slot| !slot.has_c) {
                     st.block_outer = Some(BlockSlot::default());
                 } else if st.block_nested.is_none() {
                     st.block_nested = Some(BlockSlot::default());
-                } else if !st.block_nested.is_some_and(|slot| slot.has_c) {
+                } else if st.block_nested.is_none_or(|slot| !slot.has_c) {
                     // Same redraw one level down: the nested prompt redrawn
                     // before its own `C` is still one inner run, not a layer.
                     st.block_nested = Some(BlockSlot::default());
