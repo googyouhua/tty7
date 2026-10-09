@@ -151,13 +151,13 @@ impl BlockTracker {
     /// slots instead — the stretch records nothing rather than wrong spans,
     /// and the next `B` starts over.
     pub fn note_b(&mut self, abs: i64) {
-        if self.outer.is_none() {
-            self.outer = Some(BlockSlot::fresh(abs));
-        } else if !self.outer.is_some_and(|slot| slot.has_c) {
+        // No outer slot, or still before the outer command's `C`: a redrawn
+        // prompt is still one command run, not two.
+        if self.outer.is_none_or(|slot| !slot.has_c) {
             self.outer = Some(BlockSlot::fresh(abs));
         } else if self.nested.is_none() {
             self.nested = Some(BlockSlot::fresh(abs));
-        } else if !self.nested.is_some_and(|slot| slot.has_c) {
+        } else if self.nested.is_none_or(|slot| !slot.has_c) {
             // Same redraw one level down: the nested prompt redrawn before
             // its own `C` is still one inner run, not a second layer.
             self.nested = Some(BlockSlot::fresh(abs));
@@ -185,7 +185,9 @@ impl BlockTracker {
     }
 
     /// Whether any command is running (an outer or nested `B` with no `D`
-    /// yet).
+    /// yet). Test-only: production code reads [`BlockTracker::open_start`]
+    /// and [`BlockTracker::void_pending`] instead.
+    #[cfg(test)]
     pub fn has_pending(&self) -> bool {
         self.outer.is_some() || self.nested.is_some()
     }
