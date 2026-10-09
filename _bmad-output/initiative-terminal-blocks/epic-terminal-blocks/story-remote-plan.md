@@ -3,7 +3,7 @@ title: '远端一致与嵌套归属'
 type: 'feature'
 ticket: 6
 created: '2026-10-08'
-status: 'built'
+status: 'done'
 baseline_revision: 'a6dc93c'
 route: 'full'
 route_source: 'auto'
