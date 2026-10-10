@@ -15,7 +15,8 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
 
 use super::TermSize;
 use super::blocks::{
-    BlockSpan, block_command_text, block_output_text, block_text, screen_to_abs, visible_map,
+    BlockSpan, BlockTracker, block_command_text, block_output_text, block_text, screen_to_line,
+    visible_map,
 };
 use super::cmd_editor::CmdEditor;
 use super::completion::{self, CandidateKind, CompletionSession};
@@ -3783,11 +3784,17 @@ impl TerminalView {
             .cloned()
     }
 
-    /// The closed span under screen `row`, if any — resolved through the fold
-    /// mapping, so a folded window latches the span it shows rather than the
-    /// grid row beneath it.
+    /// The closed span under screen `row`, if any — resolved through the one
+    /// shared row function every mouse entry uses, so a folded window latches
+    /// the span it shows rather than the grid row beneath it. Grid first,
+    /// tracker second, `try_lock` only: a contended grid or tracker latches
+    /// nothing this event — transient, the next right-click re-latches —
+    /// rather than blocking the gesture or latching the wrong span.
     fn block_at_screen_row(&self, row: usize) -> Option<BlockSpan> {
         let rows = self.terminal.size().rows;
+        if row >= rows || self.frame_alt_screen {
+            return None;
+        }
         let term = self.terminal.term.try_lock_unfair()?;
         // Block spans address the primary grid; under a full-screen program
         // the grid on screen is the alternate one, so there is nothing of
@@ -3795,11 +3802,11 @@ impl TerminalView {
         if term.mode().contains(TermMode::ALT_SCREEN) {
             return None;
         }
+        let line = self.mouse_grid_line(&term, row)?;
+        let abs = term.grid().history_size() as i64 + i64::from(line.0);
+        drop(term);
         let store = self.terminal.block_tracker();
         let tracker = store.try_lock().ok()?;
-        let (top, _) = super::blocks::window_abs_range(&term, rows);
-        let map = visible_map(&term, &tracker, rows);
-        let abs = screen_to_abs(row, rows, top, map.as_deref())?;
         tracker.span_at(abs).cloned()
     }
 
@@ -3833,7 +3840,11 @@ impl TerminalView {
 
     /// The viewport goes to the latched block's first line: at the top when
     /// it is (or evicted into) the scrollback, at the bottom when it sits in
-    /// the live screen band.
+    /// the live screen band. Fold-aware: the identity offset assumes every
+    /// row shows, so with folds the target walks the hidden rows out through
+    /// the paint mapping to a fixed point — the start still lands at the top
+    /// row. Without folds, or on the alternate screen, the old arithmetic
+    /// runs exactly as before.
     pub fn jump_to_block_start(&mut self, cx: &mut Context<Self>) {
         let Some(span) = self.menu_block.and_then(|seq| self.block_span(seq)) else {
             return;
@@ -3843,10 +3854,20 @@ impl TerminalView {
         term.selection = None;
         let history = term.grid().history_size() as i64;
         let line = span.start_abs - history;
-        let target = match line <= 0 {
+        let mut target = match line <= 0 {
             true => (-line).min(history),
             false => 0,
         };
+        if line <= 0 && !term.mode().contains(TermMode::ALT_SCREEN) {
+            let rows = self.terminal.size().rows;
+            if let Ok(tracker) = self.terminal.block_tracker().try_lock()
+                && tracker.has_folds()
+                && rows > 0
+            {
+                target =
+                    fold_aware_jump_target(&tracker, &term, span.start_abs, rows, target, history);
+            }
+        }
         let current = term.grid().display_offset() as i64;
         term.scroll_display(Scroll::Delta((target - current) as i32));
         drop(term);
@@ -6349,8 +6370,13 @@ impl TerminalView {
     ) {
         let smart = cx.global::<Config>().smart_select;
         let mut term = self.terminal.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
-        let point = Point::new(Line(row as i32 - display_offset), Column(col));
+        // Fold-aware: the click lands on the painted row, so a folded window
+        // starts the selection on its summary's grid line. A blank short-map
+        // row (or a row the grid forgot) starts nothing.
+        let Some(line) = self.mouse_grid_line(&term, row) else {
+            return;
+        };
+        let point = Point::new(line, Column(col));
         let side = if left { Side::Left } else { Side::Right };
         if shift && clicks == 1 && term.selection.is_some() {
             if let Some(sel) = term.selection.as_mut() {
@@ -6390,8 +6416,12 @@ impl TerminalView {
             return;
         }
         let mut term = self.terminal.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
-        let point = Point::new(Line(row as i32 - display_offset), Column(col));
+        // Same mapping as the start: both ends name painted rows, and the
+        // grid in between reads verbatim, hidden rows included.
+        let Some(line) = self.mouse_grid_line(&term, row) else {
+            return;
+        };
+        let point = Point::new(line, Column(col));
         let side = if left { Side::Left } else { Side::Right };
         if let Some(sel) = term.selection.as_mut() {
             sel.update(point, side);
@@ -6460,9 +6490,13 @@ impl TerminalView {
         } else {
             term.screen_lines().saturating_sub(1)
         };
-        let point = Point::new(Line(row as i32 - offset as i32), Column(ds.col));
-        if let Some(sel) = term.selection.as_mut() {
-            sel.update(point, ds.side);
+        // The edge row through the same mapping: past a scroll the snapshot
+        // is stale by construction, so this lands on the live fallback.
+        if let Some(line) = self.mouse_grid_line(&term, row) {
+            let point = Point::new(line, Column(ds.col));
+            if let Some(sel) = term.selection.as_mut() {
+                sel.update(point, ds.side);
+            }
         }
         drop(term);
         if offset != before {
@@ -6877,38 +6911,86 @@ impl TerminalView {
 
     /// The gutter's markers, one per screen row: `(seq, folded, failed)` —
     /// see [`render_block_gutter`](Self::render_block_gutter).
+    ///
+    /// Read back from the last painted snapshot, never recomputed: the grid
+    /// and the gutter share the one mapping the snapshot's frame painted
+    /// with, so a scroll landing between two lock acquisitions cannot split
+    /// them across rows. No locks here at all — a length mismatch (first
+    /// frame, or a resize the snapshot predates) reads as no markers rather
+    /// than ones for the wrong rows.
     fn block_gutter_markers(&self) -> Vec<Option<(u64, bool, bool)>> {
         let rows = self.terminal.size().rows;
-        let Some(term) = self.terminal.term.try_lock_unfair() else {
-            return Vec::new();
-        };
-        // See `block_at_screen_row`: spans address the primary grid only.
-        if term.mode().contains(TermMode::ALT_SCREEN) {
-            return Vec::new();
+        match self.grid_snap.as_ref() {
+            Some(snap) if snap.gutter_markers.len() == rows => snap.gutter_markers.clone(),
+            _ => Vec::new(),
         }
+    }
+
+    /// The grid line a screen `row` shows: the one shared row function every
+    /// mouse entry resolves through — selection start/update and drag-scroll,
+    /// link hover/click/resolve, the right-click latch. Prefers the last
+    /// painted snapshot's mapping (the rows on screen, shared with the grid
+    /// and gutter); the snapshot validates against the live scroll state
+    /// (rows, history, display offset, alternate screen) *and* the live fold
+    /// table (span count plus folded seqs, recorded at paint time), and any
+    /// mismatch recomputes live through `visible_map` instead, so a fold or
+    /// unfold between paint and click never resolves through a stale map.
+    /// Only `try_lock`s, grid first then tracker; a contended tracker
+    /// resolves to nothing — transient, the next event recovers — never to a
+    /// stale or identity row. Without folds the mapping is `None` and this is
+    /// exactly the old identity path. Vi keyboard paths never come here.
+    fn mouse_grid_line(
+        &self,
+        term: &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
+        row: usize,
+    ) -> Option<Line> {
+        let rows = self.terminal.size().rows;
+        if row >= rows {
+            return None;
+        }
+        let history = term.grid().history_size() as i64;
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return Self::grid_line(term, row);
+        }
+        // The live tracker in hand for both validation and fallback: with the
+        // grid guard above it this stays grid first, tracker second.
         let store = self.terminal.block_tracker();
         let Ok(tracker) = store.try_lock() else {
-            return Vec::new();
+            return None;
         };
-        if tracker.spans().is_empty() {
-            return Vec::new();
+        if !self.frame_alt_screen {
+            if let Some(snap) = self.grid_snap.as_ref() {
+                if snap.gutter_markers.len() == rows
+                    && snap.history_size as i64 == history
+                    && snap.display_offset == term.grid().display_offset() as i32
+                    && snap.fold_epoch == tracker.fold_epoch()
+                {
+                    // Paint and click agree on scroll state and fold table:
+                    // resolve through the painted rows, blank for blank. A row
+                    // the mapping holds but the grid forgot falls through to
+                    // the live path below rather than pointing at evicted rows.
+                    if let Some(line) = screen_to_line(
+                        row,
+                        snap.fold_top,
+                        snap.fold_map.as_deref(),
+                        snap.history_size as i64,
+                    ) {
+                        if line >= term.topmost_line() && line <= term.bottommost_line() {
+                            return Some(line);
+                        }
+                    } else {
+                        return None;
+                    }
+                }
+            }
         }
-        let mut starts = std::collections::HashMap::new();
-        for span in tracker.spans() {
-            starts.entry(span.start_abs).or_insert((
-                span.seq,
-                tracker.is_folded(span.seq),
-                span.is_failed(),
-            ));
+        if !tracker.has_folds() {
+            return Self::grid_line(term, row);
         }
-        let (top, _) = super::blocks::window_abs_range(&term, rows);
-        let map = visible_map(&term, &tracker, rows);
-        (0..rows)
-            .map(|row| {
-                screen_to_abs(row, rows, top, map.as_deref())
-                    .and_then(|abs| starts.get(&abs).copied())
-            })
-            .collect()
+        let (top, _) = super::blocks::window_abs_range(term, rows);
+        let map = visible_map(term, &tracker, rows);
+        screen_to_line(row, top, map.as_deref(), history)
+            .filter(|line| *line >= term.topmost_line() && *line <= term.bottommost_line())
     }
 
     fn grid_line(
@@ -7258,7 +7340,7 @@ impl TerminalView {
         use alacritty_terminal::term::cell::Flags;
 
         let term = self.terminal.term.lock();
-        let Some(line) = Self::grid_line(&term, row) else {
+        let Some(line) = self.mouse_grid_line(&term, row) else {
             return true;
         };
         if col >= term.columns() {
@@ -7401,7 +7483,9 @@ impl TerminalView {
     /// declares — which wins outright, because the emitter said what it meant.
     fn link_line_at(&self, col: usize, row: usize) -> Option<GridLink> {
         let term = self.terminal.term.lock();
-        let line = Self::grid_line(&term, row)?;
+        // Links land on painted rows: a folded span's summary resolves to its
+        // first line, and hidden rows are unreachable by construction.
+        let line = self.mouse_grid_line(&term, row)?;
         if col >= term.columns() {
             return None;
         }
@@ -9023,6 +9107,29 @@ fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
         (true, false, true) => SelectEndCopy::Editor,
         (true, false, false) => SelectEndCopy::None,
     }
+}
+
+/// The scroll offset placing `start_abs` at the top row: grid geometry out
+/// of the term, fixed-point walk in the tracker (see
+/// [`BlockTracker::jump_target_for`]).
+fn fold_aware_jump_target(
+    tracker: &BlockTracker,
+    term: &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
+    start_abs: i64,
+    rows: usize,
+    identity: i64,
+    history: i64,
+) -> i64 {
+    use alacritty_terminal::grid::Dimensions as _;
+
+    tracker.jump_target_for(
+        start_abs,
+        rows,
+        identity,
+        history,
+        history + term.topmost_line().0 as i64,
+        history + term.bottommost_line().0 as i64,
+    )
 }
 
 /// Whether a file link's menu offers "Open with Default App" beside "Open".

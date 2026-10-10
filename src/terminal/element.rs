@@ -1806,9 +1806,34 @@ pub(super) struct GridSnapshot {
     any_current: bool,
     /// Scrollback state at snapshot time, so the paint pass can map a kitty
     /// image's absolute anchor row back to a screen row: screen_row =
-    /// anchor_row - history_size + display_offset.
-    display_offset: i32,
-    history_size: usize,
+    /// anchor_row - history_size + display_offset. Also the scroll state the
+    /// fold mapping was built against: mouse hit-tests match these back to
+    /// the live grid, and recompute live on mismatch (scroll between paint
+    /// and click, history growth), so a stale snapshot never misroutes.
+    pub(super) display_offset: i32,
+    pub(super) history_size: usize,
+    /// The fold mapping this frame painted with, if any: `None` is the
+    /// identity window (nothing folded, alternate screen, or a frame that
+    /// never locked the tracker). The gutter and the hit-tests read this
+    /// back instead of computing their own, so grid, gutter and clicks share
+    /// the one mapping the frame painted with. Recomputed every frame that
+    /// gets the lock — never carried over, so no stale map reaches the next
+    /// frame.
+    pub(super) fold_map: Option<Vec<i64>>,
+    /// Span count plus sorted folded seqs from the same lock scope as
+    /// `fold_map` (see [`BlockTracker::fold_epoch`](super::blocks::BlockTracker::fold_epoch)):
+    /// hit-tests require full equality with the live tracker before trusting
+    /// the snapshot's rows, so a fold/unfold between paint and click
+    /// recomputes live instead of resolving through a stale map.
+    pub(super) fold_epoch: (usize, Vec<u64>),
+    /// The viewport's top absolute row the mapping was built against (the
+    /// identity window's top when `fold_map` is `None`), so hit-tests can
+    /// resolve through the painted rows without re-locking the grid.
+    pub(super) fold_top: i64,
+    /// The gutter's markers for `fold_map`, one entry per painted row —
+    /// `(seq, folded, failed)` for the closed span starting there, if any.
+    /// Resolved in the same lock scope as the grid, read back lock-free.
+    pub(super) gutter_markers: Vec<Option<(u64, bool, bool)>>,
 }
 
 impl GridSnapshot {
@@ -1855,6 +1880,10 @@ impl TerminalElement {
         let (any_match, any_current);
         let display_offset;
         let history_size;
+        let fold_map;
+        let fold_epoch;
+        let fold_top;
+        let gutter_markers;
         let prompt_shape = self.prompt_cursor_shape(cx);
         {
             let mut palette = self.view.read(cx).terminal.palette;
@@ -1894,18 +1923,36 @@ impl TerminalElement {
             let selection = content.selection;
 
             // Folded blocks collapse their rows out of the window,
-            // bottom-anchored: with any fold mapping, rows come from the grid
-            // directly instead of `display_iter`, and each folded span shows
-            // its one-line summary on its first row.
+            // top-aligned with the blanks at the bottom: with any fold
+            // mapping, rows come from the grid directly instead of
+            // `display_iter`, and each folded span shows its one-line summary
+            // on its first row.
             let store = self.view.read(cx).terminal.block_tracker();
             let tracker = store.try_lock().ok();
             // Spans address the primary grid; a full-screen program owns the
             // alternate one, so folds never remap it.
-            let fold_map: Option<Vec<i64>> = tracker.as_deref().and_then(|tracker| {
-                (!term.mode().contains(TermMode::ALT_SCREEN))
+            let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+            fold_map = tracker.as_deref().and_then(|tracker| {
+                (!alt_screen)
                     .then(|| super::blocks::visible_map(&term, tracker, rows))
                     .flatten()
             });
+            // The gutter's markers for this exact mapping, resolved here in
+            // the same lock scope that paints the grid: the gutter only reads
+            // them back, so the two can never see different frames of the
+            // scrollback. The identity top matches `window_abs_range`, from
+            // the same scroll state the mapping was built against.
+            fold_top = history_size as i64 - display_offset as i64;
+            fold_epoch = tracker
+                .as_deref()
+                .map(|tracker| tracker.fold_epoch())
+                .unwrap_or_default();
+            gutter_markers = match tracker.as_deref() {
+                Some(tracker) if !alt_screen => {
+                    super::blocks::gutter_markers(tracker, fold_map.as_deref(), fold_top, rows)
+                }
+                _ => Vec::new(),
+            };
 
             let cur = content.cursor;
             let cursor_row = cur.point.line.0 + display_offset;
@@ -1955,7 +2002,6 @@ impl TerminalElement {
                     tracker,
                     map,
                     buf,
-                    rows,
                     cols,
                     history_size,
                     &palette,
@@ -2004,7 +2050,7 @@ impl TerminalElement {
             if let Some(map) = fold_map.as_ref() {
                 let cursor_abs = history_size as i64 + i64::from(cur.point.line.0);
                 if let Some(pos) = map.iter().position(|&a| a == cursor_abs) {
-                    let srow = rows.saturating_sub(map.len()) + pos;
+                    let srow = pos;
                     if col < cols {
                         cursor = Some(GridCursor {
                             row: srow,
@@ -2058,10 +2104,9 @@ impl TerminalElement {
                     (hit, current)
                 }
                 Some(map) => {
-                    let skip = rows.saturating_sub(map.len());
                     let to_screen = |line: i32| {
                         let abs = history_size as i64 + i64::from(line);
-                        map.iter().position(|&a| a == abs).map(|pos| skip + pos)
+                        map.iter().position(|&a| a == abs)
                     };
                     // Grid lines, like `lo`/`hi` above: absolute rows re-based on
                     // the history the mapping was built against.
@@ -2084,6 +2129,10 @@ impl TerminalElement {
             any_current,
             display_offset,
             history_size,
+            fold_map,
+            fold_epoch,
+            fold_top,
+            gutter_markers,
         })
     }
 
@@ -2314,15 +2363,14 @@ impl TerminalElement {
 }
 
 /// Paints the window through a fold mapping: every visible absolute row comes
-/// from the grid directly (bottom-anchored, so the prompt stays put), and
-/// each folded span's first row carries its one-line summary.
+/// from the grid directly (top-aligned, blanks at the bottom), and each
+/// folded span's first row carries its one-line summary.
 #[allow(clippy::too_many_arguments)]
 fn paint_folded_rows<T: alacritty_terminal::event::EventListener>(
     term: &Term<T>,
     tracker: &super::blocks::BlockTracker,
     map: &[i64],
     buf: &mut [RenderCell],
-    rows: usize,
     cols: usize,
     history_size: usize,
     palette: &[Rgb; 256],
@@ -2332,9 +2380,11 @@ fn paint_folded_rows<T: alacritty_terminal::event::EventListener>(
     under: Rgba,
     any_selected: &mut bool,
 ) {
-    let skip = rows.saturating_sub(map.len());
-    for (i, abs) in map.iter().enumerate() {
-        let srow = skip + i;
+    debug_assert!(
+        map.len() * cols <= buf.len(),
+        "a mapping never exceeds the viewport it paints"
+    );
+    for (srow, abs) in map.iter().enumerate() {
         let line = AlacLine((*abs - history_size as i64) as i32);
         for (col, slot) in buf[srow * cols..(srow + 1) * cols]
             .iter_mut()
@@ -2361,10 +2411,9 @@ fn paint_folded_rows<T: alacritty_terminal::event::EventListener>(
         if !tracker.is_folded(span.seq) {
             continue;
         }
-        let Some(pos) = map.iter().position(|&a| a == span.start_abs) else {
+        let Some(srow) = super::blocks::fold_summary_row(map, span.start_abs) else {
             continue;
         };
-        let srow = skip + pos;
         let summary = super::blocks::fold_summary(term, span, cols);
         paint_summary_row(&mut buf[srow * cols..(srow + 1) * cols], &summary, colors);
     }
