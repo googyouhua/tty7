@@ -425,6 +425,18 @@ impl BlockTracker {
         self.folded.contains(&seq)
     }
 
+    /// Span count plus sorted folded seqs, recorded by the paint snapshot in
+    /// the same lock scope as the fold mapping: hit-tests require full
+    /// equality before trusting the snapshot's rows, so a fold, unfold, span
+    /// close or eviction between paint and click recomputes live instead of
+    /// resolving through a stale map. Seqs are never reused (`next_seq` only
+    /// moves forward), so the pair names the exact table the map came from.
+    pub fn fold_epoch(&self) -> (usize, Vec<u64>) {
+        let mut folded: Vec<u64> = self.folded.iter().copied().collect();
+        folded.sort_unstable();
+        (self.spans.len(), folded)
+    }
+
     /// Folds (`true`) or unfolds a closed span. Returns the new state, or
     /// `None` when `seq` names no closed span. A successful toggle marks the
     /// span dirty (entry-5, CAP-5): the daemon learns about it
@@ -445,21 +457,116 @@ impl BlockTracker {
         Some(folded)
     }
 
-    /// Whether `abs` is hidden inside a folded span (past its first line).
-    fn is_hidden(&self, abs: i64) -> bool {
+    /// Whether absolute row `abs` is hidden inside a folded span (past its
+    /// first line). The one hidden-row helper every fold-aware path walks
+    /// through: the paint mapping, the mouse hit-tests and the jump target
+    /// all key off this, so a row is hidden for all of them or none.
+    pub fn hidden_abs_in(&self, abs: i64) -> bool {
         self.spans
             .iter()
             .any(|s| self.folded.contains(&s.seq) && s.start_abs < abs && abs <= s.end_abs)
+    }
+
+    /// Whether `abs` is hidden inside a folded span (past its first line).
+    fn is_hidden(&self, abs: i64) -> bool {
+        self.hidden_abs_in(abs)
+    }
+
+    /// The window bottom placing `start_abs` at the top row: walk forward
+    /// past `rows - 1` visible rows from the span's start. The jump target
+    /// inverts this (`display_offset = history + rows - 1 - bottom`) and
+    /// verifies through [`BlockTracker::map_visible`], so eviction clamps
+    /// converge at the bounds instead of overshooting.
+    pub fn bottom_for_top(&self, start_abs: i64, rows: usize) -> i64 {
+        let mut bottom = start_abs;
+        let mut visible = 1;
+        while visible < rows.max(1) {
+            bottom += 1;
+            if !self.hidden_abs_in(bottom) {
+                visible += 1;
+            }
+        }
+        bottom
+    }
+
+    /// The scroll offset placing `start_abs` at the top row through the fold
+    /// mapping: the window bottom topping out at the span's start (via
+    /// [`BlockTracker::bottom_for_top`]), verified through the paint mapping
+    /// to a fixed point. `floor`/`grid_bottom` are the absolute rows the grid
+    /// still holds (see [`visible_map`]); each step moves whole painted rows,
+    /// so the exact single-shot guess converges at once and eviction clamps
+    /// converge at the bounds instead — eight steps bound the walk either
+    /// way. A span the grid already forgot keeps the identity clamp, which is
+    /// the same bound.
+    pub fn jump_target_for(
+        &self,
+        start_abs: i64,
+        rows: usize,
+        identity: i64,
+        history: i64,
+        floor: i64,
+        grid_bottom: i64,
+    ) -> i64 {
+        if start_abs < floor {
+            return identity;
+        }
+        let mut target =
+            (history + rows as i64 - 1 - self.bottom_for_top(start_abs, rows).min(grid_bottom))
+                .clamp(0, history);
+        let mut prev = i64::MIN;
+        for _ in 0..8 {
+            if target == prev {
+                break;
+            }
+            prev = target;
+            let bottom = (history - target + rows as i64 - 1).min(grid_bottom);
+            let mut map = self.map_visible(bottom, rows);
+            map.retain(|&abs| abs >= floor);
+            match map.iter().position(|&abs| abs == start_abs) {
+                Some(0) => break,
+                Some(pos) => {
+                    // The start sits `pos` painted rows down: the window tops
+                    // out too high by that many visible rows.
+                    target = (target - pos as i64).max(0);
+                }
+                None if map.first().is_some_and(|&first| first > start_abs) || map.is_empty() => {
+                    // The window sits below the start entirely: scroll up, by
+                    // the absolute gap first, then converge.
+                    let gap = map
+                        .first()
+                        .map(|&first| first - start_abs)
+                        .unwrap_or(1)
+                        .max(1);
+                    let next = target.saturating_add(gap).min(history);
+                    if next == target {
+                        break;
+                    }
+                    target = next;
+                }
+                None => {
+                    // The window sits above the start entirely: scroll down.
+                    let gap = map.last().map(|&last| start_abs - last).unwrap_or(1).max(1);
+                    let next = target.saturating_sub(gap).max(0);
+                    if next == target {
+                        break;
+                    }
+                    target = next;
+                }
+            }
+        }
+        target
     }
 
     /// The absolute rows to paint, top to bottom, for a window whose bottom
     /// row is `bottom_abs` showing `rows` rows.
     ///
     /// Folded spans collapse to their first line; the freed rows pull earlier
-    /// lines into view (the window bottom stays put, so the prompt does too).
-    /// Near the grid's birth there may be fewer than `rows` lines — the
-    /// caller leaves the rest blank. With nothing folded this is exactly the
-    /// identity window, so callers can skip the mapping then.
+    /// lines into view (the mapping still ends at the window bottom, so a
+    /// full mapping paints exactly where the identity window did). Near the
+    /// grid's birth there may be fewer than `rows` lines — those paint
+    /// top-aligned, with the blanks left at the bottom. With nothing folded
+    /// this is exactly the identity window, so callers can skip the mapping
+    /// then.
     pub fn map_visible(&self, bottom_abs: i64, rows: usize) -> Vec<i64> {
         let mut out = Vec::with_capacity(rows);
         let mut abs = bottom_abs;
@@ -520,8 +627,11 @@ pub fn window_abs_range<T: EventListener>(term: &Term<T>, rows: usize) -> (i64, 
 
 /// Visible-row mapping for a window of `rows` rows, or `None` when the
 /// identity mapping holds (nothing folded, or no fold intersecting the
-/// window). Bottom-anchored: the window's bottom row stays put, so folding
-/// pulls earlier lines into view and the prompt stays where it was.
+/// window). The mapping names the rows ending at the window bottom, so
+/// folding pulls earlier lines into view; a full mapping paints exactly
+/// where the identity window did, while a short one (near the grid's birth)
+/// paints top-aligned with the blanks at the bottom — the prompt may sit
+/// higher, but it stays visible and nothing is hidden.
 pub fn visible_map<T: EventListener>(
     term: &Term<T>,
     tracker: &BlockTracker,
@@ -537,7 +647,8 @@ pub fn visible_map<T: EventListener>(
     // The window can name rows the scroll-limit eviction already forgot
     // (absolute row 0 is the grid's birth, not its memory): only mapped rows
     // the grid still holds may paint. Dropping from the front keeps the
-    // bottom-anchored alignment — the caller blanks what is left short.
+    // newest rows; what is left short paints top-aligned, blank at the
+    // bottom.
     let bottom = bottom.min(history + term.bottommost_line().0 as i64);
     let floor = history + term.topmost_line().0 as i64;
     let mut map = tracker.map_visible(bottom, rows);
@@ -549,20 +660,67 @@ pub fn visible_map<T: EventListener>(
 }
 
 /// A screen row through an optional [`visible_map`]: `None` for the blank
-/// rows a short map leaves at the top (near the grid's birth).
-pub fn screen_to_abs(row: usize, rows: usize, top: i64, map: Option<&[i64]>) -> Option<i64> {
+/// rows a short map leaves at the bottom (near the grid's birth, where fewer
+/// than the viewport's rows exist yet). Top-aligned: `map[i]` paints at row
+/// `i`, so the grid, the gutter and every hit-test share this one function
+/// and cannot disagree about which row an absolute row sits on.
+pub fn screen_to_abs(row: usize, top: i64, map: Option<&[i64]>) -> Option<i64> {
     match map {
         None => Some(top + row as i64),
-        Some(m) => {
-            let skip = rows.saturating_sub(m.len());
-            row.checked_sub(skip).and_then(|i| m.get(i).copied())
-        }
+        Some(m) => m.get(row).copied(),
     }
+}
+
+/// A screen row through an optional [`visible_map`] to the grid [`Line`]
+/// selection, links and menus read: the painted absolute row re-based on the
+/// mapping's history, `None` for the blank rows past a short map. The single
+/// shared row function for every mouse entry — selection start/update and
+/// drag-scroll, link hover/click/resolve, the right-click latch — so clicks
+/// land on the rows the frame painted. Without folds the mapping is `None`
+/// and this is exactly `Line(row - display_offset)`, the old identity path.
+pub fn screen_to_line(row: usize, top: i64, map: Option<&[i64]>, history: i64) -> Option<Line> {
+    screen_to_abs(row, top, map).map(|abs| Line((abs - history) as i32))
+}
+
+/// The screen row a folded span's summary paints on through the frame's
+/// mapping: its start row's position in the map. Top-aligned like the grid
+/// itself, so this is the same row the gutter marker sits on, at any scroll
+/// offset.
+pub fn fold_summary_row(map: &[i64], start_abs: i64) -> Option<usize> {
+    map.iter().position(|&a| a == start_abs)
+}
+
+/// The gutter's markers for one painted frame, one entry per screen row:
+/// `(seq, folded, failed)` for the closed span starting on that row, if any.
+///
+/// Resolved through the same mapping the grid paints — row `r` names `map[r]`
+/// (top-aligned; rows past a short map are blank), or `top + r` without one
+/// — so marker rows and summary rows cannot disagree: both sides read the
+/// one mapping the snapshot computed for the frame, under a single lock
+/// scope (see [`screen_to_abs`]).
+pub fn gutter_markers(
+    tracker: &BlockTracker,
+    map: Option<&[i64]>,
+    top: i64,
+    rows: usize,
+) -> Vec<Option<(u64, bool, bool)>> {
+    let mut starts = std::collections::HashMap::new();
+    for span in tracker.spans() {
+        starts.entry(span.start_abs).or_insert((
+            span.seq,
+            tracker.is_folded(span.seq),
+            span.is_failed(),
+        ));
+    }
+    (0..rows)
+        .map(|row| screen_to_abs(row, top, map).and_then(|abs| starts.get(&abs).copied()))
+        .collect()
 }
 
 /// The one-line summary a folded span collapses to: its first line plus the
 /// row count and exit line. Truncated to `cols` display columns (wide chars
-/// count by [`unicode_width`]).
+/// count by [`unicode_width`]). No gutter prefix: the gutter's marker is the
+/// fold's single arrow, and a second one here would double it.
 pub fn fold_summary<T: EventListener>(term: &Term<T>, span: &BlockSpan, cols: usize) -> String {
     use alacritty_terminal::grid::Dimensions as _;
 
@@ -578,7 +736,7 @@ pub fn fold_summary<T: EventListener>(term: &Term<T>, span: &BlockSpan, cols: us
         )
         .trim()
         .to_string();
-    let mut summary = String::from("▸ ");
+    let mut summary = String::new();
     if !first.is_empty() {
         summary.push_str(&first);
         summary.push_str(" · ");
@@ -1245,11 +1403,317 @@ mod tests {
         };
         assert_eq!(
             fold_summary(&term, &span, 40).as_str(),
-            "▸ $ cargo build · 2 lines · exit 2"
+            "$ cargo build · 2 lines · exit 2"
         );
         // Narrow columns truncate with an ellipsis, wide chars included.
         let narrow = fold_summary(&term, &span, 10);
         assert!(narrow.ends_with('…'), "truncated: {narrow}");
+    }
+
+    /// A fold mapping shorter than the viewport paints top-aligned: content
+    /// from the first row, blanks only at the bottom.
+    #[test]
+    fn short_maps_paint_top_aligned_with_blanks_at_the_bottom() {
+        let map = vec![10, 11, 12];
+        for (row, want) in [(0, Some(10)), (1, Some(11)), (2, Some(12))] {
+            assert_eq!(
+                screen_to_abs(row, 8, Some(&map)),
+                want,
+                "content sits at the top, row {row}"
+            );
+        }
+        assert_eq!(
+            screen_to_abs(3, 8, Some(&map)),
+            None,
+            "the shortfall blanks at the bottom"
+        );
+        assert_eq!(
+            screen_to_abs(4, 8, Some(&map)),
+            None,
+            "the shortfall blanks at the bottom"
+        );
+    }
+
+    /// The summary carries no gutter prefix: the gutter's marker is the
+    /// fold's single arrow, so a `▸` here would double it.
+    #[test]
+    fn fold_summary_carries_no_gutter_prefix() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::Config;
+
+        let size = crate::terminal::size::TermSize::new(40, 8);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut term, b"$ cargo build\r\ncompiling\r\n");
+        let history = term.grid().history_size() as i64;
+        let span = BlockSpan {
+            seq: 1,
+            start_abs: history,
+            end_abs: history + 1,
+            exit_code: Some(2),
+            daemon_id: None,
+            truncated: false,
+            fp: String::new(),
+        };
+        let summary = fold_summary(&term, &span, 40);
+        assert!(
+            !summary.starts_with('▸'),
+            "the single arrow lives in the gutter: {summary}"
+        );
+        assert!(
+            summary.starts_with("$ cargo build"),
+            "the first line still leads: {summary}"
+        );
+    }
+
+    /// Gutter markers and fold summaries resolve through one mapping, driven
+    /// by a live `Term` through real scroll offsets: at every
+    /// `display_offset` the frame's [`visible_map`] puts each folded span's
+    /// marker on its summary row. No synthetic tops — the scroll state comes
+    /// out of the grid the paint path reads.
+    #[test]
+    fn gutter_markers_land_on_summary_rows_through_real_scroll() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::Scroll;
+        use alacritty_terminal::term::Config;
+
+        let rows = 10usize;
+        let size = crate::terminal::size::TermSize::new(40, rows);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        for i in 0..40 {
+            parser.advance(&mut term, format!("line {i:02}\r\n").as_bytes());
+        }
+        let history = term.grid().history_size() as i64;
+        assert!(
+            history > rows as i64 + 20,
+            "enough scrollback to move through: history {history}"
+        );
+        let mut tracker = BlockTracker::default();
+        let start = history - 20;
+        tracker.spans.push(span(1, start, start + 7));
+        tracker.set_folded(1, true);
+        // Identity offsets around the fold: at the fold's top, five rows
+        // above it (its start rows hide inside the window), five below.
+        for offset in [history - start, history - start - 5, history - start + 5] {
+            let cur = term.grid().display_offset() as i64;
+            term.scroll_display(Scroll::Delta((offset - cur) as i32));
+            assert_eq!(
+                term.grid().display_offset(),
+                offset as usize,
+                "the grid scrolled where asked"
+            );
+            let (top, _) = window_abs_range(&term, rows);
+            assert_eq!(
+                top,
+                history - offset,
+                "the identity top the mapping builds against"
+            );
+            let Some(map) = visible_map(&term, &tracker, rows) else {
+                panic!("the fold intersects the window at offset {offset}");
+            };
+            assert_eq!(map.len(), rows, "full map at offset {offset}");
+            let markers = gutter_markers(&tracker, Some(&map), top, rows);
+            let summary = fold_summary_row(&map, start).expect("the fold stays visible");
+            assert_eq!(
+                markers[summary],
+                Some((1, true, false)),
+                "marker sits on the summary row at offset {offset}: {map:?}"
+            );
+            // Every painted row resolves back through the same mapping.
+            for (row, abs) in map.iter().enumerate() {
+                assert_eq!(
+                    screen_to_abs(row, top, Some(&map)),
+                    Some(*abs),
+                    "row {row} at offset {offset}"
+                );
+                assert_eq!(
+                    screen_to_line(row, top, Some(&map), history).map(|l| l.0),
+                    Some((abs - history) as i32),
+                    "shared row function agrees at offset {offset}"
+                );
+            }
+        }
+        // Unfolded again the window is identity at the same scroll state: no
+        // mapping, and the gutter names the span unfolded exactly where the
+        // identity window puts it — the fold paths add nothing without folds.
+        tracker.set_folded(1, false);
+        assert!(visible_map(&term, &tracker, rows).is_none());
+        let (top, _) = window_abs_range(&term, rows);
+        let markers = gutter_markers(&tracker, None, top, rows);
+        assert_eq!(
+            markers[(start - top) as usize],
+            Some((1, false, false)),
+            "identity row without folds"
+        );
+        assert!(
+            markers.iter().flatten().all(|&(_, folded, _)| !folded),
+            "nothing folded, nothing folded-marked"
+        );
+    }
+
+    /// A short mapping on a live grid near its birth paints top-aligned:
+    /// content from the first row, blanks only at the bottom, marker still
+    /// on the summary's row.
+    #[test]
+    fn short_maps_stay_top_aligned_on_a_live_grid() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::Config;
+
+        let rows = 10usize;
+        let size = crate::terminal::size::TermSize::new(40, rows);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut term, b"one\r\ntwo\r\nthree\r\n");
+        let history = term.grid().history_size() as i64;
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, history, history + 2));
+        tracker.set_folded(1, true);
+        let (top, _) = window_abs_range(&term, rows);
+        let Some(map) = visible_map(&term, &tracker, rows) else {
+            panic!("the fold intersects the window");
+        };
+        assert!(map.len() < rows, "birth leaves the map short: {map:?}");
+        assert_eq!(
+            screen_to_abs(0, top, Some(&map)),
+            Some(map[0]),
+            "content sits at the top"
+        );
+        for row in map.len()..rows {
+            assert_eq!(
+                screen_to_abs(row, top, Some(&map)),
+                None,
+                "the shortfall blanks at the bottom, row {row}"
+            );
+        }
+        let markers = gutter_markers(&tracker, Some(&map), top, rows);
+        assert_eq!(markers.len(), rows);
+        let summary = fold_summary_row(&map, history).expect("the fold stays visible");
+        assert_eq!(summary, 0, "content sits at the top: {map:?}");
+        assert_eq!(markers[summary], Some((1, true, false)));
+        assert!(
+            markers[map.len()..].iter().all(|m| m.is_none()),
+            "the shortfall blanks at the bottom"
+        );
+    }
+
+    /// The jump fixed-point lands a folded span's start at the top row on a
+    /// live grid: from several starting scroll offsets, the walk's target
+    /// scrolls the window so the paint mapping opens on the span's start,
+    /// with the gutter marker on that same row. No synthetic tops — offsets,
+    /// windows and landings all come out of the grid through
+    /// [`window_abs_range`] and [`visible_map`], the same mapping the jump
+    /// verifies against.
+    #[test]
+    fn jump_fixed_point_lands_fold_starts_at_the_top_row_on_a_live_grid() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::Dimensions as _;
+        use alacritty_terminal::grid::Scroll;
+        use alacritty_terminal::term::Config;
+
+        let rows = 10usize;
+        let size = crate::terminal::size::TermSize::new(40, rows);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        for i in 0..40 {
+            parser.advance(&mut term, format!("line {i:02}\r\n").as_bytes());
+        }
+        let history = term.grid().history_size() as i64;
+        assert!(
+            history > rows as i64 + 20,
+            "enough scrollback to move through: history {history}"
+        );
+        let mut tracker = BlockTracker::default();
+        let start = history - 20;
+        tracker.spans.push(span(1, start, start + 7));
+        tracker.set_folded(1, true);
+        let floor = history + term.topmost_line().0 as i64;
+        let grid_bottom = history + term.bottommost_line().0 as i64;
+        // The identity jump arithmetic, as `jump_to_block_start` runs it.
+        let identity = (history - start).min(history);
+        // From the bottom, mid-scrollback and just above the fold alike.
+        for initial in [0, 8, history - start + 5] {
+            let cur = term.grid().display_offset() as i64;
+            term.scroll_display(Scroll::Delta((initial - cur) as i32));
+            assert_eq!(term.grid().display_offset(), initial as usize);
+            let target =
+                tracker.jump_target_for(start, rows, identity, history, floor, grid_bottom);
+            let cur = term.grid().display_offset() as i64;
+            term.scroll_display(Scroll::Delta((target - cur) as i32));
+            assert_eq!(
+                term.grid().display_offset(),
+                target as usize,
+                "the grid scrolled to the walk's target from {initial}"
+            );
+            let (top, _) = window_abs_range(&term, rows);
+            let Some(map) = visible_map(&term, &tracker, rows) else {
+                panic!("the fold intersects the window at target {target}");
+            };
+            assert_eq!(
+                fold_summary_row(&map, start),
+                Some(0),
+                "the start lands at the top row from {initial}: {map:?}"
+            );
+            let markers = gutter_markers(&tracker, Some(&map), top, rows);
+            assert_eq!(
+                markers[0],
+                Some((1, true, false)),
+                "the marker lands with it from {initial}"
+            );
+        }
+    }
+
+    /// The hidden-row helper names fold interiors only: starts paint, past
+    /// the end is outside, and nothing hides unfolded.
+    #[test]
+    fn hidden_abs_in_names_fold_interiors_only() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 110));
+        assert!(!tracker.hidden_abs_in(100));
+        assert!(!tracker.hidden_abs_in(101));
+        assert!(!tracker.hidden_abs_in(111));
+        tracker.set_folded(1, true);
+        assert!(!tracker.hidden_abs_in(100), "the start paints");
+        assert!(tracker.hidden_abs_in(101));
+        assert!(tracker.hidden_abs_in(110));
+        assert!(!tracker.hidden_abs_in(111), "past the end is outside");
+    }
+
+    /// The jump helper tops out at the span's start: the window bottom past
+    /// which `rows - 1` visible rows follow the start, so the paint mapping
+    /// from that bottom opens on the start row.
+    #[test]
+    fn bottom_for_top_opens_the_paint_mapping_on_the_start() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 110));
+        tracker.set_folded(1, true);
+        // 101..=110 hide: nine visible rows past the start land at 119.
+        assert_eq!(tracker.bottom_for_top(100, 10), 119);
+        let map = tracker.map_visible(119, 10);
+        assert_eq!(map.len(), 10);
+        assert_eq!(map[0], 100);
+        // Without folds it is the plain window end.
+        tracker.set_folded(1, false);
+        assert_eq!(tracker.bottom_for_top(100, 10), 109);
+    }
+
+    /// Without a mapping the shared row function is the old identity path:
+    /// `Line(row - display_offset)`.
+    #[test]
+    fn screen_to_line_without_folds_is_the_identity_path() {
+        let history = 50;
+        let display_offset = 6;
+        let top = history - display_offset;
+        for row in 0..10 {
+            assert_eq!(
+                screen_to_line(row, top, None, history),
+                Some(Line(row as i32 - display_offset as i32))
+            );
+        }
     }
 
     /// A changed (or vanished) start row proves scroll-cap eviction aliased

@@ -29,3 +29,7 @@
     - `cp .bench/results/io-tty7.txt /tmp/io-head.txt`
     - `TTY7_BIN=/tmp/tty7-perf-base/target/release/tty7-app scripts/bench/run_one.sh tty7 io` （baseline → `.bench/results/io-tty7.txt`，与 `/tmp/io-head.txt` 对比）
     - `git worktree remove /tmp/tty7-perf-base`
+- source_plan: `_bmad-output/initiative-terminal-blocks/plan-fold-display-fix.md`
+  summary: mouse_grid_line 快照验证/回退分支缺单测（函数本体需 TerminalView gpui harness）。
+  evidence: view.rs:11698 有 TestAppContext harness，但 mouse 路径无一使用；fold_epoch/回退逻辑仅由 live-Term 映射单测间接覆盖。
+  revisit_when: 同 P5/P6，harness 落地后补 mouse 事件级用例。
