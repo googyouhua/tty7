@@ -6831,9 +6831,14 @@ impl TerminalView {
         let line_height = self.line_height;
         let view = cx.entity();
         let danger = cx.theme().danger;
+        // The grid paints rows shifted by the fractional scroll offset
+        // (`element.rs` folds it into the paint origin), so the strip rides
+        // the same shift — otherwise markers and text part ways mid-scroll.
+        let shift =
+            line_height * (self.scroll_frac.clamp(0., 1.) - self.input_scroll_rows() as f32);
         div()
             .absolute()
-            .top(px(GRID_PAD_Y))
+            .top(px(GRID_PAD_Y) + shift)
             .left_0()
             .w(px(BLOCK_GUTTER_W))
             .h(line_height * self.terminal.size().rows as f32)
