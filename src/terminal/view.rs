@@ -20,7 +20,7 @@ use super::blocks::{
 };
 use super::cmd_editor::CmdEditor;
 use super::completion::{self, CandidateKind, CompletionSession};
-use super::element::{GridSnapshot, RenderCell, TerminalElement};
+use super::element::{FrameMap, GridSnapshot, RenderCell, TerminalElement};
 use super::highlight::{self, TokenKind};
 use super::hold::{GapHold, Verdict};
 use super::remote::RemoteTerminal;
@@ -352,6 +352,14 @@ pub struct TerminalView {
     /// pane* when the next one starts.
     pub(super) grid_buf: Vec<RenderCell>,
     pub(super) grid_snap: Option<GridSnapshot>,
+    /// The fold mapping for this frame — map, viewport top, gutter markers
+    /// and the generation they were built against (history size, display
+    /// offset, rows, fold epoch, alternate screen). Computed in `render`
+    /// under the grid lock (then the tracker), so the gutter lays down the
+    /// same frame's rows the grid is about to paint: zero lag, not one frame
+    /// of chase. Paint reuses it after checking the generation and recomputes
+    /// live (writing back here) when it no longer matches.
+    pub(super) frame_map: Option<FrameMap>,
     /// Terminal mode and selection as of the last frame that got the lock.
     /// What the *frame* declares — the keymap context it publishes, whether it
     /// draws a selection — is read from here, so drawing never queues behind
@@ -1914,6 +1922,7 @@ impl TerminalView {
             grid_slack: px(0.),
             grid_buf: Vec::new(),
             grid_snap: None,
+            frame_map: None,
             frame_alt_screen: false,
             frame_has_selection: false,
             selecting: false,
@@ -6794,6 +6803,70 @@ impl TerminalView {
         self.frame_has_selection = term.selection.is_some();
     }
 
+    /// The fold mapping for this frame, computed in `render` so the gutter
+    /// and the grid share one same-frame mapping instead of the gutter
+    /// reading the previous paint's snapshot a frame behind.
+    ///
+    /// One `try_lock` pair at the top of the frame — grid first, tracker
+    /// second, the same order the paint pass takes — never blocking: failing
+    /// the grid lock clears the slot (the gutter reads as no markers and the
+    /// paint recomputes live, so no previous-frame rows outlive the
+    /// contention); a contended tracker stores the fresh scroll state with no
+    /// fold knowledge, exactly the paint fallback, so no wrong-row markers
+    /// outlive the contention either.
+    /// Paint reuses the slot when its generation still matches and recomputes
+    /// live otherwise. The one exception is grid growth landing between this
+    /// render and the paint (reader thread, active output only): that frame's
+    /// gutter and grid can split by the grown rows and converge on the next
+    /// frame — the same transient any retained repaint already accepts.
+    pub(super) fn sync_frame_map(&mut self) {
+        let rows = self.terminal.size().rows;
+        if rows == 0 {
+            return;
+        }
+        let Some(term) = self.terminal.term.try_lock_unfair() else {
+            self.frame_map = None;
+            return;
+        };
+        let history_size = term.grid().history_size();
+        let display_offset = term.grid().display_offset() as i32;
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        let fold_top = history_size as i64 - display_offset as i64;
+        let store = self.terminal.block_tracker();
+        let Ok(tracker) = store.try_lock() else {
+            self.frame_map = Some(FrameMap {
+                rows,
+                history_size,
+                display_offset,
+                alt_screen,
+                fold_epoch: Default::default(),
+                fold_top,
+                fold_map: None,
+                gutter_markers: Vec::new(),
+            });
+            return;
+        };
+        let fold_epoch = tracker.fold_epoch();
+        let fold_map = (!alt_screen)
+            .then(|| super::blocks::visible_map(&term, &tracker, rows))
+            .flatten();
+        let gutter_markers = if !alt_screen {
+            super::blocks::gutter_markers(&tracker, fold_map.as_deref(), fold_top, rows)
+        } else {
+            Vec::new()
+        };
+        self.frame_map = Some(FrameMap {
+            rows,
+            history_size,
+            display_offset,
+            alt_screen,
+            fold_epoch,
+            fold_top,
+            fold_map,
+            gutter_markers,
+        });
+    }
+
     /// The scrollback bar, laid down the right edge of the grid.
     ///
     /// The track is inset to the rows themselves — [`GRID_PAD_Y`] is padding
@@ -6917,29 +6990,30 @@ impl TerminalView {
     /// The gutter's markers, one per screen row: `(seq, folded, failed)` —
     /// see [`render_block_gutter`](Self::render_block_gutter).
     ///
-    /// Read back from the last painted snapshot, never recomputed: the grid
-    /// and the gutter share the one mapping the snapshot's frame painted
-    /// with, so a scroll landing between two lock acquisitions cannot split
-    /// them across rows. No locks here at all — a length mismatch (first
-    /// frame, or a resize the snapshot predates) reads as no markers rather
-    /// than ones for the wrong rows.
+    /// Read back from this frame's render slot, never recomputed and never a
+    /// paint behind: the grid's paint reuses the same slot when its
+    /// generation still matches, so a scroll landing between two lock
+    /// acquisitions cannot split gutter and grid across rows. No locks here
+    /// at all — a missing slot (a frame that never got the locks) or a length
+    /// mismatch (a resize the slot predates) reads as no markers rather than
+    /// ones for the wrong rows.
     fn block_gutter_markers(&self) -> Vec<Option<(u64, bool, bool)>> {
         let rows = self.terminal.size().rows;
-        match self.grid_snap.as_ref() {
-            Some(snap) if snap.gutter_markers.len() == rows => snap.gutter_markers.clone(),
+        match self.frame_map.as_ref() {
+            Some(slot) if slot.gutter_markers.len() == rows => slot.gutter_markers.clone(),
             _ => Vec::new(),
         }
     }
 
     /// The grid line a screen `row` shows: the one shared row function every
     /// mouse entry resolves through — selection start/update and drag-scroll,
-    /// link hover/click/resolve, the right-click latch. Prefers the last
-    /// painted snapshot's mapping (the rows on screen, shared with the grid
-    /// and gutter); the snapshot validates against the live scroll state
-    /// (rows, history, display offset, alternate screen) *and* the live fold
-    /// table (span count plus folded seqs, recorded at paint time), and any
-    /// mismatch recomputes live through `visible_map` instead, so a fold or
-    /// unfold between paint and click never resolves through a stale map.
+    /// link hover/click/resolve, the right-click latch. Prefers this frame's
+    /// render slot (the rows on screen, shared with the grid and gutter);
+    /// the slot validates against the live scroll state (rows, history,
+    /// display offset, alternate screen) *and* the live fold table (span
+    /// count plus folded seqs, recorded at render time), and any mismatch
+    /// recomputes live through `visible_map` instead, so a fold or unfold
+    /// between render and click never resolves through a stale map.
     /// Only `try_lock`s, grid first then tracker; a contended tracker
     /// resolves to nothing — transient, the next event recovers — never to a
     /// stale or identity row. Without folds the mapping is `None` and this is
@@ -6953,7 +7027,7 @@ impl TerminalView {
         if row >= rows {
             return None;
         }
-        let history = term.grid().history_size() as i64;
+        let history = term.grid().history_size();
         if term.mode().contains(TermMode::ALT_SCREEN) {
             return Self::grid_line(term, row);
         }
@@ -6963,29 +7037,26 @@ impl TerminalView {
         let Ok(tracker) = store.try_lock() else {
             return None;
         };
-        if !self.frame_alt_screen {
-            if let Some(snap) = self.grid_snap.as_ref() {
-                if snap.gutter_markers.len() == rows
-                    && snap.history_size as i64 == history
-                    && snap.display_offset == term.grid().display_offset() as i32
-                    && snap.fold_epoch == tracker.fold_epoch()
+        if let Some(slot) = self.frame_map.as_ref() {
+            if slot.matches(
+                rows,
+                history,
+                term.grid().display_offset() as i32,
+                false,
+                &tracker.fold_epoch(),
+            ) {
+                // Render and click agree on scroll state and fold table:
+                // resolve through the frame's rows, blank for blank. A row
+                // the mapping holds but the grid forgot falls through to
+                // the live path below rather than pointing at evicted rows.
+                if let Some(line) =
+                    screen_to_line(row, slot.fold_top, slot.fold_map.as_deref(), history as i64)
                 {
-                    // Paint and click agree on scroll state and fold table:
-                    // resolve through the painted rows, blank for blank. A row
-                    // the mapping holds but the grid forgot falls through to
-                    // the live path below rather than pointing at evicted rows.
-                    if let Some(line) = screen_to_line(
-                        row,
-                        snap.fold_top,
-                        snap.fold_map.as_deref(),
-                        snap.history_size as i64,
-                    ) {
-                        if line >= term.topmost_line() && line <= term.bottommost_line() {
-                            return Some(line);
-                        }
-                    } else {
-                        return None;
+                    if line >= term.topmost_line() && line <= term.bottommost_line() {
+                        return Some(line);
                     }
+                } else {
+                    return None;
                 }
             }
         }
@@ -6994,7 +7065,7 @@ impl TerminalView {
         }
         let (top, _) = super::blocks::window_abs_range(term, rows);
         let map = visible_map(term, &tracker, rows);
-        screen_to_line(row, top, map.as_deref(), history)
+        screen_to_line(row, top, map.as_deref(), history as i64)
             .filter(|line| *line >= term.topmost_line() && *line <= term.bottommost_line())
     }
 
@@ -8451,6 +8522,7 @@ impl Drop for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_frame_facts();
+        self.sync_frame_map();
         self.sync_typeahead_owner();
         self.sync_scrollbar();
         self.sync_composer(window, cx);
@@ -17491,6 +17563,203 @@ mod gpui_tests {
             "with the lock free, a frame builds without being told to wait"
         );
         assert_eq!(buf.len(), 24 * 80);
+    }
+
+    /// Seeds one closed span over the first rows and folds it, so the window
+    /// has a real fold mapping to share. Returns nothing: the span's seq is 1.
+    fn seed_one_folded_span(view: &Entity<TerminalView>, cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = view.read(cx).terminal.block_tracker();
+            let mut tracker = store.lock().expect("the test holds no other lock");
+            tracker.note_b(0);
+            tracker.note_c();
+            tracker.note_d(5, Some(0), Some(String::new()));
+            assert_eq!(
+                tracker.set_folded(1, true),
+                Some(true),
+                "the seeded span folds"
+            );
+        });
+    }
+
+    /// The gutter and the grid share the render frame's mapping: with a fold
+    /// in play, the gutter markers and the paint snapshot carry the same map,
+    /// top and markers — no frame of chase mid-scroll.
+    #[gpui::test]
+    fn gutter_and_grid_share_the_render_frames_mapping(cx: &mut TestAppContext) {
+        use super::super::element::{PaintColors, TerminalElement};
+        use alacritty_terminal::index::Line;
+
+        let (_window, view, _daemon) = rooted_harness(cx);
+        seed_one_folded_span(&view, cx);
+        // The laid-out window sizes the pane: build the test window against
+        // the live size, not the pre-layout one, or the slot's generation
+        // (which carries rows) can never match the paint's.
+        let (rows, cols) = cx.update(|cx| {
+            (
+                view.read(cx).terminal.size().rows,
+                view.read(cx).terminal.size().cols,
+            )
+        });
+
+        // Render computes the slot; the gutter reads it back same-frame.
+        cx.update(|cx| view.update(cx, |v, _| v.sync_frame_map()));
+        let slot = cx.update(|cx| view.read(cx).frame_map.clone());
+        let slot = slot.expect("render with free locks fills the slot");
+        assert!(
+            slot.fold_map.is_some(),
+            "the folded span has to remap the window"
+        );
+        let markers = cx.update(|cx| view.read(cx).block_gutter_markers());
+        assert_eq!(markers.len(), rows);
+        assert_eq!(
+            markers[0],
+            Some((1, true, false)),
+            "the folded span's marker sits on its first row"
+        );
+
+        // Paint reuses the slot: the snapshot carries the same rows.
+        let element = TerminalElement::new(view.clone());
+        let snap = cx.update(|cx| {
+            let colors = PaintColors::resolve(cx.theme(), cx);
+            let mut buf = Vec::new();
+            let snap = element.build_grid(
+                &colors,
+                &mut buf,
+                rows,
+                cols,
+                false,
+                cx,
+                1.,
+                gpui::Rgba::default(),
+                true,
+            );
+            (snap, buf.len())
+        });
+        let (snap, len) = snap;
+        assert_eq!(len, rows * cols);
+        let snap = snap.expect("the first frame waits and builds");
+        assert_eq!(snap.fold_map, slot.fold_map);
+        assert_eq!(snap.fold_top, slot.fold_top);
+        assert_eq!(snap.gutter_markers, slot.gutter_markers);
+
+        // Clicks resolve through the same rows: screen row 1 is the folded
+        // window's second painted row, not the identity row beneath the fold.
+        let line = cx.update(|cx| {
+            let term_arc = view.read(cx).terminal.term.clone();
+            let term = term_arc.lock();
+            view.read(cx).mouse_grid_line(&term, 1)
+        });
+        let map = slot.fold_map.as_ref().expect("checked above");
+        let history = cx.update(|cx| view.read(cx).terminal.term.lock().grid().history_size());
+        let expect = Line((map[1] - history as i64) as i32);
+        assert_eq!(line, Some(expect));
+        assert_ne!(
+            line,
+            Some(Line(1)),
+            "the identity row would be the stale-snapshot answer"
+        );
+    }
+
+    /// A fold change between render and paint/click falls back to a live
+    /// mapping, and a lock-contended paint leaves the slot alone for the
+    /// retained repaint to stand on.
+    #[gpui::test]
+    fn a_stale_render_slot_falls_back_live_and_survives_contention(cx: &mut TestAppContext) {
+        use super::super::element::{PaintColors, TerminalElement};
+        use alacritty_terminal::index::Line;
+
+        let (_window, view, _daemon) = rooted_harness(cx);
+        seed_one_folded_span(&view, cx);
+        let (rows, cols) = cx.update(|cx| {
+            (
+                view.read(cx).terminal.size().rows,
+                view.read(cx).terminal.size().cols,
+            )
+        });
+        cx.update(|cx| view.update(cx, |v, _| v.sync_frame_map()));
+        let element = TerminalElement::new(view.clone());
+        let build = |cx: &mut TestAppContext, must_block: bool| {
+            cx.update(|cx| {
+                let colors = PaintColors::resolve(cx.theme(), cx);
+                let mut buf = Vec::new();
+                element.build_grid(
+                    &colors,
+                    &mut buf,
+                    rows,
+                    cols,
+                    false,
+                    cx,
+                    1.,
+                    gpui::Rgba::default(),
+                    must_block,
+                )
+            })
+        };
+        assert!(build(cx, true).is_some());
+
+        // Unfold with no render in between: the slot is stale (still folded).
+        cx.update(|cx| {
+            let store = view.read(cx).terminal.block_tracker();
+            assert_eq!(
+                store
+                    .lock()
+                    .expect("the test holds no other lock")
+                    .set_folded(1, false),
+                Some(false),
+                "the span unfolds"
+            );
+        });
+        let stale = cx.update(|cx| view.read(cx).frame_map.clone());
+        assert!(
+            stale.as_ref().is_some_and(|s| s.fold_map.is_some()),
+            "no render ran, so the slot still holds the folded map"
+        );
+
+        // Paint recomputes live and writes the fresh mapping back.
+        let snap = build(cx, false).expect("the lock is free");
+        assert!(
+            snap.fold_map.is_none(),
+            "with nothing folded the paint is the identity window"
+        );
+        assert_eq!(
+            snap.gutter_markers[0],
+            Some((1, false, false)),
+            "the unfolded span keeps its marker, open"
+        );
+        let fresh = cx.update(|cx| view.read(cx).frame_map.clone());
+        let fresh = fresh.expect("a paint writes its mapping back");
+        assert_eq!(fresh.fold_map, None);
+        assert_eq!(fresh.gutter_markers, snap.gutter_markers);
+
+        // The click never trusted the stale rows either.
+        let line = cx.update(|cx| {
+            let term_arc = view.read(cx).terminal.term.clone();
+            let term = term_arc.lock();
+            view.read(cx).mouse_grid_line(&term, 1)
+        });
+        assert_eq!(
+            line,
+            Some(Line(1)),
+            "the unfolded window resolves the identity row, not the folded one"
+        );
+
+        // A paint that cannot have the lock leaves the slot alone, so the
+        // retained repaint keeps standing on the last good mapping.
+        let term = cx.update(|cx| view.read(cx).terminal.term.clone());
+        let held = term.lock();
+        let refused = build(cx, false);
+        assert!(
+            refused.is_none(),
+            "a contended paint says so instead of waiting"
+        );
+        let kept = cx.update(|cx| view.read(cx).frame_map.clone());
+        drop(held);
+        assert_eq!(
+            kept,
+            Some(fresh),
+            "the failed paint must not corrupt the slot"
+        );
     }
 
     #[gpui::test]
