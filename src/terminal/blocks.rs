@@ -557,6 +557,245 @@ impl BlockTracker {
         target
     }
 
+    /// The folded span hiding `abs` (past its first line), if any. Nested folds
+    /// chain: an inner span's start row can itself sit inside an outer fold,
+    /// so callers walk this until it reports nothing.
+    fn folded_container(&self, abs: i64) -> Option<&BlockSpan> {
+        self.spans
+            .iter()
+            .find(|s| self.folded.contains(&s.seq) && s.start_abs < abs && abs <= s.end_abs)
+    }
+
+    /// The nearest visible row strictly above `abs` (older), skipping folded
+    /// runs wholesale instead of stepping every hidden row — one wheel notch
+    /// must never pay a full long-fold walk. `None` past the grid's birth.
+    pub fn prev_visible_row(&self, abs: i64) -> Option<i64> {
+        let mut c = abs.saturating_sub(1);
+        loop {
+            if c < 0 {
+                return None;
+            }
+            match self.folded_container(c) {
+                // The run's start row shows: it is the answer unless an
+                // outer fold hides it too, which the next lap checks.
+                Some(span) => c = span.start_abs,
+                None => return Some(c),
+            }
+        }
+    }
+
+    /// The nearest visible row strictly below `abs` (newer), skipping folded
+    /// runs wholesale. Unbounded above by construction — callers clamp to the
+    /// grid bottom — so this always reports a row.
+    pub fn next_visible_row(&self, abs: i64) -> Option<i64> {
+        let mut c = abs.saturating_add(1);
+        loop {
+            match self.folded_container(c) {
+                Some(span) => c = span.end_abs.saturating_add(1),
+                None => return Some(c),
+            }
+        }
+    }
+
+    /// The nearest visible row at or below `abs` (older or itself): the
+    /// summary row a folded-away anchor falls back to. `None` past birth.
+    pub fn visible_at_or_below(&self, abs: i64) -> Option<i64> {
+        let mut c = abs;
+        loop {
+            if c < 0 {
+                return None;
+            }
+            match self.folded_container(c) {
+                // The run's start row always shows (only rows past it hide).
+                Some(span) => c = span.start_abs,
+                None => return Some(c),
+            }
+        }
+    }
+
+    /// `(first, last, len)` of the painted window ending at `bottom_abs`
+    /// showing `rows` rows: the same walk as [`BlockTracker::map_visible`]
+    /// (newest `rows` visible rows at or below the bottom) with hidden runs
+    /// skipped wholesale, then the same floor clip the paint path applies.
+    /// The edge test pins the two together, so stepping decisions below can
+    /// never disagree with the rows the frame paints.
+    pub fn window_edges(
+        &self,
+        bottom_abs: i64,
+        rows: usize,
+        floor: i64,
+    ) -> (Option<i64>, Option<i64>, usize) {
+        if rows == 0 || bottom_abs < 0 {
+            return (None, None, 0);
+        }
+        let mut newest = Vec::with_capacity(rows);
+        let mut c = bottom_abs;
+        while newest.len() < rows && c >= 0 {
+            let mut v = c;
+            loop {
+                match self.folded_container(v) {
+                    // The run's start row shows (see `prev_visible_row`).
+                    Some(span) => v = span.start_abs,
+                    None => break,
+                }
+            }
+            if v < 0 {
+                break;
+            }
+            newest.push(v);
+            c = v.saturating_sub(1);
+        }
+        let (mut first, mut last, mut len) = (None, None, 0usize);
+        for &a in newest.iter().rev() {
+            if a < floor {
+                continue;
+            }
+            if first.is_none() {
+                first = Some(a);
+            }
+            last = Some(a);
+            len += 1;
+        }
+        (first, last, len)
+    }
+
+    /// Whether one more visible row up (older) moves the window: the absolute
+    /// ceiling plus the remembered-content bound both have to give. With no
+    /// folds and floor == 0 this is exactly `offset < history`, the legacy
+    /// clamp; a higher floor (evicted rows shortening the map) can bind
+    /// earlier.
+    pub fn can_step_up(
+        &self,
+        offset: i64,
+        history: i64,
+        rows: usize,
+        floor: i64,
+        grid_bottom: i64,
+    ) -> bool {
+        if rows == 0 || offset >= history {
+            return false;
+        }
+        let bottom = (history - offset + rows as i64 - 1).min(grid_bottom);
+        let (first, _, len) = self.window_edges(bottom, rows, floor);
+        len == rows && first.is_some_and(|f| f > floor)
+    }
+
+    /// Steps an absolute scroll `offset` by `steps` visible rows (`+1` is one
+    /// row up/older, `-1` one row down/newer), skipping hidden runs in a
+    /// single step: every applied step paints a different window, so a wheel
+    /// notch can never be dead and consecutive notches walk monotonically.
+    /// Returns the new offset plus the signed steps actually applied; a
+    /// shortfall (hitting a bound) leaves the remainder unapplied so the caller can
+    /// consume the fractional remainder exactly like the legacy clamp does.
+    /// The result never leaves `[0, history]`, the grid's own clamp.
+    pub fn step_offset_visible(
+        &self,
+        offset: i64,
+        steps: i32,
+        history: i64,
+        rows: usize,
+        floor: i64,
+        grid_bottom: i64,
+    ) -> (i64, i32) {
+        if rows == 0 || steps == 0 {
+            return (offset.clamp(0, history), 0);
+        }
+        let dir = steps.signum();
+        let mut off = offset.clamp(0, history);
+        let mut applied = 0i32;
+        for _ in 0..steps.unsigned_abs() {
+            let bottom = (history - off + rows as i64 - 1).min(grid_bottom);
+            if dir > 0 {
+                if off >= history {
+                    break;
+                }
+                let (first, last, len) = self.window_edges(bottom, rows, floor);
+                let (Some(_), Some(edge), n) = (first, last, len) else {
+                    break;
+                };
+                if n < rows || first.is_some_and(|f| f <= floor) {
+                    break;
+                }
+                let Some(new_bottom) = self.prev_visible_row(edge) else {
+                    break;
+                };
+                let next = (history + rows as i64 - 1 - new_bottom).clamp(0, history);
+                if next == off {
+                    break;
+                }
+                off = next;
+                applied += 1;
+            } else {
+                if bottom >= grid_bottom {
+                    break;
+                }
+                let (_, last, _) = self.window_edges(bottom, rows, floor);
+                let new_bottom = match last {
+                    // An empty (evicted) window recovers in one jump toward
+                    // the oldest remembered row instead of crawling the void.
+                    None => self
+                        .next_visible_row(bottom.max(floor - 1))
+                        .unwrap_or(grid_bottom)
+                        .min(grid_bottom),
+                    Some(edge) => match self.next_visible_row(edge) {
+                        Some(n) => n.min(grid_bottom),
+                        None => break,
+                    },
+                };
+                if new_bottom <= bottom {
+                    break;
+                }
+                let next = (history + rows as i64 - 1 - new_bottom).clamp(0, history);
+                if next == off {
+                    break;
+                }
+                off = next;
+                applied -= 1;
+            }
+        }
+        (off, applied)
+    }
+
+    /// The absolute offset keeping `anchor` on the window's top row: the
+    /// top-stable correction a fold toggle applies so the same offset keeps
+    /// naming the same visible set instead of leaving the next wheel notch a
+    /// back-and-forth correction. A hidden anchor (folded away under the
+    /// window) falls back to its run's start row — the summary row — and every
+    /// result stays inside `[0, history]`.
+    pub fn offset_for_anchor(
+        &self,
+        anchor: i64,
+        rows: usize,
+        history: i64,
+        floor: i64,
+        grid_bottom: i64,
+    ) -> i64 {
+        if rows == 0 {
+            return history.clamp(0, history);
+        }
+        let mut a = anchor.max(floor).min(grid_bottom);
+        match self.visible_at_or_below(a) {
+            Some(v) if v >= floor => a = v,
+            _ => {
+                a = a.max(floor);
+                if self.hidden_abs_in(a) {
+                    a = self
+                        .next_visible_row(a)
+                        .unwrap_or(grid_bottom)
+                        .clamp(floor, grid_bottom);
+                }
+            }
+        }
+        let mut b = a;
+        for _ in 0..rows.saturating_sub(1) {
+            match self.next_visible_row(b) {
+                Some(n) if n <= grid_bottom => b = n,
+                _ => break,
+            }
+        }
+        (history + rows as i64 - 1 - b).clamp(0, history)
+    }
+
     /// The absolute rows to paint, top to bottom, for a window whose bottom
     /// row is `bottom_abs` showing `rows` rows.
     ///
@@ -1924,6 +2163,261 @@ mod tests {
             elapsed.as_secs_f64() * 1000.0 < 100.0,
             "fold map build + toggles took {:.3} ms",
             elapsed.as_secs_f64() * 1000.0
+        );
+    }
+
+    /// Dead-notch characterization (the jitter bug): consecutive absolute
+    /// offsets whose window bottoms both land inside one folded run name the
+    /// identical visible set — one wheel notch moves nothing, later notches
+    /// pile up, then the view jumps. The visible-stepping helpers below must
+    /// never sit on one.
+    #[test]
+    fn absolute_stepping_through_a_fold_has_dead_offsets() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 200));
+        tracker.set_folded(1, true);
+        let rows = 24usize;
+        let a = tracker.map_visible(150, rows);
+        let b = tracker.map_visible(151, rows);
+        assert_eq!(a.len(), rows);
+        assert_eq!(a, b, "one absolute row inside a fold moves nothing visible");
+    }
+
+    /// One visible step up out of a dead offset must move the map — the first
+    /// notch after a fold toggle is never dead.
+    #[test]
+    fn visible_step_up_heals_a_dead_offset_in_one_notch() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 200));
+        tracker.set_folded(1, true);
+        let rows = 24usize;
+        let history = 400i64;
+        let floor = 0i64;
+        let grid_bottom = 423i64;
+        // Window bottom parked inside the hidden run: a dead offset.
+        let bottom = 150i64;
+        let offset = history + rows as i64 - 1 - bottom;
+        let before = {
+            let mut m = tracker.map_visible(bottom, rows);
+            m.retain(|&a| a >= floor);
+            m
+        };
+        let (next, applied) =
+            tracker.step_offset_visible(offset, 1, history, rows, floor, grid_bottom);
+        assert_eq!(
+            applied, 1,
+            "a dead offset must still advance one visible row"
+        );
+        let after = {
+            let b = (history - next + rows as i64 - 1).min(grid_bottom);
+            let mut m = tracker.map_visible(b, rows);
+            m.retain(|&a| a >= floor);
+            m
+        };
+        assert_ne!(before, after, "the first notch must paint different rows");
+        assert!(
+            after.first() < before.first(),
+            "scrolling up must show older rows, not snap back newer"
+        );
+        // Exactly one visible row — not a dead sit, not a multi-row snap.
+        assert_eq!(
+            after.first().copied(),
+            before.first().copied().map(|f| f - 1)
+        );
+        assert_eq!(after.last().copied(), before.last().copied().map(|l| l - 1));
+        assert_eq!(after.len(), rows);
+    }
+
+    /// Repeated visible steps walk the window top monotonically across a whole
+    /// folded block — up never snaps newer, down never snaps older.
+    #[test]
+    fn visible_steps_walk_monotonically_across_a_fold() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 200));
+        tracker.set_folded(1, true);
+        let rows = 24usize;
+        let history = 400i64;
+        let floor = 0i64;
+        let grid_bottom = 423i64;
+        let first_of = |tracker: &BlockTracker, offset: i64| {
+            let bottom = (history - offset + rows as i64 - 1).min(grid_bottom);
+            let mut m = tracker.map_visible(bottom, rows);
+            m.retain(|&a| a >= floor);
+            m.first().copied().unwrap()
+        };
+        // Start below the fold, walk up across the whole hidden run.
+        let mut offset = history + rows as i64 - 1 - 210;
+        let mut prev = first_of(&tracker, offset);
+        for _ in 0..12 {
+            let (next, applied) =
+                tracker.step_offset_visible(offset, 1, history, rows, floor, grid_bottom);
+            assert_eq!(applied, 1);
+            let first = first_of(&tracker, next);
+            assert!(
+                first < prev,
+                "up-steps must move monotonically older, got {first} after {prev}"
+            );
+            prev = first;
+            offset = next;
+        }
+        // And back down: strictly newer every notch.
+        for _ in 0..12 {
+            let (next, applied) =
+                tracker.step_offset_visible(offset, -1, history, rows, floor, grid_bottom);
+            assert_eq!(applied, -1);
+            let first = first_of(&tracker, next);
+            assert!(
+                first > prev,
+                "down-steps must move monotonically newer, got {first} after {prev}"
+            );
+            prev = first;
+            offset = next;
+        }
+    }
+
+    /// Clamp behavior: down at the live edge and up past remembered rows apply
+    /// nothing — the wheel stops instead of wrapping or shrinking the map.
+    #[test]
+    fn visible_steps_clamp_at_live_edge_and_birth() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 200));
+        tracker.set_folded(1, true);
+        let rows = 24usize;
+        let history = 400i64;
+        let floor = 0i64;
+        let grid_bottom = 423i64;
+        // Live edge: pushing down applies nothing.
+        assert_eq!(
+            tracker.step_offset_visible(0, -3, history, rows, floor, grid_bottom),
+            (0, 0)
+        );
+        // Absolute max with nothing older remembered: pushing up is a no-op.
+        assert_eq!(
+            tracker.step_offset_visible(history, 2, history, rows, floor, grid_bottom),
+            (history, 0)
+        );
+        // Short map (eviction floor clips the window): everything remembered
+        // already shows, so up clamps — but down still recovers.
+        let high_floor = 300i64;
+        let off = history + rows as i64 - 1 - 310;
+        assert_eq!(
+            tracker.step_offset_visible(off, 1, history, rows, high_floor, grid_bottom),
+            (off, 0),
+            "a short map already shows everything remembered"
+        );
+        let (down, applied) =
+            tracker.step_offset_visible(off, -1, history, rows, high_floor, grid_bottom);
+        assert_eq!(applied, -1);
+        assert!(down < off);
+    }
+
+    /// The skip-walk edges must agree with the mapping math they quote:
+    /// exhaustive sweep across folds, birth and eviction edges.
+    #[test]
+    fn window_edges_agree_with_map_visible() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 200));
+        tracker.spans.push(span(2, 300, 310));
+        tracker.set_folded(1, true);
+        tracker.set_folded(2, true);
+        let rows = 10usize;
+        for bottom in [
+            0, 1, 5, 9, 10, 50, 99, 100, 101, 150, 199, 200, 201, 250, 299, 300, 301, 305, 310,
+            311, 320,
+        ] {
+            for floor in [0, 50, 95, 305] {
+                let mut m = tracker.map_visible(bottom, rows);
+                m.retain(|&a| a >= floor);
+                let (first, last, len) = tracker.window_edges(bottom, rows, floor);
+                assert_eq!(len, m.len(), "len at bottom={bottom} floor={floor}");
+                assert_eq!(
+                    first,
+                    m.first().copied(),
+                    "first at bottom={bottom} floor={floor}"
+                );
+                assert_eq!(
+                    last,
+                    m.last().copied(),
+                    "last at bottom={bottom} floor={floor}"
+                );
+            }
+        }
+        assert_eq!(tracker.window_edges(50, 0, 0), (None, None, 0));
+        assert_eq!(tracker.window_edges(10, 10, 50), (None, None, 0));
+    }
+
+    /// Toggle consistency: the anchor the window top showed before the toggle
+    /// still tops the window after it — same visible set, no first-notch
+    /// correction jump.
+    #[test]
+    fn offset_for_anchor_keeps_top_stable_across_toggle() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 110));
+        let rows = 24usize;
+        let history = 400i64;
+        let floor = 0i64;
+        let grid_bottom = 423i64;
+        // Window straddling a short run; the top row stays visible through
+        // the fold.
+        let bottom = 120i64;
+        let offset = history + rows as i64 - 1 - bottom;
+        let anchor = {
+            let mut m = tracker.map_visible(bottom, rows);
+            m.retain(|&a| a >= floor);
+            m.first().copied().unwrap()
+        };
+        assert_eq!(anchor, 97);
+        tracker.set_folded(1, true);
+        let healed = tracker.offset_for_anchor(anchor, rows, history, floor, grid_bottom);
+        assert_ne!(
+            healed, offset,
+            "hiding rows must move the offset to keep the top stable"
+        );
+        let after = {
+            let b = (history - healed + rows as i64 - 1).min(grid_bottom);
+            let mut m = tracker.map_visible(b, rows);
+            m.retain(|&a| a >= floor);
+            m
+        };
+        assert_eq!(
+            after.first(),
+            Some(&anchor),
+            "the pre-toggle top row must still top the window"
+        );
+        // Unfolding back restores the identical set at the identical offset.
+        tracker.set_folded(1, false);
+        let back = tracker.offset_for_anchor(anchor, rows, history, floor, grid_bottom);
+        assert_eq!(back, offset);
+    }
+
+    /// When the anchor itself is folded away, the span start (the summary row)
+    /// becomes the stable top instead of a hidden row.
+    #[test]
+    fn offset_for_anchor_falls_back_to_span_start_when_anchor_folded() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 200));
+        let rows = 24usize;
+        let history = 400i64;
+        let floor = 0i64;
+        let grid_bottom = 423i64;
+        // Anchor mid-span, then fold the span away under it.
+        let anchor = 150i64;
+        tracker.set_folded(1, true);
+        let healed = tracker.offset_for_anchor(anchor, rows, history, floor, grid_bottom);
+        let after = {
+            let b = (history - healed + rows as i64 - 1).min(grid_bottom);
+            let mut m = tracker.map_visible(b, rows);
+            m.retain(|&a| a >= floor);
+            m
+        };
+        assert_eq!(
+            after.first(),
+            Some(&100),
+            "a folded-away anchor falls back to the summary row"
+        );
+        assert!(
+            !tracker.hidden_abs_in(after.first().copied().unwrap()),
+            "the new top must be a visible row"
         );
     }
 }
