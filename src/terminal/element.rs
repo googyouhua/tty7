@@ -1797,6 +1797,45 @@ fn paint_marked(
     );
 }
 
+/// The fold mapping for one frame, computed in `render` (same-frame fresh)
+/// and reused by `paint` after a generation check. The generation is the
+/// scrolled/folded identity of the window — history size, display offset,
+/// viewport rows, alternate screen, and the fold table epoch (span count plus
+/// sorted folded seqs) — so any scroll, growth, fold, resize or alt-screen
+/// flip between render and paint (or a retained repaint with no render at
+/// all) recomputes live instead of painting through a stale map.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct FrameMap {
+    pub(super) rows: usize,
+    pub(super) history_size: usize,
+    pub(super) display_offset: i32,
+    pub(super) alt_screen: bool,
+    pub(super) fold_epoch: (usize, Vec<u64>),
+    pub(super) fold_top: i64,
+    pub(super) fold_map: Option<Vec<i64>>,
+    pub(super) gutter_markers: Vec<Option<(u64, bool, bool)>>,
+}
+
+impl FrameMap {
+    /// Whether this slot still names the window the live grid shows: every
+    /// component of the generation must match. A single mismatch means the
+    /// render-time mapping is stale for this paint.
+    pub(super) fn matches(
+        &self,
+        rows: usize,
+        history: usize,
+        offset: i32,
+        alt: bool,
+        epoch: &(usize, Vec<u64>),
+    ) -> bool {
+        self.rows == rows
+            && self.history_size == history
+            && self.display_offset == offset
+            && self.alt_screen == alt
+            && self.fold_epoch == *epoch
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct GridSnapshot {
     cursor: Option<GridCursor>,
@@ -1807,28 +1846,27 @@ pub(super) struct GridSnapshot {
     /// Scrollback state at snapshot time, so the paint pass can map a kitty
     /// image's absolute anchor row back to a screen row: screen_row =
     /// anchor_row - history_size + display_offset. Also the scroll state the
-    /// fold mapping was built against: mouse hit-tests match these back to
-    /// the live grid, and recompute live on mismatch (scroll between paint
-    /// and click, history growth), so a stale snapshot never misroutes.
+    /// fold mapping was built against: a retained repaint with no render (and
+    /// no fresh slot) falls back to these rows, so a stale snapshot never
+    /// misroutes.
     pub(super) display_offset: i32,
     pub(super) history_size: usize,
     /// The fold mapping this frame painted with, if any: `None` is the
     /// identity window (nothing folded, alternate screen, or a frame that
-    /// never locked the tracker). The gutter and the hit-tests read this
-    /// back instead of computing their own, so grid, gutter and clicks share
-    /// the one mapping the frame painted with. Recomputed every frame that
-    /// gets the lock — never carried over, so no stale map reaches the next
-    /// frame.
+    /// never locked the tracker). Paint reuses the render slot's mapping when
+    /// its generation still matches and recomputes (writing the fresh mapping
+    /// back to the slot) when it does not, so grid, gutter and clicks share
+    /// the one mapping of the frame.
     pub(super) fold_map: Option<Vec<i64>>,
     /// Span count plus sorted folded seqs from the same lock scope as
     /// `fold_map` (see [`BlockTracker::fold_epoch`](super::blocks::BlockTracker::fold_epoch)):
-    /// hit-tests require full equality with the live tracker before trusting
-    /// the snapshot's rows, so a fold/unfold between paint and click
-    /// recomputes live instead of resolving through a stale map.
+    /// paint requires full equality with the render slot before reusing its
+    /// rows, so a fold/unfold between render and paint recomputes live
+    /// instead of painting through a stale map.
     pub(super) fold_epoch: (usize, Vec<u64>),
     /// The viewport's top absolute row the mapping was built against (the
-    /// identity window's top when `fold_map` is `None`), so hit-tests can
-    /// resolve through the painted rows without re-locking the grid.
+    /// identity window's top when `fold_map` is `None`), so a retained
+    /// repaint can resolve through the painted rows without re-locking.
     pub(super) fold_top: i64,
     /// The gutter's markers for `fold_map`, one entry per painted row —
     /// `(seq, folded, failed)` for the closed span starting there, if any.
@@ -1869,7 +1907,7 @@ impl TerminalElement {
         rows: usize,
         cols: usize,
         want_sliver: bool,
-        cx: &App,
+        cx: &mut App,
         dim: f32,
         under: Rgba,
         must_block: bool,
@@ -1927,32 +1965,68 @@ impl TerminalElement {
             // mapping, rows come from the grid directly instead of
             // `display_iter`, and each folded span shows its one-line summary
             // on its first row.
-            let store = self.view.read(cx).terminal.block_tracker();
+            let store = self.view.read(&*cx).terminal.block_tracker();
             let tracker = store.try_lock().ok();
             // Spans address the primary grid; a full-screen program owns the
             // alternate one, so folds never remap it.
             let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
-            fold_map = tracker.as_deref().and_then(|tracker| {
-                (!alt_screen)
-                    .then(|| super::blocks::visible_map(&term, tracker, rows))
-                    .flatten()
-            });
-            // The gutter's markers for this exact mapping, resolved here in
-            // the same lock scope that paints the grid: the gutter only reads
-            // them back, so the two can never see different frames of the
-            // scrollback. The identity top matches `window_abs_range`, from
-            // the same scroll state the mapping was built against.
-            fold_top = history_size as i64 - display_offset as i64;
-            fold_epoch = tracker
+            let live_epoch: (usize, Vec<u64>) = tracker
                 .as_deref()
                 .map(|tracker| tracker.fold_epoch())
                 .unwrap_or_default();
-            gutter_markers = match tracker.as_deref() {
-                Some(tracker) if !alt_screen => {
-                    super::blocks::gutter_markers(tracker, fold_map.as_deref(), fold_top, rows)
-                }
-                _ => Vec::new(),
-            };
+            // The render pass already computed this frame's mapping under the
+            // same locks (grid first, tracker second). When its generation
+            // still names this paint — same history, offset, rows, alt-screen
+            // and fold table — reuse it verbatim, so the grid paints exactly
+            // the rows the gutter laid down this frame: zero lag, no
+            // chase. Anything else (scroll or growth between render and
+            // paint, a fold/unfold, a resize, an alt-screen flip, or a
+            // retained repaint with no render at all) recomputes live below
+            // and writes the fresh mapping back to the slot.
+            let slot = self.view.read(&*cx).frame_map.clone();
+            let reuse = slot.as_ref().is_some_and(|slot| {
+                slot.matches(rows, history_size, display_offset, alt_screen, &live_epoch)
+            });
+            if reuse {
+                let slot = slot.as_ref().expect("checked above");
+                fold_map = slot.fold_map.clone();
+                fold_top = slot.fold_top;
+                fold_epoch = slot.fold_epoch.clone();
+                gutter_markers = slot.gutter_markers.clone();
+            } else {
+                fold_map = tracker.as_deref().and_then(|tracker| {
+                    (!alt_screen)
+                        .then(|| super::blocks::visible_map(&term, tracker, rows))
+                        .flatten()
+                });
+                // The gutter's markers for this exact mapping, resolved here in
+                // the same lock scope that paints the grid, so the two can
+                // never see different frames of the scrollback. The identity
+                // top matches `window_abs_range`, from the same scroll state
+                // the mapping was built against.
+                fold_top = history_size as i64 - display_offset as i64;
+                fold_epoch = live_epoch.clone();
+                gutter_markers = match tracker.as_deref() {
+                    Some(tracker) if !alt_screen => {
+                        super::blocks::gutter_markers(tracker, fold_map.as_deref(), fold_top, rows)
+                    }
+                    _ => Vec::new(),
+                };
+                // The fresh mapping is what the next click resolves through,
+                // even before the next render recomputes the slot.
+                self.view.update(cx, |view, _| {
+                    view.frame_map = Some(FrameMap {
+                        rows,
+                        history_size,
+                        display_offset,
+                        alt_screen,
+                        fold_epoch: fold_epoch.clone(),
+                        fold_top,
+                        fold_map: fold_map.clone(),
+                        gutter_markers: gutter_markers.clone(),
+                    });
+                });
+            }
 
             let cur = content.cursor;
             let cursor_row = cur.point.line.0 + display_offset;
@@ -5148,5 +5222,52 @@ mod tests {
             ..blank
         };
         assert!(!lends_to_icon(&icon_row(coloured), 0, 1));
+    }
+
+    #[test]
+    fn frame_map_generation_rejects_any_single_mismatch() {
+        let base = FrameMap {
+            rows: 24,
+            history_size: 10,
+            display_offset: 2,
+            alt_screen: false,
+            fold_epoch: (1, vec![3]),
+            fold_top: 8,
+            fold_map: None,
+            gutter_markers: Vec::new(),
+        };
+        let epoch = (1, vec![3]);
+        assert!(
+            base.matches(24, 10, 2, false, &epoch),
+            "the generation it was built against reuses"
+        );
+        assert!(
+            !base.matches(25, 10, 2, false, &epoch),
+            "a resize must not reuse"
+        );
+        assert!(
+            !base.matches(24, 11, 2, false, &epoch),
+            "history growth must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 3, false, &epoch),
+            "a scroll must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 2, true, &epoch),
+            "an alt-screen flip must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 2, false, &(2, vec![3])),
+            "a closed span must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 2, false, &(1, vec![4])),
+            "a refold must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 2, false, &(1, vec![])),
+            "an unfold must not reuse"
+        );
     }
 }
