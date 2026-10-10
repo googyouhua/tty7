@@ -3927,10 +3927,52 @@ impl TerminalView {
 
     /// Toggles the fold on the span `seq` names. Gutter-marker clicks route
     /// here with the exact latched seq.
+    ///
+    /// Top-stable across the toggle: the window's top visible row is read
+    /// before the flip, and afterwards the offset is moved so that row still
+    /// tops the window — the same offset keeps naming the same visible set,
+    /// so the next wheel notch scrolls instead of correcting back-and-forth.
+    /// A mid-fractional remainder is dropped with the same move. A contended
+    /// tracker returns without toggling; a missing grid snapshot (or the
+    /// alternate screen, or no viewport rows) still lands the toggle and
+    /// skips only the correction.
     pub fn toggle_fold_by_seq(&mut self, seq: u64, cx: &mut Context<Self>) {
+        // An in-flight wheel animation targets the pre-toggle window; letting
+        // it run would fight the correction below.
+        self.cancel_scroll_anim();
+        let rows = self.terminal.size().rows;
+        // Snapshot values only — the guard is dropped before the tracker lock
+        // so a fold can never wait on the grid.
+        let grid = self.terminal.term.try_lock_unfair().map(|term| {
+            (
+                term.grid().history_size() as i64,
+                term.grid().display_offset() as i64,
+                term.topmost_line().0 as i64,
+                term.bottommost_line().0 as i64,
+                term.mode().contains(TermMode::ALT_SCREEN),
+            )
+        });
         let store = self.terminal.block_tracker();
         let Ok(mut tracker) = store.lock() else {
             return;
+        };
+        // The anchor the window top shows right now, before the flip: the
+        // mapped first row with folds, the identity top without (the toggle
+        // may be adding the first fold). Read before the flip so the
+        // correction below can name the same visible set afterwards.
+        let anchor: Option<i64> = match &grid {
+            Some((history, offset, topmost, bottommost, alt)) if !alt && rows > 0 => {
+                if tracker.has_folds() {
+                    let floor = history + topmost;
+                    let grid_bottom = history + bottommost;
+                    let bottom = (history - offset + rows as i64 - 1).min(grid_bottom);
+                    let (first, _, _) = tracker.window_edges(bottom, rows, floor);
+                    Some(first.unwrap_or(history - offset))
+                } else {
+                    Some(history - offset)
+                }
+            }
+            _ => None,
         };
         let daemon_id = tracker
             .spans()
@@ -3939,7 +3981,23 @@ impl TerminalView {
             .and_then(|s| s.daemon_id);
         let folded = !tracker.is_folded(seq);
         if tracker.set_folded(seq, folded).is_some() {
-            drop(tracker);
+            // Top-stable: move the offset so the anchor still tops the
+            // window under the new fold state, and drop any mid-fractional
+            // remainder that belonged to the old one.
+            if let (Some(a), Some((history, offset, topmost, bottommost, _))) = (anchor, grid) {
+                let floor = history + topmost;
+                let grid_bottom = history + bottommost;
+                let want = tracker.offset_for_anchor(a, rows, history, floor, grid_bottom);
+                drop(tracker);
+                if want == offset {
+                    self.scroll_frac = 0.;
+                } else if let Some(mut term) = self.terminal.term.try_lock_unfair() {
+                    term.scroll_display(Scroll::Delta((want - offset) as i32));
+                    self.scroll_frac = 0.;
+                }
+                // Else the grid is contended: the correction (offset and frac)
+                // is skipped, and the toggle below already landed.
+            }
             // Server-side truth (entry-5, CAP-5): report the toggle so a
             // restart restores the same folded rows. Best effort — the local
             // view already updated, and a span the daemon never saw (no id
@@ -6733,13 +6791,47 @@ impl TerminalView {
     }
 
     /// Apply `delta` lines right now. Returns whether anything actually moved.
+    ///
+    /// With folds the wheel steps visible rows (each integer row lands on a
+    /// visible row, hidden runs skipped in one step) through
+    /// [`smooth_scroll_step_visible`]; without folds — or on the alternate
+    /// screen, or when the tracker is contended — the legacy absolute stepping
+    /// runs exactly as before.
     fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();
         let offset = term.grid().display_offset();
-        let max = term.grid().history_size();
-        let (jump, frac) = smooth_scroll_step(offset, self.scroll_frac, delta, max);
+        let history = term.grid().history_size();
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        let rows = self.terminal.size().rows;
+        let floor = history as i64 + term.topmost_line().0 as i64;
+        let grid_bottom = history as i64 + term.bottommost_line().0 as i64;
+        // Grid first, tracker second — the same order the paint pass takes —
+        // and only `try_lock`: a contended tracker falls back to the legacy
+        // path rather than blocking the scroll. One guard serves both the
+        // fold test and the step, so a notch can never test folded and then
+        // step legacy when the second lock loses a race.
+        let store = self.terminal.block_tracker();
+        let guard = (!alt_screen && rows > 0)
+            .then(|| store.try_lock().ok())
+            .flatten();
+        let (jump, frac) = match guard {
+            Some(tracker) if tracker.has_folds() => smooth_scroll_step_visible(
+                offset as i64,
+                self.scroll_frac,
+                delta,
+                &tracker,
+                history as i64,
+                rows,
+                floor,
+                grid_bottom,
+            ),
+            _ => {
+                let (jump, frac) = smooth_scroll_step(offset, self.scroll_frac, delta, history);
+                (jump as i64, frac)
+            }
+        };
         if jump != 0 {
-            term.scroll_display(Scroll::Delta(jump));
+            term.scroll_display(Scroll::Delta(jump as i32));
         }
         drop(term);
         if jump != 0 || frac != self.scroll_frac {
@@ -9716,6 +9808,46 @@ fn smooth_scroll_step(offset: usize, frac: f32, delta: f32, max: usize) -> (i32,
     (new_offset as i32 - offset as i32, pos - new_offset)
 }
 
+/// Fold-aware sibling of [`smooth_scroll_step`]: `delta` counts visible rows,
+/// and every integer row lands on a visible row — a long hidden run is
+/// skipped in a single step instead of eating one dead notch per hidden row,
+/// and the pre-clamp binds at the remembered-content edge rather than the
+/// fold-unaware `history_size`. Without folds every step is exactly one
+/// absolute row and this agrees with [`smooth_scroll_step`] bit-for-bit (see
+/// test), so the unfoldered path keeps byte-identical behavior by calling the
+/// legacy function directly instead of coming here.
+fn smooth_scroll_step_visible(
+    offset: i64,
+    frac: f32,
+    delta: f32,
+    tracker: &BlockTracker,
+    history: i64,
+    rows: usize,
+    floor: i64,
+    grid_bottom: i64,
+) -> (i64, f32) {
+    if rows == 0 {
+        return (0, frac);
+    }
+    let total = frac + delta;
+    let steps = total.floor() as i32;
+    let stepped_frac = total - steps as f32;
+    if steps == 0 {
+        // A sub-line notch pushing up into a bound consumes the fraction —
+        // the legacy clamp's snap-back — while every other sub-line notch
+        // accumulates, so a reversed first notch eats frac first and no dead
+        // notch is followed by a snap jump.
+        if delta > 0. && !tracker.can_step_up(offset, history, rows, floor, grid_bottom) {
+            return (0, 0.);
+        }
+        return (0, stepped_frac);
+    }
+    let (new_offset, applied) =
+        tracker.step_offset_visible(offset, steps, history, rows, floor, grid_bottom);
+    let frac_new = if applied == steps { stepped_frac } else { 0. };
+    (new_offset - offset, frac_new)
+}
+
 /// Advance the in-flight scroll animation once per presented frame.
 ///
 /// Registered from [`TerminalView::queue_scroll_anim`]: gpui runs the callback
@@ -9849,6 +9981,14 @@ mod tests {
         assert!(!out.contains(" …"), "{out:?}");
     }
     use super::{
+        BlockTracker, description_budget, drag_scroll_step, elide, encode_mouse,
+        expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
+        focus_report_bytes, highlight_runs, input_cells, input_char_positions,
+        input_overflow_shift, input_overlay_rows, input_start, menu_layout, paste_bytes,
+        select_end_copy, should_show_context_menu, smooth_scroll_step, smooth_scroll_step_visible,
+        submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
+    };
+    use super::{
         COMPLETION_MENU_MAX_W, LoopbackPlan, PortRoute, RawInput, SelectEndCopy, Typeahead,
         WheelRoute, clipboard_paths, compose_notification_title, cwd_is_on_host, display_width,
         link_path_style, loopback_plan, observe_typeahead_for_owner, typeahead_boundary,
@@ -9858,13 +9998,6 @@ mod tests {
         TitleSettle, files_cwd, local_path_for_pane, remote_paste_spec, settle_title,
         stages_clipboard_image, staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro,
         wsl_share_path,
-    };
-    use super::{
-        description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
-        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, highlight_runs,
-        input_cells, input_char_positions, input_overflow_shift, input_overlay_rows, input_start,
-        menu_layout, paste_bytes, select_end_copy, should_show_context_menu, smooth_scroll_step,
-        submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -10915,6 +11048,101 @@ mod tests {
         assert_eq!(smooth_scroll_step(3, 0.5, -10.0, 100), (-3, 0.0));
         assert_eq!(smooth_scroll_step(98, 0.0, 7.3, 100), (2, 0.0));
         assert_eq!(smooth_scroll_step(0, 0.0, 2.5, 0), (0, 0.0));
+    }
+
+    /// Without folds the visible-row stepper must agree with the legacy
+    /// absolute stepper bit-for-bit: every integer step is exactly one
+    /// absolute row, and the bound/frac behavior is identical.
+    #[test]
+    fn smooth_scroll_step_visible_matches_legacy_without_folds() {
+        let tracker = BlockTracker::default();
+        let (history, rows, floor, grid_bottom) = (100i64, 24usize, 0i64, 123i64);
+        let cases = [
+            (0usize, 0.0f32, 0.4f32),
+            (0, 0.4, 0.8),
+            (5, 0.2, -0.5),
+            (3, 0.5, -10.0),
+            (98, 0.0, 7.3),
+            (100, 0.0, 2.0),
+            (100, 0.5, 0.3),
+            (0, 0.6, -0.3),
+            (0, 0.0, -0.4),
+            (1, 0.0, -2.5),
+            (99, 0.9, 1.5),
+            (50, 0.0, -50.0),
+            (50, 0.0, 60.0),
+        ];
+        for (offset, frac, delta) in cases {
+            let (jump, legacy_frac) = smooth_scroll_step(offset, frac, delta, history as usize);
+            let (jump_visible, frac_visible) = smooth_scroll_step_visible(
+                offset as i64,
+                frac,
+                delta,
+                &tracker,
+                history,
+                rows,
+                floor,
+                grid_bottom,
+            );
+            assert_eq!(
+                jump as i64, jump_visible,
+                "jump differs at offset={offset} frac={frac} delta={delta}"
+            );
+            assert!(
+                (legacy_frac - frac_visible).abs() < 1e-4,
+                "frac differs at offset={offset} frac={frac} delta={delta}: \
+                 legacy={legacy_frac} visible={frac_visible}"
+            );
+        }
+        // Degenerate empty history clamps everything, both paths.
+        assert_eq!(smooth_scroll_step(0, 0.0, 2.5, 0), (0, 0.0));
+        assert_eq!(
+            smooth_scroll_step_visible(0, 0.0, 2.5, &tracker, 0, 24, 0, 23),
+            (0, 0.0)
+        );
+    }
+
+    /// With a folded long block, one visible row up must skip the whole hidden
+    /// run in a single jump (no dead notch), and a reversed first notch must
+    /// eat the fractional remainder instead of snapping.
+    #[test]
+    fn smooth_scroll_step_visible_skips_hidden_rows_and_heals_dead_offsets() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(100);
+        tracker.note_d(200, Some(0), None);
+        tracker.set_folded(1, true);
+        let (history, rows, floor, grid_bottom) = (400i64, 24usize, 0i64, 423i64);
+        // Pushing down at the live edge clamps, frac included.
+        assert_eq!(
+            smooth_scroll_step_visible(0, 0.0, -3.0, &tracker, history, rows, floor, grid_bottom),
+            (0, 0.0)
+        );
+        // Dead offset (window bottom inside the hidden run): one notch up
+        // must jump the run and keep the fractional remainder.
+        let dead = history + rows as i64 - 1 - 150;
+        let (jump, frac) =
+            smooth_scroll_step_visible(dead, 0.0, 1.2, &tracker, history, rows, floor, grid_bottom);
+        assert!(
+            jump > 1,
+            "one visible row up must skip the hidden run, got jump={jump}"
+        );
+        assert!((frac - 0.2).abs() < 1e-4, "remainder kept, got frac={frac}");
+        // Reversed first notch eats frac first: no jump, no dead snap later.
+        let (jump, frac) = smooth_scroll_step_visible(
+            dead,
+            0.8,
+            -0.5,
+            &tracker,
+            history,
+            rows,
+            floor,
+            grid_bottom,
+        );
+        assert_eq!(jump, 0);
+        assert!(
+            (frac - 0.3).abs() < 1e-4,
+            "reversal must consume frac first, got frac={frac}"
+        );
     }
 
     #[test]
