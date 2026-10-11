@@ -507,6 +507,13 @@ pub struct TerminalView {
     /// shell cannot report (a far `su` to root, a frozen probe). Session
     /// state, never persisted: clearing it hands the pane back to tracking.
     manual_cwd: Option<std::path::PathBuf>,
+    /// Canonicalized `(pinned, tracked, rejoins)` behind `manual_cwd`, filled
+    /// in off the UI thread: `poll_foreground` only reads it, never blocks on
+    /// the filesystem (a sync `canonicalize` here trips `guard_off_ui`).
+    manual_cwd_canon: Option<(std::path::PathBuf, std::path::PathBuf, bool)>,
+    /// The pair a canonicalization job is already fetching, so every frame
+    /// does not spawn another one while the first is in flight.
+    manual_cwd_canon_pending: Option<(std::path::PathBuf, std::path::PathBuf)>,
     /// The Info panel's follow switch for this pane (default on; =off
     /// freezes). Display
     /// state only; the daemon holds the enforcing flag, fed by
@@ -1986,6 +1993,8 @@ impl TerminalView {
             agent_status_seen: false,
             git_status_cwd: None,
             manual_cwd: None,
+            manual_cwd_canon: None,
+            manual_cwd_canon_pending: None,
             follow_nested_ui: true,
             last_agent_activity: 0,
             cmd: CmdEditor::new(),
@@ -2401,9 +2410,13 @@ impl TerminalView {
     }
 
     /// Pin the pane's directory by hand; `None` (an empty submission) clears
-    /// the pin and hands the pane back to tracking.
+    /// the pin and hands the pane back to tracking. Re-pinning drops the
+    /// canonical cache: old pairs can never match the new pin, and a job
+    /// still in flight lands keyed, so it cannot poison the new pair.
     pub fn set_manual_cwd(&mut self, cwd: Option<std::path::PathBuf>) {
         self.manual_cwd = cwd;
+        self.manual_cwd_canon = None;
+        self.manual_cwd_canon_pending = None;
     }
 
     /// Whether this pane's follow switch stands on (Info panel). Display
@@ -2419,15 +2432,17 @@ impl TerminalView {
     }
 
     /// Whether a hand-pinned directory has been reached by tracking: exact
-    /// match anywhere, canonical match only through the pane's own host (a
-    /// remote path resolved locally would answer about the wrong machine —
-    /// see the host-boundary guard). Canonicalization runs only while a pin
-    /// stands unmatched, and stops the moment it rejoins.
+    /// match answers at once, anything else is decided off the UI thread
+    /// (a sync `canonicalize` on the poll path trips `guard_off_ui`).
+    /// Canonical answers arrive through the pane's own host and are cached
+    /// per `(pinned, tracked)` pair; until a reply lands the answer stays
+    /// false, which only delays the rejoin by a frame — the display never
+    /// moves either way.
     fn manual_cwd_rejoins(
-        &self,
+        &mut self,
         pinned: &std::path::Path,
         tracked: &std::path::Path,
-        cx: &gpui::App,
+        cx: &mut Context<Self>,
     ) -> bool {
         if pinned == tracked {
             return true;
@@ -2435,13 +2450,40 @@ impl TerminalView {
         if !self.paths_are_local() {
             return false;
         }
-        let Some(host) = self.host(cx) else {
-            return false;
-        };
-        match (host.canonicalize(pinned), host.canonicalize(tracked)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
+        if let Some((cp, ct, eq)) = self.manual_cwd_canon.as_ref() {
+            if cp == pinned && ct == tracked {
+                return *eq;
+            }
         }
+        let pair = (pinned.to_path_buf(), tracked.to_path_buf());
+        // Single flight: while any fetch is outstanding, wait for it instead
+        // of piling a new job per frame. A stale landing is harmless — the
+        // cache is keyed, so the next frame simply misses again and refetches.
+        if self.manual_cwd_canon_pending.is_none() {
+            self.manual_cwd_canon_pending = Some(pair.clone());
+            let Some(host) = self.host(cx) else {
+                self.manual_cwd_canon_pending = None;
+                return false;
+            };
+            crate::ui::host_ops::HostOps::run(
+                host,
+                cx,
+                {
+                    let pair = pair.clone();
+                    move |h| {
+                        let a = h.canonicalize(&pair.0).ok();
+                        let b = h.canonicalize(&pair.1).ok();
+                        (pair.0, pair.1, a.is_some() && a == b)
+                    }
+                },
+                move |view, (pinned, tracked, eq), cx| {
+                    view.manual_cwd_canon_pending = None;
+                    view.manual_cwd_canon = Some((pinned, tracked, eq));
+                    cx.notify();
+                },
+            );
+        }
+        false
     }
     /// The directory the Files panel roots its tree at — see [`files_cwd`].
     ///
@@ -4626,7 +4668,7 @@ impl TerminalView {
         // either way), and from then on the shell drives again. Without this
         // a pin is a roach motel — set once, stuck until explicitly cleared.
         if let (Some(pinned), Some(tracked)) = (self.manual_cwd.clone(), self.cwd())
-            && self.manual_cwd_rejoins(&pinned, &tracked, cx)
+            && self.manual_cwd_rejoins(&pinned, &tracked, &mut *cx)
         {
             self.manual_cwd = None;
             cx.notify();
@@ -13151,6 +13193,53 @@ mod gpui_tests {
             .update(cx, |view, _, _| {
                 assert_eq!(view.manual_cwd(), Some(dir.as_path()));
                 assert_eq!(view.effective_cwd(), Some(dir.clone()));
+            })
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    /// A cached canonical answer rejoins without spawning any host call: the
+    /// UI thread only ever reads the cache, so this stays deterministic even
+    /// though the fetch itself rides `HostOps` in the background.
+    #[gpui::test]
+    fn a_cached_canon_answer_rejoins_without_touching_the_host(cx: &mut TestAppContext) {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("tty7-view-canon-{}", std::process::id()));
+        let elsewhere =
+            std::env::temp_dir().join(format!("tty7-view-canon-else-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::create_dir_all(&elsewhere).expect("create dir");
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.set_manual_cwd(Some(dir.clone()));
+                // Pretend the background fetch already landed: same target.
+                view.manual_cwd_canon = Some((dir.clone(), elsewhere.clone(), true));
+                assert!(view.manual_cwd_canon_pending.is_none());
+            })
+            .unwrap();
+        DaemonMsg::Cwd(elsewhere.clone())
+            .encode(&mut daemon)
+            .unwrap();
+        daemon.flush().unwrap();
+        for _ in 0..200 {
+            let rejoined = window
+                .update(cx, |view, window, cx| {
+                    view.poll_foreground(window, cx);
+                    view.manual_cwd().is_none()
+                })
+                .unwrap();
+            if rejoined {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.manual_cwd(), None);
+                // Served from cache: no background job was kicked off.
+                assert!(view.manual_cwd_canon_pending.is_none());
             })
             .unwrap();
         std::fs::remove_dir_all(&dir).ok();
