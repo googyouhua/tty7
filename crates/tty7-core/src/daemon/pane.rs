@@ -578,6 +578,16 @@ fn apply_common_command_setup(
         #[cfg(unix)]
         cmd.env("PWD", dir);
     }
+    // The AppImage runtime exports `ARGV0` (the path the image was launched
+    // by) into tty7's own environment, and the pane would inherit it. zsh
+    // treats an exported `ARGV0` as the argv[0] of every external command it
+    // runs, so each program in the pane is told it is `tty7-….AppImage` — and
+    // multiplexers like Volta's shims, which pick the tool from argv[0], fail
+    // with "Could not find executable" (#1100). Nothing outside a single
+    // command line ever wants it set, so the pane starts without it; the
+    // configured `env` block, applied below, can still put it back.
+    cmd.env_remove("ARGV0");
+
     let extra_env = crate::core::config::extra_env();
 
     // Windows hands every process a private copy of the environment at spawn
@@ -670,7 +680,29 @@ impl OutputGate {
     }
 }
 
-pub(crate) const OBSERVER_BUDGET: i64 = 8 * 1024 * 1024;
+/// What an observer may have queued and not yet written: the replay it is
+/// charged for on subscribing, which can be a whole ring, and as much again
+/// of live output. Were it only a ring, a full one would leave no room while
+/// its replay is still going out, and the first byte the pane printed in that
+/// time would drop the observer.
+pub(crate) const OBSERVER_BUDGET: i64 = 2 * RING_CAP as i64;
+
+/// What an observer dropped at its budget is told, last on its stream.
+pub(crate) const OBSERVER_BEHIND: &str =
+    "fell behind this pane's output; open it again to catch up";
+
+/// The bytes a message counts against its stream's [`OutputGate`]: charged
+/// when it is queued, credited back by the writer once it is on the wire. The
+/// two sides must use this one measure, or a gate drifts until it throttles a
+/// stream or drops an observer that has nothing queued.
+pub(crate) fn gated_len(msg: &DaemonMsg) -> usize {
+    match msg {
+        DaemonMsg::Output(b) | DaemonMsg::Snapshot(b) => b.len(),
+        // Lifted from the same PTY read as the output around them.
+        DaemonMsg::Image(b) | DaemonMsg::ClipboardWrite(b) => b.len(),
+        _ => 0,
+    }
+}
 
 /// How long the death path will chase a child's exit status before giving up
 /// and reporting `Exited { code: None }`. The pty hits EOF when the last slave
@@ -785,6 +817,9 @@ struct PaneState {
     /// The one nested command's pending `B`, opened by a `B` past the outer
     /// slot's `C`. `None` while no nested command is running.
     block_nested: Option<BlockSlot>,
+    /// When a reattach last made the program on this pane repaint; see
+    /// [`redraw_nudge`].
+    last_redraw_nudge: Option<std::time::Instant>,
 }
 
 /// When the agent session last heard from the agent, for the two conclusions
@@ -883,9 +918,23 @@ fn notify(st: &mut PaneState, msg: DaemonMsg) {
     // small, but an agent pane emits AgentStatus often enough that an observer
     // which stopped draining would still queue without bound. Being over the
     // line already disqualifies it; the message is not sized individually.
-    st.observers.retain(|obs| {
-        obs.gate.queued_bytes() < OBSERVER_BUDGET && obs.tx.send(msg.clone()).is_ok()
-    });
+    st.observers.retain(|obs| send_to_observer(obs, &msg, 0));
+}
+
+/// One message to an observer, within its budget. One past it is told why and
+/// let go. Its sender was the stream's last, so the stream then ends, and the
+/// client opens the pane again for a fresh replay instead of watching a
+/// screen that will never move again.
+fn send_to_observer(obs: &Observer, msg: &DaemonMsg, len: usize) -> bool {
+    if obs.gate.queued_bytes() + len as i64 > OBSERVER_BUDGET {
+        let _ = obs.tx.send(DaemonMsg::Error(OBSERVER_BEHIND.to_string()));
+        return false;
+    }
+    if obs.tx.send(msg.clone()).is_err() {
+        return false;
+    }
+    obs.gate.add(len);
+    true
 }
 
 /// Apply a resize to the pane's shared state: seal the replay ring's segment
@@ -1016,16 +1065,7 @@ fn fan_out_one(st: &mut PaneState, msg: DaemonMsg, len: usize, gate: &OutputGate
             gate.add(len);
         }
     }
-    st.observers.retain(|obs| {
-        if obs.gate.queued_bytes() + len as i64 > OBSERVER_BUDGET {
-            return false;
-        }
-        if obs.tx.send(msg.clone()).is_err() {
-            return false;
-        }
-        obs.gate.add(len);
-        true
-    });
+    st.observers.retain(|obs| send_to_observer(obs, &msg, len));
 }
 
 /// Fan one PTY read out to the controller and every observer.
@@ -1415,6 +1455,11 @@ pub struct Carried {
     /// Next block id, carried so ids keep naming closings in closing order
     /// across the exec.
     pub next_block_id: u64,
+    /// The modes the ring dropped off its front, as bytes that switch them
+    /// back on. A program sets them once at startup, so after an `exec` a
+    /// long-running TUI would otherwise lose its alternate screen, mouse, 2031
+    /// and kitty keyboard flags for good.
+    pub head_modes: Option<Vec<u8>>,
 }
 
 /// A pty master this process inherited from its own previous image.
@@ -1867,6 +1912,7 @@ impl DaemonPane {
                 next_block_id,
                 block_outer: None,
                 block_nested: None,
+                last_redraw_nudge: None,
             },
             owner,
             on_dead,
@@ -2022,6 +2068,7 @@ impl DaemonPane {
             agent_session: st.agent_session.clone(),
             command_blocks: st.command_blocks.iter().cloned().collect(),
             next_block_id: st.next_block_id,
+            head_modes: st.ring.head_modes.restore_bytes(),
         })
     }
 
@@ -2054,7 +2101,8 @@ impl DaemonPane {
             })
             .unwrap_or(carried.size);
 
-        let mut ring = ReplayRing::seeded(carried.ring, size);
+        let (mut ring, modes) =
+            ReplayRing::adopted(carried.ring, size, carried.head_modes.as_deref());
         // Not a restore banner: nothing was lost, so there is nothing to
         // announce and nothing to reset. The shell below these bytes is the
         // same shell that wrote them.
@@ -2100,7 +2148,7 @@ impl DaemonPane {
                 },
                 remote_prompt_seen: false,
                 ssh_phase: None,
-                modes: TerminalModes::default(),
+                modes,
                 remote: carried.remote,
                 agent: carried.agent,
                 agent_session: carried.agent_session,
@@ -2112,6 +2160,7 @@ impl DaemonPane {
                 next_block_id: carried.next_block_id,
                 block_outer: None,
                 block_nested: None,
+                last_redraw_nudge: None,
             },
             carried.owner,
             on_dead,
@@ -2184,6 +2233,7 @@ impl DaemonPane {
             next_block_id: 0,
             block_outer: None,
             block_nested: None,
+            last_redraw_nudge: None,
         }));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(OutputGate::new());
@@ -2534,11 +2584,62 @@ impl DaemonPane {
         let epoch = attach_subscriber_with_permissions(
             &mut st,
             subscriber,
+            &self.gate,
             allow_remote_clipboard_write,
             foreground_command,
         );
-        self.gate.reset();
+        let nudge = redraw_nudge(
+            &mut st,
+            self.runs_foreground_program(foreground_command),
+            std::time::Instant::now(),
+        );
+        drop(st);
+        if let Some(transient) = nudge {
+            self.nudge_redraw(transient);
+        }
         epoch
+    }
+
+    /// Whether a program other than the shell is in the foreground, for
+    /// [`redraw_nudge`]. A native ssh pane has no local pty to ask, and its
+    /// alternate screen can only be the far program's.
+    fn runs_foreground_program(&self, foreground_command: bool) -> bool {
+        match &self.backend {
+            PaneBackend::Pty(_) => foreground_command,
+            PaneBackend::NativeSsh(_) => true,
+        }
+    }
+
+    /// Puts the pty at `transient` now and back at the pane's size a moment
+    /// later, which the program in the foreground hears as two `SIGWINCH`es
+    /// and answers with a full repaint. See [`redraw_nudge`].
+    ///
+    /// Only the pty moves: the ring keeps its segment and no client is told a
+    /// new size, so nothing a client or a lease holds changes. The size put
+    /// back is read when it is put back, so a real resize that lands in
+    /// between is what the pane ends up at.
+    fn nudge_redraw(&self, transient: WinSize) {
+        let resize: Box<dyn Fn(WinSize) + Send> = match &self.backend {
+            PaneBackend::Pty(p) => {
+                let master = Arc::clone(&p.master);
+                Box::new(move |size| {
+                    if let Ok(master) = master.lock()
+                        && let Some(master) = master.as_ref()
+                    {
+                        let _ = master.resize(pty_size(size));
+                    }
+                })
+            }
+            PaneBackend::NativeSsh(b) => {
+                let handle = Arc::clone(&b.handle);
+                Box::new(move |size| handle.resize(size))
+            }
+        };
+        let state = Arc::clone(&self.state);
+        let _ = run_redraw_nudge(transient, REDRAW_NUDGE_SETTLE, resize, move || {
+            let st = state.lock().unwrap();
+            st.alive.then(|| st.ring.size())
+        });
     }
 
     /// Whether something other than the pane's own shell owns the terminal.
@@ -2568,7 +2669,27 @@ impl DaemonPane {
     pub fn observe(&self, observer: Sender<DaemonMsg>, gate: Arc<OutputGate>) -> u64 {
         let foreground_command = self.has_foreground_command();
         let mut st = self.state.lock().unwrap();
-        observe_subscriber(&mut st, observer, gate, foreground_command)
+        let id = observe_subscriber(&mut st, observer, gate, foreground_command);
+        let nudge = redraw_nudge(
+            &mut st,
+            self.runs_foreground_program(foreground_command),
+            std::time::Instant::now(),
+        );
+        drop(st);
+        if let Some(transient) = nudge {
+            self.nudge_redraw(transient);
+        }
+        id
+    }
+
+    /// A message for one observer alone, such as a refusal of what it sent.
+    /// False once the pane has let it go.
+    pub fn tell_observer(&self, observer_id: u64, msg: DaemonMsg) -> bool {
+        let st = self.state.lock().unwrap();
+        st.observers
+            .iter()
+            .find(|obs| obs.id == observer_id)
+            .is_some_and(|obs| obs.tx.send(msg).is_ok())
     }
 
     pub fn unobserve(&self, observer_id: u64) {
@@ -3056,6 +3177,11 @@ struct ReplayRing {
     /// evicted byte is folded through it, so it is the state a parser that had
     /// read the whole stream would be in at the first byte still held.
     head: HeadCut,
+    /// The terminal state at the same point: every evicted byte is folded
+    /// through this too, so it holds what a client replaying the ring has to
+    /// be put in before the first byte still held. See
+    /// [`TerminalModes::replay_prelude`].
+    head_modes: TerminalModes,
 }
 
 struct RingSegment {
@@ -3137,6 +3263,7 @@ impl ReplayRing {
             len: 0,
             appended: 0,
             head: HeadCut::default(),
+            head_modes: TerminalModes::new(),
         }
     }
 
@@ -3166,6 +3293,22 @@ impl ReplayRing {
         // size, which is not necessarily the size the snapshot was taken at.
         ring.resize(size);
         ring
+    }
+
+    /// A ring carried across a handoff, with the pane's modes folded back
+    /// from it: `head` is the carried [`Self::head_modes`], and the pane's
+    /// modes are that plus every byte the ring still holds.
+    fn adopted(
+        segments: Vec<crate::daemon::scrollback::Segment>,
+        size: WinSize,
+        head: Option<&[u8]>,
+    ) -> (Self, TerminalModes) {
+        let mut ring = Self::seeded(segments, size);
+        if let Some(bytes) = head {
+            ring.head_modes.feed(bytes);
+        }
+        let modes = ring.modes_from(ring.head_modes.clone());
+        (ring, modes)
     }
 
     /// The geometry new output would be recorded at.
@@ -3225,9 +3368,12 @@ impl ReplayRing {
                 let (a, b) = seg.bytes.as_slices();
                 self.head.fold(a);
                 self.head.fold(b);
+                self.head_modes.feed(a);
+                self.head_modes.feed(b);
             }
             let kept = bytes.len() - RING_CAP;
             self.head.fold(&bytes[..kept]);
+            self.head_modes.feed(&bytes[..kept]);
             let mut tail = RingSegment::empty(size);
             tail.bytes.extend(&bytes[kept..]);
             self.segments.push_back(tail);
@@ -3267,6 +3413,10 @@ impl ReplayRing {
                 n = n.saturating_sub(1);
                 take += 1;
             }
+            let (a, b) = front.bytes.as_slices();
+            let in_a = take.min(a.len());
+            self.head_modes.feed(&a[..in_a]);
+            self.head_modes.feed(&b[..take - in_a]);
             front.bytes.drain(..take);
             self.len -= take;
             if !front.bytes.is_empty() || self.segments.len() == 1 {
@@ -3276,10 +3426,10 @@ impl ReplayRing {
         }
     }
 
-    fn replay(&self, subscriber: &Sender<DaemonMsg>) {
+    fn replay(&self, send: &mut impl FnMut(DaemonMsg)) {
         for seg in &self.segments {
-            let _ = subscriber.send(DaemonMsg::Size(seg.size));
-            let _ = subscriber.send(DaemonMsg::Snapshot(seg.to_vec()));
+            send(DaemonMsg::Size(seg.size));
+            send(DaemonMsg::Snapshot(seg.to_vec()));
         }
     }
 
@@ -3291,7 +3441,11 @@ impl ReplayRing {
     /// [`Self::evict`]), and the answer here has to be the one the client's
     /// emulator will reach from what is left.
     fn modes(&self) -> TerminalModes {
-        let mut modes = TerminalModes::new();
+        self.modes_from(TerminalModes::new())
+    }
+
+    /// `start` with every byte the ring holds folded into it.
+    fn modes_from(&self, mut modes: TerminalModes) -> TerminalModes {
         for seg in &self.segments {
             // Both halves of the deque, in order: `feed` carries a sequence
             // across calls, so the split is invisible to the fold.
@@ -3328,7 +3482,16 @@ fn record_output(st: &mut PaneState, bytes: &[u8]) {
 /// own the terminal right now?", asked of the pty rather than of the pane's
 /// stored state. It gates the prompt report, and that gate is not cosmetic —
 /// see [`replayed_at_prompt`].
-fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_command: bool) {
+fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_command: bool) -> usize {
+    // What the replay queues is charged to the stream's gate like live output,
+    // by the same measure its writer credits back (`gated_len`).
+    let mut queued = 0;
+    let mut send = |msg: DaemonMsg| {
+        let len = gated_len(&msg);
+        if subscriber.send(msg).is_ok() {
+            queued += len;
+        }
+    };
     // Ahead of the ring, not after it: a client that is put into the alternate
     // screen first paints the replayed frames into the buffer they belong to.
     //
@@ -3340,19 +3503,22 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_comma
     // had behind the program) is painted into the alternate buffer, which has
     // no history to keep it and is left behind when the program exits. What
     // the ring carries always wins on its own terms.
-    if let Some(modes) = st.modes.restore_bytes_beyond(&st.ring.modes()) {
-        let _ = subscriber.send(DaemonMsg::Snapshot(modes));
+    if let Some(modes) = st
+        .modes
+        .replay_prelude(&st.ring.head_modes, &st.ring.modes())
+    {
+        send(DaemonMsg::Snapshot(modes));
     }
-    st.ring.replay(subscriber);
+    st.ring.replay(&mut send);
     if st.shell.active {
-        let _ = subscriber.send(DaemonMsg::Prompt {
+        send(DaemonMsg::Prompt {
             active: st.shell.active,
             at_prompt: replayed_at_prompt(st, foreground_command),
             last_exit: st.shell.last_exit_code,
         });
     }
     if st.remote.is_some() {
-        let _ = subscriber.send(DaemonMsg::RemoteContext(st.remote.clone()));
+        send(DaemonMsg::RemoteContext(st.remote.clone()));
     }
     // After the remote context, never before it. A client drops its cwd on
     // every `RemoteContext`, because live that frame means the pane just hopped
@@ -3363,22 +3529,23 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_comma
     // directory for ⌘T or a split to start the new pane in until its next
     // prompt.
     if let Some(cwd) = &st.cwd {
-        let _ = subscriber.send(DaemonMsg::Cwd(cwd.clone()));
+        send(DaemonMsg::Cwd(cwd.clone()));
     }
     if let Some(phase) = &st.ssh_phase {
-        let _ = subscriber.send(DaemonMsg::SshStatus {
+        send(DaemonMsg::SshStatus {
             phase: phase.clone(),
         });
     }
     if st.agent.is_some() {
-        let _ = subscriber.send(DaemonMsg::Agent(st.agent));
+        send(DaemonMsg::Agent(st.agent));
     }
     if st.agent_session.is_some() {
-        let _ = subscriber.send(DaemonMsg::AgentStatus(st.agent_session.clone()));
+        send(DaemonMsg::AgentStatus(st.agent_session.clone()));
     }
     if !st.alive {
-        let _ = subscriber.send(DaemonMsg::Exited { code: st.exit_code });
+        send(DaemonMsg::Exited { code: st.exit_code });
     }
+    queued
 }
 
 /// Whether a replay may tell the client the pane is sitting at a shell prompt.
@@ -3411,9 +3578,91 @@ fn replayed_at_prompt(st: &PaneState, foreground_command: bool) -> bool {
     st.shell.at_prompt && !foreground_command
 }
 
+/// How long the pty stays at the transient size of a [`redraw_nudge`]. Two
+/// size changes in one breath reach a program as one `SIGWINCH` (the kernel
+/// does not queue them), and a program that reads the size only once it gets
+/// around to the signal finds it unchanged and skips the repaint. Long enough
+/// for it to see the first size, short enough that nobody looks at it.
+const REDRAW_NUDGE_SETTLE: Duration = Duration::from_millis(50);
+
+/// A pane reattached again this soon after a nudge is not nudged again: the
+/// repaint the last one asked for is already in the ring, or on its way.
+const REDRAW_NUDGE_COOLDOWN: Duration = Duration::from_secs(2);
+
+/// Whether a client that was just handed the replay needs the program on the
+/// pane to repaint, and if so the size to put the pty at for a moment to make
+/// it (#1122). Records the nudge, so a burst of reattaches makes one.
+///
+/// A full-screen program paints its whole screen once, after `?1049h`, and
+/// from then on only what changed. The ring keeps the last 8 MiB, so a program
+/// that has run long enough has had that first paint, and its `?1049h`, pushed
+/// out of the front. The replay prelude still puts the client into the
+/// alternate screen, but what follows is a stream of differences from a screen
+/// the client never saw, painted onto an empty one. The client has nothing to
+/// rebuild it from, and neither has the daemon, which keeps no screen; only
+/// the program can draw it again, and the one request every full-screen
+/// program answers with a full repaint is a change of size. Asking for the
+/// size it already has does nothing — the kernel sends no `SIGWINCH` for it —
+/// so the pty steps one row away and back.
+///
+/// Only when all of it holds: the pane is in the alternate screen and the ring
+/// no longer carries the switch into it (which is to say the ring has dropped
+/// its front, and with it the first paint), a program owns the pane, and the
+/// pane is alive. Anything else — a shell, a program whose start is still in
+/// the ring — replays whole, and is left alone.
+fn redraw_nudge(
+    st: &mut PaneState,
+    foreground_program: bool,
+    now: std::time::Instant,
+) -> Option<WinSize> {
+    use crate::core::term_modes::ALT_SCREEN;
+    if !st.alive || !foreground_program || !st.modes.is_on(ALT_SCREEN) {
+        return None;
+    }
+    if st
+        .last_redraw_nudge
+        .is_some_and(|at| now.saturating_duration_since(at) < REDRAW_NUDGE_COOLDOWN)
+    {
+        return None;
+    }
+    // Last, for it folds the whole ring.
+    if st.ring.modes().is_on(ALT_SCREEN) {
+        return None;
+    }
+    st.last_redraw_nudge = Some(now);
+    let size = st.ring.size();
+    let rows = if size.rows > 1 {
+        size.rows - 1
+    } else {
+        size.rows + 1
+    };
+    Some(WinSize { rows, ..size })
+}
+
+/// The two steps of a nudge: `transient` now, and after `settle` whatever
+/// `settled` says the pane's size is by then (`None`: leave it, the pane is
+/// gone). The second step runs on its own thread so the attach that asked for
+/// it is not held up.
+fn run_redraw_nudge(
+    transient: WinSize,
+    settle: Duration,
+    resize: Box<dyn Fn(WinSize) + Send>,
+    settled: impl FnOnce() -> Option<WinSize> + Send + 'static,
+) -> std::io::Result<JoinHandle<()>> {
+    resize(transient);
+    std::thread::Builder::new()
+        .name("tty7-redraw-nudge".into())
+        .spawn(move || {
+            std::thread::sleep(settle);
+            if let Some(size) = settled() {
+                resize(size);
+            }
+        })
+}
+
 #[cfg(test)]
 fn attach_subscriber(st: &mut PaneState, subscriber: Sender<DaemonMsg>) -> u64 {
-    attach_subscriber_with_permissions(st, subscriber, false, false)
+    attach_subscriber_with_permissions(st, subscriber, &OutputGate::new(), false, false)
 }
 
 /// The one place a pane's clipboard permission is decided. A pane that carries
@@ -3423,16 +3672,21 @@ fn set_clipboard_permission(st: &mut PaneState, controller_says: bool) {
     st.allow_remote_clipboard_write = st.clipboard_write_from_spec.unwrap_or(controller_says);
 }
 
+/// The new controller's gate starts from what its replay queued, under the
+/// state lock: output fanned out after the lock is released is the new
+/// stream's, and a reset done later would wipe its charge.
 fn attach_subscriber_with_permissions(
     st: &mut PaneState,
     subscriber: Sender<DaemonMsg>,
+    gate: &OutputGate,
     allow_remote_clipboard_write: bool,
     foreground_command: bool,
 ) -> u64 {
     st.subscriber_epoch += 1;
     st.lease_watch = false;
     set_clipboard_permission(st, allow_remote_clipboard_write);
-    replay_state(st, &subscriber, foreground_command);
+    gate.reset();
+    gate.add(replay_state(st, &subscriber, foreground_command));
     st.subscriber = Some(subscriber);
     st.subscriber_epoch
 }
@@ -3444,12 +3698,13 @@ fn observe_subscriber(
     foreground_command: bool,
 ) -> u64 {
     st.observer_seq += 1;
-    replay_state(st, &observer, foreground_command);
     // The replay just queued the whole ring into this channel. Charge it, or
     // the first budget check would read zero while a full scrollback is already
     // sitting there unread — an observer that never drains would be allowed a
-    // ring plus a full budget before anyone noticed.
-    gate.add(st.ring.len);
+    // ring plus a full budget before anyone noticed. Its writer credits it back
+    // as it goes out; until it did, a full ring alone was the whole budget, and
+    // the first byte of live output dropped the observer for good.
+    gate.add(replay_state(st, &observer, foreground_command));
     st.observers.push(Observer {
         id: st.observer_seq,
         tx: observer,
@@ -4623,6 +4878,17 @@ mod tests {
     /// `cwd()` alone loses that: the shell falls back to `getcwd()` and one
     /// tab reads `/tmp/x` while the tab opened from it reads `/private/tmp/x`.
     /// `PWD` is what carries the name across, and what the shell checks.
+    /// An AppImage launch leaves `ARGV0` in the daemon's environment; a zsh
+    /// that inherits it renames every command it runs, which breaks Volta's
+    /// shims (#1100).
+    #[test]
+    fn the_appimage_runtimes_argv0_does_not_reach_the_pane() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env("ARGV0", "./tty7-26.9.5-linux-x86_64.AppImage");
+        apply_common_command_setup(&mut cmd, &None, 1, None, "sh");
+        assert_eq!(cmd.get_env("ARGV0"), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_inherited_directory_keeps_the_name_it_was_reached_by() {
@@ -5338,7 +5604,9 @@ mod tests {
         ring.append(b"narrow bytes");
 
         let (tx, rx) = mpsc::channel();
-        ring.replay(&tx);
+        ring.replay(&mut |m| {
+            let _ = tx.send(m);
+        });
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(100, 24)));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"wide bytes"));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(80, 24)));
@@ -5360,7 +5628,9 @@ mod tests {
         ring.append(b"the new shell's prompt");
 
         let (tx, rx) = mpsc::channel();
-        ring.replay(&tx);
+        ring.replay(&mut |m| {
+            let _ = tx.send(m);
+        });
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(100, 24)));
         assert!(
             matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"what the dead pane had on it"),
@@ -5389,6 +5659,33 @@ mod tests {
             ring.appended, 0,
             "the mark answers 'has this pane written anything since the last snapshot', and \
              bytes it was handed at birth are not an answer of yes"
+        );
+    }
+
+    #[test]
+    fn a_handoff_keeps_the_modes_the_ring_dropped_off_its_front() {
+        use crate::daemon::scrollback::Segment;
+
+        let mut head = TerminalModes::new();
+        head.feed(b"\x1b[?1049h\x1b[?2031h\x1b[>1u");
+        let (ring, modes) = ReplayRing::adopted(
+            vec![Segment {
+                size: ws(80, 24),
+                bytes: b"long after startup".to_vec(),
+            }],
+            ws(80, 24),
+            head.restore_bytes().as_deref(),
+        );
+
+        assert!(modes.is_on(crate::core::term_modes::COLOR_SCHEME_UPDATES));
+        let prelude = modes
+            .replay_prelude(&ring.head_modes, &ring.modes())
+            .expect("a prelude");
+        let has = |needle: &[u8]| prelude.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"\x1b[?2031h"));
+        assert!(
+            has(b"\x1b[>1u"),
+            "the keyboard flags come back from the head fold, so it has to cross the exec too"
         );
     }
 
@@ -5638,7 +5935,9 @@ mod tests {
         assert_eq!(ring.segments.len(), 2);
 
         let (tx, rx) = mpsc::channel();
-        ring.replay(&tx);
+        ring.replay(&mut |m| {
+            let _ = tx.send(m);
+        });
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(100, 24)));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"bytes"));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(80, 30)));
@@ -5658,7 +5957,9 @@ mod tests {
         assert_eq!(ring.len, RING_CAP);
 
         let (tx, rx) = mpsc::channel();
-        ring.replay(&tx);
+        ring.replay(&mut |m| {
+            let _ = tx.send(m);
+        });
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(80, 24)));
     }
 
@@ -6824,6 +7125,7 @@ mod tests {
             next_block_id: 0,
             block_outer: None,
             block_nested: None,
+            last_redraw_nudge: None,
         }
     }
 
@@ -7608,7 +7910,7 @@ mod tests {
         st.ring.append(b"\x1b[?1049h\x1b[2Jthe agent's screen");
 
         let (tx, rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false, true);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, true);
 
         let replayed = drain(&rx);
         let prompt = replayed
@@ -7649,7 +7951,7 @@ mod tests {
         st.ring.append(b"\x1b[?1049hstranded alt screen");
 
         let (tx, rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, false);
 
         assert!(
             drain(&rx).iter().any(|msg| matches!(
@@ -7708,6 +8010,46 @@ mod tests {
         );
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(_))));
+    }
+
+    /// #1074: an agent CLI pushes its kitty keyboard flags once at startup,
+    /// and a long session pushes that push out of the ring. A client that
+    /// reattached without it sent Escape as a bare `ESC`.
+    ///
+    /// The stack goes back as it stood at the front of the ring, not as it
+    /// ends: the pop and push the ring still holds act on it from there, and
+    /// stacking them on the final state would leave the client a level deeper
+    /// than the program.
+    #[test]
+    fn attach_restores_kitty_keyboard_flags_the_ring_has_dropped() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[>1u");
+        record_output(&mut st, &vec![b'.'; RING_CAP]);
+        record_output(&mut st, b"\x1b[<u\x1b[>1u");
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"\x1b[>1u"),
+            "the push the ring lost must be re-sent ahead of it"
+        );
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))));
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(_))));
+    }
+
+    #[test]
+    fn kitty_keyboard_flags_the_ring_still_holds_are_left_to_it() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[>1u");
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))),
+            "nothing goes ahead of a ring that carries the push itself"
+        );
     }
 
     #[test]
@@ -8070,6 +8412,102 @@ mod tests {
             observer_bytes <= OBSERVER_BUDGET,
             "a stalled observer must never hold more than its budget, held {observer_bytes}"
         );
+    }
+
+    /// A phone opening a pane with a long history: the replay is a full ring,
+    /// which is the whole observer budget. Once the writer has put it on the
+    /// wire, live output must still reach the observer.
+    /// The pane keeps printing while a full ring's replay is still going out
+    /// to the phone; that output is the observer's too.
+    #[test]
+    fn an_observer_still_reading_a_full_ring_replay_gets_live_output() {
+        let mut st = test_state(true);
+        st.ring.append(&vec![b'h'; RING_CAP]);
+        let (observer_tx, observer_rx) = mpsc::channel();
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
+
+        fan_out_output(&mut st, b"tick", Vec::new(), &OutputGate::new());
+        assert_eq!(st.observers.len(), 1, "the observer is still subscribed");
+        assert!(
+            observer_rx
+                .try_iter()
+                .any(|m| matches!(m, DaemonMsg::Output(b) if b == b"tick"))
+        );
+    }
+
+    /// One dropped at its budget hears why, and then its channel closes, so
+    /// its stream ends rather than going quiet for good.
+    #[test]
+    fn an_observer_dropped_at_its_budget_is_told_and_let_go() {
+        let mut st = test_state(true);
+        let (observer_tx, observer_rx) = mpsc::channel();
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
+        drain(&observer_rx);
+
+        let chunk = vec![b'x'; 1024 * 1024];
+        while !st.observers.is_empty() {
+            fan_out_output(&mut st, &chunk, Vec::new(), &OutputGate::new());
+        }
+        let last = observer_rx.try_iter().last();
+        assert!(matches!(last, Some(DaemonMsg::Error(m)) if m == OBSERVER_BEHIND));
+        assert!(matches!(
+            observer_rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_observer_that_drained_a_full_ring_replay_keeps_getting_output() {
+        use std::os::unix::net::UnixStream;
+        let mut st = test_state(true);
+        st.ring.append(&vec![b'h'; RING_CAP]);
+        let (observer_tx, observer_rx) = mpsc::channel();
+        let observer_gate = Arc::new(OutputGate::new());
+        observe_subscriber(&mut st, observer_tx, observer_gate.clone(), false);
+
+        // The daemon's own writer puts the replay on the wire, as for a phone.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let writer =
+            crate::daemon::server::spawn_writer(observer_rx, server, observer_gate.clone());
+        let mut replayed = 0;
+        while replayed < RING_CAP {
+            if let DaemonMsg::Snapshot(b) = DaemonMsg::read(&mut client).unwrap() {
+                replayed += b.len();
+            }
+        }
+        let paid = std::time::Instant::now() + Duration::from_secs(5);
+        while observer_gate.queued_bytes() > 0 && std::time::Instant::now() < paid {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(observer_gate.queued_bytes(), 0, "the replay is paid off");
+
+        let pane_gate = OutputGate::new();
+        fan_out_output(&mut st, b"live", Vec::new(), &pane_gate);
+        assert_eq!(st.observers.len(), 1, "the observer is still subscribed");
+        assert_eq!(
+            DaemonMsg::read(&mut client).unwrap(),
+            DaemonMsg::Output(b"live".to_vec())
+        );
+        st.observers.clear();
+        writer.join().unwrap();
+    }
+
+    /// A controller's gate starts at its replay, so crediting that replay as
+    /// it is written brings the gate back to zero rather than below it.
+    #[test]
+    fn a_controller_gate_is_charged_for_its_replay() {
+        let mut st = test_state(true);
+        st.ring.append(b"screen");
+        let gate = OutputGate::new();
+        gate.add(123);
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, &gate, false, false);
+        assert_eq!(gate.queued_bytes(), b"screen".len() as i64);
+        while let Ok(msg) = rx.try_recv() {
+            gate.sub(gated_len(&msg));
+        }
+        assert_eq!(gate.queued_bytes(), 0);
     }
 
     #[test]
@@ -8659,7 +9097,7 @@ mod tests {
         let mut st = test_state(true);
         st.clipboard_write_from_spec = Some(true);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, false);
         assert!(st.allow_remote_clipboard_write);
 
         // And a profile that says no is not something an attaching client can
@@ -8667,17 +9105,17 @@ mod tests {
         let mut st = test_state(true);
         st.clipboard_write_from_spec = Some(false);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, true, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), true, false);
         assert!(!st.allow_remote_clipboard_write);
 
         // A pane with no spec of its own — everything on a remote
         // `tty7-server` — is exactly as permitted as its controller says.
         let mut st = test_state(true);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, true, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), true, false);
         assert!(st.allow_remote_clipboard_write);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, false);
         assert!(!st.allow_remote_clipboard_write);
     }
 
@@ -8690,7 +9128,13 @@ mod tests {
         let (observer_tx, observer_rx) = mpsc::channel();
         {
             let mut st = state.lock().unwrap();
-            attach_subscriber_with_permissions(&mut st, controller_tx, true, false);
+            attach_subscriber_with_permissions(
+                &mut st,
+                controller_tx,
+                &OutputGate::new(),
+                true,
+                false,
+            );
             observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
         }
         drain(&controller_rx);
@@ -9571,6 +10015,135 @@ mod tests {
             probes_for(vec![10, 11]),
             2,
             "a new program is probed at once"
+        );
+    }
+
+    /// A full-screen program that has run long enough to push its `?1049h`
+    /// and its first full paint out of the ring: what is left is differences.
+    fn state_running_a_long_lived_program() -> PaneState {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[?1049h\x1b[2Jthe first full paint");
+        record_output(&mut st, &vec![b'x'; RING_CAP]);
+        st
+    }
+
+    /// The resizes a nudge makes, in order.
+    fn run_recorded_nudge(
+        transient: WinSize,
+        settled: impl FnOnce() -> Option<WinSize> + Send + 'static,
+    ) -> Vec<WinSize> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&calls);
+        run_redraw_nudge(
+            transient,
+            Duration::from_millis(1),
+            Box::new(move |size| record.lock().unwrap().push(size)),
+            settled,
+        )
+        .expect("spawn the nudge thread")
+        .join()
+        .unwrap();
+        calls.lock().unwrap().clone()
+    }
+
+    /// #1122: a client reattaching to such a program gets the alternate screen
+    /// and a stream of differences from a screen it never saw. The pty steps
+    /// a row away and back, so the program hears a size change and repaints.
+    #[test]
+    fn a_reattach_after_the_first_paint_left_the_ring_makes_the_program_repaint() {
+        let mut st = state_running_a_long_lived_program();
+        let (tx, _rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, true);
+
+        let transient = redraw_nudge(&mut st, true, std::time::Instant::now())
+            .expect("the screen the program painted is gone from the ring");
+        assert_eq!(transient, ws(80, 23), "one row off the pane's own size");
+
+        let st = Arc::new(Mutex::new(st));
+        let settled = Arc::clone(&st);
+        let calls = run_recorded_nudge(transient, move || {
+            let st = settled.lock().unwrap();
+            st.alive.then(|| st.ring.size())
+        });
+        assert_eq!(
+            calls,
+            vec![ws(80, 23), ws(80, 24)],
+            "away and back to where the pane was"
+        );
+        // Only the pty moved: the ring is still at the pane's size, so no
+        // client and no lease saw a change.
+        assert_eq!(st.lock().unwrap().ring.size(), ws(80, 24));
+    }
+
+    #[test]
+    fn a_reattach_that_replays_whole_leaves_the_program_alone() {
+        let now = std::time::Instant::now();
+
+        // The program's start is still in the ring: the replay rebuilds it.
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[?1049h\x1b[2Jthe first full paint");
+        record_output(&mut st, &vec![b'x'; 4096]);
+        assert_eq!(redraw_nudge(&mut st, true, now), None, "nothing was lost");
+
+        // The ring dropped its front, but nothing is in the alternate screen:
+        // a shell's scrollback replays as what it is.
+        let mut st = test_state(true);
+        record_output(&mut st, b"$ cat big.log\r\n");
+        record_output(&mut st, &vec![b'x'; RING_CAP]);
+        assert_eq!(redraw_nudge(&mut st, true, now), None, "primary screen");
+
+        // Left the alternate screen, and the ring cut through both switches.
+        let mut st = state_running_a_long_lived_program();
+        record_output(&mut st, b"\x1b[?1049l$ ");
+        record_output(&mut st, &vec![b'x'; RING_CAP]);
+        assert_eq!(redraw_nudge(&mut st, true, now), None, "program left");
+
+        let mut st = state_running_a_long_lived_program();
+        assert_eq!(
+            redraw_nudge(&mut st, false, now),
+            None,
+            "no program owns the pane to repaint"
+        );
+
+        let mut st = state_running_a_long_lived_program();
+        st.alive = false;
+        assert_eq!(redraw_nudge(&mut st, true, now), None, "pane is dead");
+    }
+
+    #[test]
+    fn a_burst_of_reattaches_makes_one_nudge() {
+        let mut st = state_running_a_long_lived_program();
+        let now = std::time::Instant::now();
+        assert!(redraw_nudge(&mut st, true, now).is_some());
+        assert_eq!(
+            redraw_nudge(&mut st, true, now + Duration::from_millis(500)),
+            None,
+            "the repaint the first one asked for is on its way"
+        );
+        assert!(
+            redraw_nudge(&mut st, true, now + REDRAW_NUDGE_COOLDOWN).is_some(),
+            "a reattach well after it is nudged again"
+        );
+    }
+
+    /// The size put back is the pane's size when it is put back: a resize that
+    /// landed in between, or a lease taken meanwhile, is what the pty ends at.
+    #[test]
+    fn a_nudge_puts_back_the_size_the_pane_has_by_then() {
+        let calls = run_recorded_nudge(ws(80, 23), || Some(ws(100, 30)));
+        assert_eq!(calls, vec![ws(80, 23), ws(100, 30)]);
+
+        let calls = run_recorded_nudge(ws(80, 23), || None);
+        assert_eq!(calls, vec![ws(80, 23)], "a pane that died is left alone");
+    }
+
+    #[test]
+    fn a_one_row_pane_is_nudged_a_row_taller() {
+        let mut st = state_running_a_long_lived_program();
+        st.ring.resize(ws(80, 1));
+        assert_eq!(
+            redraw_nudge(&mut st, true, std::time::Instant::now()),
+            Some(ws(80, 2))
         );
     }
 }

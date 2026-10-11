@@ -40,6 +40,8 @@ use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
+mod copy_unwrap;
+
 pub(super) const GRID_PAD_X: f32 = 8.;
 pub(super) const GRID_PAD_Y: f32 = 4.;
 
@@ -123,6 +125,7 @@ actions!(
     terminal,
     [
         CopyText,
+        CopyRaw,
         CutText,
         PasteText,
         AlternatePaste,
@@ -135,9 +138,9 @@ actions!(
         ClearScrollback,
         JumpToBlockStart,
         CopyBlock,
-        ToggleBlockFold,
         CopyBlockCommand,
         CopyBlockOutput,
+        ToggleBlockFold,
         InsertNewline,
         InsertNewlineFallback,
         OneKeyOpen,
@@ -403,6 +406,13 @@ pub struct TerminalView {
     relink_inflight: bool,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
+    /// Where the grid sat in the window on the last frame, so an event that
+    /// arrives with nothing but a window position — the wheel — can be told
+    /// which cell it is over.
+    pub(super) cell_geom: Option<super::element::CellGeom>,
+    /// The IME anchor this pane last asked the platform to place the
+    /// candidate window at, while it had focus.
+    ime_anchor: Option<gpui::Bounds<Pixels>>,
     last_hover_cell: Option<(usize, usize)>,
     link_modifier_down: bool,
     /// What this pane's host has said about paths printed in it, for panes
@@ -757,7 +767,9 @@ const AGENT_DONE_SETTLE: std::time::Duration = std::time::Duration::from_millis(
 #[derive(Debug, PartialEq, Eq)]
 enum TitleSettle {
     /// The tab already reads this, so whatever was waiting to replace it never
-    /// has to happen. This is the case a short command lands in.
+    /// has to happen. This is the case a short command lands in, and the one an
+    /// agent's spinner lands in: a frame that only changes the status mark in
+    /// front of the title reads the same on the tab, so it asks for no repaint.
     Revert,
     /// Hold it: a wait is already running and adopts the newest title when it
     /// elapses. Restarting the wait instead would let a program that rewrites
@@ -769,7 +781,7 @@ enum TitleSettle {
 }
 
 fn settle_title(showing: &str, waiting: bool, incoming: &str) -> TitleSettle {
-    if incoming == showing {
+    if tty7_core::core::tab_view::same_title_ignoring_status_mark(incoming, showing) {
         return TitleSettle::Revert;
     }
     match waiting {
@@ -1946,6 +1958,8 @@ impl TerminalView {
             relink_inflight: false,
             marked_text: String::new(),
             last_mouse_cell: None,
+            cell_geom: None,
+            ime_anchor: None,
             report_mouse,
             last_hover_cell: None,
             link_modifier_down: false,
@@ -2951,7 +2965,7 @@ impl TerminalView {
         let m = &ks.modifiers;
         match ks.key.as_str() {
             "c" => {
-                if self.copy_contextual(m.control, cx) {
+                if self.copy_contextual(m.control, false, cx) {
                     CmdKey::Consumed
                 } else {
                     CmdKey::FallThrough
@@ -3692,6 +3706,21 @@ impl TerminalView {
         .detach();
     }
 
+    /// Record where this frame anchors the IME, and say whether the platform
+    /// has to be told. macOS asks for the rectangle itself whenever it needs
+    /// one; Linux only takes it when it is pushed, and gpui pushes it on focus
+    /// and around a preedit, never because the caret moved. A TUI moves the
+    /// caret on its own — every redraw, every keystroke it echoes — so without
+    /// a push the candidate window stayed wherever the last composition or
+    /// the focus-in left it, or at the window's corner (#1131).
+    pub(super) fn ime_anchor_moved(&mut self, anchor: Option<gpui::Bounds<Pixels>>) -> bool {
+        if self.ime_anchor == anchor {
+            return false;
+        }
+        self.ime_anchor = anchor;
+        anchor.is_some()
+    }
+
     pub fn mouse_mode(&self) -> bool {
         self.report_mouse
             && self
@@ -3777,7 +3806,18 @@ impl TerminalView {
         self.write_mouse(35, mods, col, row, true);
     }
 
-    pub fn scroll(&mut self, lines: i32, mods: &Modifiers, cx: &mut Context<Self>) {
+    /// `at` is the cell under the pointer when the wheel turned. A wheel
+    /// report has to say where it happened — tmux scrolls the pane under the
+    /// pointer, or its window list — and the last click is no stand-in for
+    /// that: a program asking for button events only (1002) is never told the
+    /// pointer moved away from it (#1131).
+    pub fn scroll(
+        &mut self,
+        lines: i32,
+        at: Option<(usize, usize)>,
+        mods: &Modifiers,
+        cx: &mut Context<Self>,
+    ) {
         if lines == 0 {
             return;
         }
@@ -3788,7 +3828,7 @@ impl TerminalView {
         }
         match wheel_route(mode, mods.shift, lines > 0) {
             WheelRoute::Report { base } => {
-                let (col, row) = self.last_mouse_cell.unwrap_or((0, 0));
+                let (col, row) = at.or(self.last_mouse_cell).unwrap_or((0, 0));
                 for _ in 0..lines.unsigned_abs() {
                     self.write_mouse(base, mods, col, row, true);
                 }
@@ -3811,10 +3851,25 @@ impl TerminalView {
         }
     }
 
-    pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        let text = self.terminal.term.lock().selection_to_string();
+    /// `raw` copies the rows as the grid holds them. Otherwise, in a Claude
+    /// pane with `copy_join_wrapped` on, the rows Claude wrapped are joined;
+    /// other programs' output is never joined, since `ls` columns, separators
+    /// and an editor's own wraps all look like Claude's.
+    pub fn copy_selection(&mut self, raw: bool, cx: &mut Context<Self>) {
+        let cfg = cx.global::<Config>();
+        let join = !raw
+            && cfg.copy_join_wrapped
+            && self.terminal.foreground_agent() == Some(crate::core::cli_agent::CLIAgent::Claude);
+        let text = {
+            let term = self.terminal.term.lock();
+            if join {
+                copy_unwrap::joined(&term)
+            } else {
+                term.selection_to_string()
+            }
+        };
         if let Some(mut text) = text {
-            if cx.global::<Config>().clipboard_trim_trailing_spaces {
+            if cfg.clipboard_trim_trailing_spaces {
                 text = trim_trailing_spaces(&text);
             }
             if !text.is_empty() {
@@ -4117,7 +4172,12 @@ impl TerminalView {
         }
     }
 
-    pub fn copy_contextual(&mut self, clear_on_copy: bool, cx: &mut Context<Self>) -> bool {
+    pub fn copy_contextual(
+        &mut self,
+        clear_on_copy: bool,
+        raw: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.input_active() {
             if let Some(text) = self.cmd.selected_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -4129,7 +4189,7 @@ impl TerminalView {
             }
         }
         if self.has_selection() {
-            self.copy_selection(cx);
+            self.copy_selection(raw, cx);
             if clear_on_copy {
                 self.terminal.term.lock().selection = None;
                 cx.notify();
@@ -5293,6 +5353,19 @@ impl TerminalView {
         )
     }
 
+    /// Whether a click on `row`/`col` lands on the prompt the shell drew,
+    /// ahead of where the input bar's text begins.
+    fn click_on_prompt(&self, col: usize, row: usize) -> bool {
+        let Some((srow, scol)) = self.cursor_cell() else {
+            return false;
+        };
+        if row < srow {
+            return false;
+        }
+        let cols = self.terminal.term.lock().columns().max(1);
+        before_input(input_start(scol, cols), col, row - srow)
+    }
+
     pub fn editor_click(
         &mut self,
         col: usize,
@@ -5301,6 +5374,14 @@ impl TerminalView {
         shift: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A click on the prompt itself — the branch in `git:(main)`, the
+        // directory before it — is on the prompt's text, not the editor's.
+        // It goes to the grid's select like a click on any other output, and
+        // leaves the caret where it was: the first half of a double click
+        // must not have already thrown it to the start of the line.
+        if self.click_on_prompt(col, row) {
+            return false;
+        }
         let Some(idx) = self.editor_char_index(col, row, false) else {
             return false;
         };
@@ -6669,7 +6750,7 @@ impl TerminalView {
         self.drag_scroll = None;
         match copy {
             SelectEndCopy::None => {}
-            SelectEndCopy::Grid => self.copy_selection(cx),
+            SelectEndCopy::Grid => self.copy_selection(false, cx),
             SelectEndCopy::Editor => {
                 if let Some(text) = self.cmd.selected_text() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -6733,7 +6814,11 @@ impl TerminalView {
             let lines = total.trunc() as i32;
             self.scroll_debt = total - lines as f32;
             if lines != 0 {
-                self.scroll(lines, &ev.modifiers, cx);
+                let at = self
+                    .cell_geom
+                    .map(|geom| geom.pos_to_cell(ev.position))
+                    .map(|(col, row, _)| (col, row));
+                self.scroll(lines, at, &ev.modifiers, cx);
             }
             return;
         }
@@ -8809,7 +8894,13 @@ impl Render for TerminalView {
                 },
             ))
             .on_action(cx.listener(|this, _: &CopyText, _w, cx| {
-                this.copy_contextual(false, cx);
+                this.copy_contextual(false, false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyRaw, _w, cx| {
+                // Nothing selected: let the chord reach the key handler.
+                if !this.copy_contextual(false, true, cx) {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &CutText, _w, cx| {
                 this.cut_contextual(cx);
@@ -9805,6 +9896,12 @@ fn input_overflow_shift(crow: usize, caret_vrow: usize, visual_rows: usize, rows
         .min(crow + caret_vrow)
 }
 
+/// Whether `col` on input-relative row `target` sits before `start`, the cell
+/// the input bar's first character goes in.
+fn before_input(start: (usize, usize), col: usize, target: usize) -> bool {
+    target < start.0 || (target == start.0 && col < start.1)
+}
+
 fn wrapped_click_index(
     chars: &[char],
     start: (usize, usize),
@@ -10082,6 +10179,14 @@ mod tests {
         stages_clipboard_image, staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro,
         wsl_share_path,
     };
+    use super::{
+        before_input, description_budget, drag_scroll_step, elide, encode_mouse,
+        expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
+        focus_report_bytes, highlight_runs, input_cells, input_char_positions,
+        input_overflow_shift, input_overlay_rows, input_start, menu_layout, paste_bytes,
+        select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
+        trim_trailing_spaces, wheel_route, wrapped_click_index,
+    };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
@@ -10112,6 +10217,39 @@ mod tests {
         assert_eq!(
             settle_title("~/dev", false, "wget 1%"),
             TitleSettle::QueueAndWait
+        );
+    }
+
+    #[test]
+    fn a_spinner_frame_that_only_changes_the_status_mark_asks_for_no_repaint() {
+        // An agent rewrites its title every few hundred milliseconds while it
+        // works, and the tab never draws the mark, so none of these may wait
+        // and repaint the whole window for the same label.
+        assert_eq!(
+            settle_title(
+                "\u{25D0} fixing the switcher",
+                false,
+                "\u{25D1} fixing the switcher"
+            ),
+            TitleSettle::Revert
+        );
+        assert_eq!(
+            settle_title(
+                "\u{25D0} fixing the switcher",
+                true,
+                "\u{2733} fixing the switcher"
+            ),
+            TitleSettle::Revert,
+            "and a frame that lands while another title waits drops it, as a revert does"
+        );
+        assert_eq!(
+            settle_title(
+                "\u{25D0} fixing the switcher",
+                false,
+                "\u{25D1} fixing the parser"
+            ),
+            TitleSettle::QueueAndWait,
+            "a different title still lands"
         );
     }
 
@@ -11727,6 +11865,19 @@ mod tests {
     fn click(text: &str, scol: usize, cols: usize, col: usize, row: usize) -> Option<usize> {
         let chars: Vec<char> = text.chars().collect();
         wrapped_click_index(&chars, (0, scol), cols, col, row, false)
+    }
+
+    #[test]
+    fn before_input_covers_the_prompt_and_nothing_after_it() {
+        // ` tty7 git:(main) ` — the editor starts at column 17.
+        assert!(before_input((0, 17), 12, 0));
+        assert!(before_input((0, 17), 0, 0));
+        assert!(!before_input((0, 17), 17, 0));
+        assert!(!before_input((0, 17), 30, 0));
+        assert!(!before_input((0, 17), 0, 1));
+        // A prompt too long to share its row pushes the editor down one.
+        assert!(before_input((1, 0), 70, 0));
+        assert!(!before_input((1, 0), 0, 1));
     }
 
     #[test]
@@ -20224,5 +20375,75 @@ mod prompt_handover_tests {
             b"\x15\r".to_vec(),
             "an emptied line submits empty: the wipe is still owed, the seed is not"
         );
+    }
+
+    /// #1131: a wheel turned over one part of a TUI scrolled whichever part
+    /// was last clicked. The wheel report carried the cell of the last button
+    /// press, and only a click — or motion, for the few programs that ask for
+    /// every move — ever updated it. tmux asks for button events only (1002),
+    /// so after clicking its status line every wheel notch over the panes
+    /// above was reported as being over the status line.
+    #[gpui::test]
+    fn a_wheel_report_names_the_cell_under_the_pointer_not_the_last_click(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        output(&mut daemon, b"\x1b[?1002h\x1b[?1006h");
+        settle(cx, &window, "the program asked for the mouse", |view| {
+            view.mouse_mode()
+        });
+
+        window
+            .update(cx, |view, w, cx| {
+                view.cell_geom = Some(super::super::element::CellGeom {
+                    origin: gpui::point(px(0.), px(0.)),
+                    cell_width: px(10.),
+                    line_height: px(20.),
+                    cols: 80,
+                    rows: 24,
+                });
+                // A click on the bottom row, where tmux keeps its window list.
+                view.mouse_press(MouseButton::Left, 3, 23, &Modifiers::default());
+                view.mouse_release(MouseButton::Left, 3, 23, &Modifiers::default());
+                // Then one notch up, with the pointer up in the pane content.
+                let ev = ScrollWheelEvent {
+                    position: gpui::point(px(105.), px(110.)),
+                    delta: gpui::ScrollDelta::Lines(gpui::point(0., 1.)),
+                    ..Default::default()
+                };
+                view.on_scroll(&ev, w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            String::from_utf8(drain(&mut daemon)).unwrap(),
+            "\x1b[<0;4;24M\x1b[<0;4;24m\x1b[<64;11;6M",
+            "the notch is reported at the cell the pointer is over"
+        );
+    }
+
+    /// #1131: on Linux the candidate window only follows the caret if the
+    /// rectangle is pushed, so every move has to be pushed — once — and a
+    /// pane coming back into focus has to push again even if the caret never
+    /// moved, because another pane's anchor was the last one sent.
+    #[gpui::test]
+    fn the_ime_anchor_is_pushed_when_it_moves_and_again_after_a_refocus(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        let cell = |col: f32, row: f32| {
+            Some(gpui::Bounds::new(
+                gpui::point(px(col * 10.), px(row * 20.)),
+                gpui::size(px(10.), px(20.)),
+            ))
+        };
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.ime_anchor_moved(cell(2., 0.)), "the first frame");
+                assert!(!view.ime_anchor_moved(cell(2., 0.)), "nothing moved");
+                assert!(view.ime_anchor_moved(cell(9., 4.)), "the TUI moved it");
+                assert!(!view.ime_anchor_moved(None), "focus left: nothing to push");
+                assert!(
+                    view.ime_anchor_moved(cell(9., 4.)),
+                    "focus came back to a caret that never moved"
+                );
+            })
+            .unwrap();
     }
 }

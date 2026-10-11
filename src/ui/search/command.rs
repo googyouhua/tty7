@@ -72,6 +72,7 @@ pub enum CommandKind {
     FindNext,
     FindPrevious,
     CopyText,
+    CopyRaw,
     CutText,
     PasteText,
     SelectAllText,
@@ -255,6 +256,7 @@ impl CommandKind {
             FindNext => "find-next",
             FindPrevious => "find-previous",
             CopyText => "copy",
+            CopyRaw => "copy-raw",
             CutText => "cut",
             PasteText => "paste",
             SelectAllText => "select-all",
@@ -457,6 +459,7 @@ impl CommandKind {
             OpenBranchPicker => "ScmCheckoutBranch",
             ToggleDiffViewMode => "ToggleDiffViewMode",
             QuickOpenFile => "QuickOpenFile",
+            CopyRaw => "CopyRaw",
             CopyText
             | CutText
             | PasteText
@@ -789,6 +792,7 @@ impl Item {
             Item::localized(L10nKey::CmdFindNext, FindNext),
             Item::localized(L10nKey::CmdFindPrevious, FindPrevious),
             Item::localized(L10nKey::CmdCopy, CopyText),
+            Item::localized(L10nKey::CmdCopyRaw, CopyRaw),
             Item::localized(L10nKey::CmdCut, CutText),
             Item::localized(L10nKey::CmdPaste, PasteText),
             Item::localized(L10nKey::CmdSelectAll, SelectAllText),
@@ -953,6 +957,7 @@ mod tests {
             CommandKind::SplitRight,
             CommandKind::ClearTerminal,
             CommandKind::CopyText,
+            CommandKind::CopyRaw,
             CommandKind::CutText,
             CommandKind::PasteText,
             CommandKind::SelectAllText,

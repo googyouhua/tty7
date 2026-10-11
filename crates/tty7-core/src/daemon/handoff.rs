@@ -112,6 +112,8 @@ struct PaneRecord {
     /// the exec. Defaults to 0, matching a fresh pane.
     #[serde(default)]
     next_block_id: u64,
+    #[serde(default)]
+    head_modes: Option<Vec<u8>>,
     /// Length of this pane's ring in the data section, which follows the
     /// manifest in pane order.
     ring_len: u32,
@@ -263,6 +265,7 @@ fn stage(panes: &[Carried], next_pane_id: u64) -> std::io::Result<std::fs::File>
             follow_nested: pane.follow_nested,
             blocks: pane.command_blocks.clone(),
             next_block_id: pane.next_block_id,
+            head_modes: pane.head_modes.clone(),
             ring_len: encoded.len() as u32,
         });
         data.extend_from_slice(&encoded);
@@ -400,6 +403,7 @@ pub fn adopt(fd: RawFd) -> Option<Adopted> {
             follow_nested: record.follow_nested,
             command_blocks: record.blocks,
             next_block_id: record.next_block_id,
+            head_modes: record.head_modes,
         });
     }
 
@@ -447,6 +451,7 @@ mod tests {
             follow_nested: false,
             command_blocks: Vec::new(),
             next_block_id: 0,
+            head_modes: None,
         }
     }
 
@@ -477,6 +482,18 @@ mod tests {
         assert_eq!(
             adopted.panes[1].ring[0].bytes, b"second pane",
             "each pane's ring has to be read back at its own offset, not the first one's"
+        );
+    }
+
+    #[test]
+    fn a_pane_keeps_the_modes_its_ring_no_longer_holds() {
+        let mut tui = carried(5, 21, b"long after startup");
+        tui.head_modes = Some(b"\x1b[>1u\x1b[?2031h".to_vec());
+        let staged = stage(&[tui], 6).expect("stage");
+        let adopted = adopt(std::os::fd::IntoRawFd::into_raw_fd(staged)).expect("read back");
+        assert_eq!(
+            adopted.panes[0].head_modes.as_deref(),
+            Some(&b"\x1b[>1u\x1b[?2031h"[..])
         );
     }
 
