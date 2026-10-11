@@ -15867,6 +15867,194 @@ mod gpui_tests {
         view.terminal.term.lock().grid().display_offset()
     }
 
+    /// The deferred wiring test: `toggle_fold_by_seq` reads the window's top
+    /// anchor before the flip and moves the offset so the same anchor still
+    /// tops the window — through a live grid, not the pure helpers. The
+    /// numbers below are hand-derived visible-row arithmetic, so a wrong
+    /// wiring fails even when the pure math is right.
+    #[gpui::test]
+    fn toggle_fold_by_seq_keeps_the_top_anchor_stable_on_a_live_grid(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                let rows = view.terminal.size().rows as usize;
+                // Scrollback the same way `scroll_into_history` builds it.
+                // Feed scrollback until there is plenty, whatever size the
+                // harness window settled the grid at.
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                for _ in 0..10 {
+                    {
+                        let mut term = view.terminal.term.lock();
+                        parser.advance(&mut *term, &b"line\r\n".repeat(40));
+                    }
+                    if view.terminal.term.lock().grid().history_size() >= 64 {
+                        break;
+                    }
+                }
+                let (history, floor, grid_bottom) = {
+                    let term = view.terminal.term.lock();
+                    (
+                        term.grid().history_size() as i64,
+                        term.grid().history_size() as i64 + term.topmost_line().0 as i64,
+                        term.grid().history_size() as i64 + term.bottommost_line().0 as i64,
+                    )
+                };
+                assert!(
+                    history >= 64,
+                    "enough scrollback to straddle a fold: history {history}"
+                );
+                assert!(rows >= 16, "room for the spans below the window");
+                // A ten-row span; the window top starts three rows above it.
+                let start = history - 30;
+                {
+                    let store = view.terminal.block_tracker();
+                    let mut tracker = store.lock().unwrap();
+                    tracker.note_b(start);
+                    tracker.note_d(start + 9, Some(0), None);
+                }
+                let offset0 = (history - start + 3) as usize;
+                {
+                    let mut term = view.terminal.term.lock();
+                    term.scroll_display(Scroll::Delta(offset0 as i32));
+                    assert_eq!(
+                        term.grid().display_offset(),
+                        offset0,
+                        "the viewport starts straddling the span"
+                    );
+                }
+                let anchor = history - offset0 as i64;
+                assert_eq!(anchor, start - 3);
+                // A stale fractional remainder must not survive the toggle.
+                view.scroll_frac = 0.5;
+                view.toggle_fold_by_seq(1, cx);
+                // Nine hidden rows sat below the anchor inside the window, so
+                // keeping the anchor on top moves the offset by exactly nine.
+                let want = offset0 as i64 - 9;
+                assert!(
+                    view.terminal.block_tracker().lock().unwrap().is_folded(1),
+                    "the toggle landed"
+                );
+                assert_eq!(
+                    display_offset(view) as i64,
+                    want,
+                    "the offset moved so the anchor still tops the window"
+                );
+                assert_eq!(view.scroll_frac, 0., "stale frac dropped with the move");
+                {
+                    let term = view.terminal.term.lock();
+                    let store = view.terminal.block_tracker();
+                    let tracker = store.lock().unwrap();
+                    let bottom = (history - want + rows as i64 - 1).min(grid_bottom);
+                    let mut map = visible_map(&term, &tracker, rows).expect("fold in window");
+                    map.retain(|&a| a >= floor);
+                    assert_eq!(map.first(), Some(&anchor), "anchor still tops");
+                }
+                // Unfolding restores the identical offset.
+                view.toggle_fold_by_seq(1, cx);
+                assert!(
+                    !view.terminal.block_tracker().lock().unwrap().is_folded(1),
+                    "the toggle back landed"
+                );
+                assert_eq!(display_offset(view), offset0, "unfold restores the offset");
+                assert_eq!(view.scroll_frac, 0.);
+                // A span outside the window: the offset is already correct, so
+                // only the stale frac is dropped (`want == offset` branch).
+                // Placed relative to the live row count so the anchor's walk
+                // can never reach it, whatever size the harness window gave.
+                {
+                    let store = view.terminal.block_tracker();
+                    let mut tracker = store.lock().unwrap();
+                    tracker.note_b(start + rows as i64 + 7);
+                    tracker.note_d(start + rows as i64 + 12, Some(0), None);
+                }
+                view.scroll_frac = 0.5;
+                view.toggle_fold_by_seq(2, cx);
+                assert!(
+                    view.terminal.block_tracker().lock().unwrap().is_folded(2),
+                    "the out-of-window toggle landed"
+                );
+                assert_eq!(
+                    display_offset(view),
+                    offset0,
+                    "nothing visible moved, so the offset stands"
+                );
+                assert_eq!(view.scroll_frac, 0., "but the stale frac is still dropped");
+            })
+            .unwrap();
+    }
+
+    /// Same wiring, anchor parked inside the span: the hidden anchor falls
+    /// back to the span's start row — the summary row — as the stable top.
+    #[gpui::test]
+    fn toggle_fold_by_seq_falls_back_to_the_summary_row_on_a_live_grid(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                let rows = view.terminal.size().rows as usize;
+                // Feed scrollback until there is plenty, whatever size the
+                // harness window settled the grid at.
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                for _ in 0..10 {
+                    {
+                        let mut term = view.terminal.term.lock();
+                        parser.advance(&mut *term, &b"line\r\n".repeat(40));
+                    }
+                    if view.terminal.term.lock().grid().history_size() >= 64 {
+                        break;
+                    }
+                }
+                let (history, floor, grid_bottom) = {
+                    let term = view.terminal.term.lock();
+                    (
+                        term.grid().history_size() as i64,
+                        term.grid().history_size() as i64 + term.topmost_line().0 as i64,
+                        term.grid().history_size() as i64 + term.bottommost_line().0 as i64,
+                    )
+                };
+                assert!(
+                    history >= 64,
+                    "enough scrollback to straddle a fold: history {history}"
+                );
+                assert!(rows >= 16, "room for the spans below the window");
+                let start = history - 30;
+                {
+                    let store = view.terminal.block_tracker();
+                    let mut tracker = store.lock().unwrap();
+                    tracker.note_b(start);
+                    tracker.note_d(start + 9, Some(0), None);
+                }
+                // Park the top five rows inside the ten-row span.
+                let offset1 = (history - start - 5) as usize;
+                {
+                    let mut term = view.terminal.term.lock();
+                    term.scroll_display(Scroll::Delta(offset1 as i32));
+                    assert_eq!(term.grid().display_offset(), offset1);
+                }
+                view.toggle_fold_by_seq(1, cx);
+                assert!(
+                    view.terminal.block_tracker().lock().unwrap().is_folded(1),
+                    "the toggle landed"
+                );
+                // From the summary row, 24 visible rows end at start + 32.
+                let want = history - start - 9;
+                assert_eq!(
+                    display_offset(view) as i64,
+                    want,
+                    "the offset moved so the summary row tops the window"
+                );
+                {
+                    let term = view.terminal.term.lock();
+                    let store = view.terminal.block_tracker();
+                    let tracker = store.lock().unwrap();
+                    let bottom = (history - want + rows as i64 - 1).min(grid_bottom);
+                    let mut map = visible_map(&term, &tracker, rows).expect("fold in window");
+                    map.retain(|&a| a >= floor);
+                    assert_eq!(map.first(), Some(&start), "summary row tops");
+                }
+            })
+            .unwrap();
+    }
+
     /// Shaped after what macOS actually delivers, measured on a wheel mouse and
     /// a trackpad: both arrive as pixels, and only the trackpad ever reports a
     /// phase. One wheel detent is ~103px, roughly five lines at a 21px line

@@ -32,6 +32,10 @@
 - source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-fold-scroll-jitter-fix.md`
   summary: toggle_fold_by_seq 本体接线（翻转前 anchor 读取、has_folds 门、alt/rows=0/锁争用跳过）缺单测
   evidence: 新纯函数单测全过但无一用例调用 toggle 本体；既有 view 单测皆为纯函数，TerminalView 方法需 gpui harness（同 mouse_grid_line 无 harness 条目）；接线回归仍靠真机验证
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-fold-scroll-jitter-fix.md`
+  summary: RESOLVED——toggle 接线单测已补（defer 理由不成立：gpui_tests harness 早已存在）
+  evidence: view.rs gpui_tests 新增 toggle_fold_by_seq_keeps_the_top_anchor_stable_on_a_live_grid（含窗外折叠 want==offset 分支）与 toggle_fold_by_seq_falls_back_to_the_summary_row_on_a_live_grid；terminal::1139 全过。锁争用/alt-screen 跳过分支仍无单测（需精确制造争用，维持不测）。
+  revisit_when: 无（关闭）
 - source_plan: `_bmad-output/initiative-terminal-blocks/plan-fold-display-fix.md`
   summary: mouse_grid_line 快照验证/回退分支缺单测（函数本体需 TerminalView gpui harness）。
   evidence: view.rs:11698 有 TestAppContext harness，但 mouse 路径无一使用；fold_epoch/回退逻辑仅由 live-Term 映射单测间接覆盖。
