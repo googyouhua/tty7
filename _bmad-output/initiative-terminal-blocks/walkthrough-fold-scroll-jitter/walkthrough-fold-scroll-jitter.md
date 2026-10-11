@@ -2,7 +2,7 @@
 
 目标：本地提交 3cc5d1a（fix）+ 9b14f99（chore）。计划见 plan-fold-scroll-jitter-fix.md（状态 done，用户已真机验收通过）。
 
-当前块：Periphery。
+Review 结束（全部块已走读）。
 
 - [x] Block 1 — Intent（已走读）
 - [x] Block 2 — Broad strokes（已走读）
@@ -10,7 +10,7 @@
 - [x] Slice B — 折叠切换顶对齐修正（已走读）
 - [x] Slice C — Review 补丁（已走读）
 - [x] Slice D — 测试覆盖（已走读）
-- [ ] Periphery（待走读）
+- [x] Periphery（已走读）
 
 ## Block 1 — Intent
 
