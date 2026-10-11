@@ -121,9 +121,42 @@ pub fn list_in(root: &Path) -> Vec<String> {
     names
 }
 
-/// Instance names under the live root; empty when the root is missing.
-pub fn list_names() -> Vec<String> {
-    default_root().map(|r| list_in(&r)).unwrap_or_default()
+/// One snapshot row: the name plus its directory's last-modified time, for
+/// recency display. The snapshot is taken once per listing and ordered by
+/// [`order_by_recency`]: newest first, unknown mtimes as oldest, ties by
+/// name. A missing mtime (`None`) renders no meta — never a placeholder.
+pub fn list_with_mtime_in(root: &Path) -> Vec<(String, Option<std::time::SystemTime>)> {
+    let mut rows: Vec<(String, Option<std::time::SystemTime>)> = list_in(root)
+        .into_iter()
+        .map(|name| {
+            let mtime = root
+                .join(format!("{INSTANCE_PREFIX}{name}"))
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok();
+            (name, mtime)
+        })
+        .collect();
+    order_by_recency(&mut rows);
+    rows
+}
+
+/// The snapshot under the live root; empty when the root is missing.
+pub fn list_with_mtime() -> Vec<(String, Option<std::time::SystemTime>)> {
+    default_root()
+        .map(|r| list_with_mtime_in(&r))
+        .unwrap_or_default()
+}
+
+/// Newest mtime first; rows without a mtime sort as oldest; ties break by
+/// name ascending. Pure so the order is testable without touching mtimes.
+pub fn order_by_recency(rows: &mut [(String, Option<std::time::SystemTime>)]) {
+    rows.sort_by(|a, b| match (a.1, b.1) {
+        (Some(x), Some(y)) => y.cmp(&x).then_with(|| a.0.cmp(&b.0)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.0.cmp(&b.0),
+    });
 }
 
 /// The memory value for a resolved config directory: `DEFAULT_SENTINEL`
@@ -220,6 +253,62 @@ mod tests {
         std::fs::create_dir_all(root.join("tty7-Default")).unwrap();
         std::fs::write(root.join("tty7-ghost"), "file, not dir").unwrap();
         assert_eq!(list_in(&root), vec!["alice".to_string(), "bob".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recency_orders_newest_first_with_name_tiebreak() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t = |s: u64| UNIX_EPOCH + Duration::from_secs(s);
+        let mut rows = vec![
+            ("bob".to_string(), Some(t(20))),
+            ("alice".to_string(), Some(t(30))),
+            ("cara".to_string(), Some(t(30))),
+            ("ghost".to_string(), None),
+            ("zed".to_string(), None),
+        ];
+        order_by_recency(&mut rows);
+        let names: Vec<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+        // Newest first, ties by name, unknown mtimes oldest (by name).
+        assert_eq!(names, vec!["alice", "cara", "bob", "ghost", "zed"]);
+    }
+
+    #[test]
+    fn snapshot_lists_only_well_shaped_dirs_with_mtimes_newest_first() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let root = std::env::temp_dir().join(format!("tty7-mtime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tty7-bob")).unwrap();
+        std::fs::create_dir_all(root.join("tty7-alice")).unwrap();
+        // Malformed neighbors must not leak into the snapshot.
+        std::fs::create_dir_all(root.join("tty7")).unwrap();
+        std::fs::create_dir_all(root.join("tty7-Default")).unwrap();
+        std::fs::write(root.join("tty7-ghost"), "file, not dir").unwrap();
+        // Distinct mtimes so the order assertion is deterministic even on
+        // coarse-clock filesystems. `File::open` on a directory fails on
+        // Windows, so stamping is best-effort there: the exclusion and
+        // `Some` assertions below still run, and `order_by_recency`'s pure
+        // test owns the ordering contract everywhere.
+        let t = |s: u64| UNIX_EPOCH + Duration::from_secs(s);
+        let stamped = (|| -> std::io::Result<()> {
+            std::fs::File::options()
+                .read(true)
+                .open(root.join("tty7-bob"))?
+                .set_modified(t(1_000))?;
+            std::fs::File::options()
+                .read(true)
+                .open(root.join("tty7-alice"))?
+                .set_modified(t(2_000))?;
+            Ok(())
+        })()
+        .is_ok();
+        let rows = list_with_mtime_in(&root);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|(_, m)| m.is_some()));
+        if stamped {
+            let names: Vec<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, vec!["alice", "bob"]);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

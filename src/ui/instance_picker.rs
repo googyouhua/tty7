@@ -24,6 +24,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Render,
@@ -96,29 +97,42 @@ pub fn remember_current() {
     }
 }
 
-/// The selectable rows: the default instance first, then existing names.
+/// The selectable rows: the default instance first, then existing names
+/// with their snapshot mtimes for recency display.
+#[derive(Debug, Clone)]
+pub struct PickerRow {
+    name: String,
+    mtime: Option<SystemTime>,
+}
+
+/// The selectable rows: the default instance first, then existing names
+/// with their snapshot mtimes for recency display.
 #[derive(Debug, Clone)]
 pub struct PickerState {
-    names: Vec<String>,
+    rows: Vec<PickerRow>,
     cursor: usize,
 }
 
 impl PickerState {
-    pub fn new(names: Vec<String>, last: Option<&str>) -> Self {
+    pub fn new(names: Vec<(String, Option<SystemTime>)>, last: Option<&str>) -> Self {
+        let rows: Vec<PickerRow> = names
+            .into_iter()
+            .map(|(name, mtime)| PickerRow { name, mtime })
+            .collect();
         let cursor = match last {
             None | Some(DEFAULT_SENTINEL) => 0,
-            Some(name) => names
+            Some(name) => rows
                 .iter()
-                .position(|n| n == name)
+                .position(|r| r.name == name)
                 .map(|i| i + 1)
                 .unwrap_or(0),
         };
-        Self { names, cursor }
+        Self { rows, cursor }
     }
 
     /// Row count including the default row.
     pub fn row_count(&self) -> usize {
-        self.names.len() + 1
+        self.rows.len() + 1
     }
 
     pub fn move_up(&mut self) {
@@ -134,7 +148,7 @@ impl PickerState {
         if self.cursor == 0 {
             PickerSelection::Default
         } else {
-            PickerSelection::Named(self.names[self.cursor - 1].clone())
+            PickerSelection::Named(self.rows[self.cursor - 1].name.clone())
         }
     }
 
@@ -249,8 +263,20 @@ impl InstancePicker {
         if index == 0 {
             t(L10nKey::InstancePickerDefault).into()
         } else {
-            self.state.names[index - 1].clone().into()
+            self.state.rows[index - 1].name.clone().into()
         }
+    }
+
+    /// Recency meta for a named row, or `None` for the default row and for
+    /// rows whose mtime the snapshot could not supply (renders nothing).
+    fn row_meta(&self, index: usize) -> Option<String> {
+        if index == 0 {
+            return None;
+        }
+        let mtime = self.state.rows[index - 1].mtime?;
+        let now = crate::core::config::unix_now();
+        let then = mtime.duration_since(UNIX_EPOCH).ok()?.as_secs();
+        Some(crate::ui::home::relative_time(now, then))
     }
 }
 
@@ -301,12 +327,16 @@ impl Render for InstancePicker {
             .children((0..rows).map(|index| {
                 let selected = index == cursor;
                 let label = self.row_label(index);
+                let meta = self.row_meta(index);
                 div()
                     .id(("instance-picker-row", index))
                     .px(px(10.))
                     .py(px(7.))
                     .rounded(px(6.))
                     .cursor_pointer()
+                    .flex()
+                    .justify_between()
+                    .items_center()
                     .when(selected, |row| {
                         row.bg(gpui::rgb(0x2E7D5B)).text_color(gpui::white())
                     })
@@ -315,6 +345,9 @@ impl Render for InstancePicker {
                         this.confirm(window, cx);
                     }))
                     .child(label)
+                    .children(meta.map(|m| {
+                        div().text_size(px(12.)).child(m)
+                    }))
             }))
             .child(Input::new(&input).cleanable(true))
             .when(invalid, |column| {
@@ -363,7 +396,7 @@ impl Render for InstancePicker {
 /// platform runner ends in `ExitProcess`, so returning would end the launch
 /// with no window. Cancel still returns `None` everywhere.
 pub fn run_picker(passthrough: &[OsString]) -> Option<PickerSelection> {
-    let names = instance::list_names();
+    let names = instance::list_with_mtime();
     let last = instance::read_last();
     let state = PickerState::new(names, last.as_deref());
     let result: Arc<Mutex<Option<Option<PickerSelection>>>> = Arc::new(Mutex::new(None));
@@ -457,7 +490,10 @@ mod tests {
 
     #[test]
     fn cursor_starts_on_the_remembered_row() {
-        let names = vec!["bob".to_string(), "alice".to_string()];
+        let names = vec![
+            ("bob".to_string(), None),
+            ("alice".to_string(), None),
+        ];
         assert_eq!(
             PickerState::new(names.clone(), Some("alice")).current(),
             PickerSelection::Named("alice".to_string())
@@ -479,7 +515,7 @@ mod tests {
 
     #[test]
     fn cursor_wraps_around_the_rows() {
-        let mut state = PickerState::new(vec!["alice".to_string()], None);
+        let mut state = PickerState::new(vec![("alice".to_string(), None)], None);
         assert_eq!(state.row_count(), 2);
         state.move_up();
         assert_eq!(state.current(), PickerSelection::Named("alice".to_string()));
@@ -489,7 +525,7 @@ mod tests {
 
     #[test]
     fn typed_text_wins_over_the_cursor_row() {
-        let state = PickerState::new(vec!["alice".to_string()], None);
+        let state = PickerState::new(vec![("alice".to_string(), None)], None);
         assert_eq!(state.confirm("").unwrap(), PickerSelection::Default);
         assert_eq!(
             state.confirm("  bob ").unwrap(),
@@ -497,6 +533,16 @@ mod tests {
         );
         assert!(state.confirm("../x").is_err());
         assert!(state.confirm("default").is_err());
+    }
+
+    #[test]
+    fn rows_retain_snapshot_mtimes() {
+        use std::time::Duration;
+        let t = UNIX_EPOCH + Duration::from_secs(1_000);
+        let state = PickerState::new(vec![("alice".to_string(), Some(t))], None);
+        assert_eq!(state.rows[0].mtime, Some(t));
+        let state = PickerState::new(vec![("bob".to_string(), None)], None);
+        assert_eq!(state.rows[0].mtime, None);
     }
 
     #[test]

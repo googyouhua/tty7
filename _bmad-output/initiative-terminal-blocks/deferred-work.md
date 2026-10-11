@@ -43,3 +43,8 @@
 - source_plan: `_bmad-output/initiative-terminal-blocks/plan-host-ui-thread-panic-fix.md`
   summary: RESOLVED——Host call on UI thread panic（`manual_cwd_rejoins` 后台化，单飞+缓存）
   evidence: 远端 192.168.1.25 /tmp/tty7-app.log：thread 'main' panicked at crates/tty7-core/src/host/mod.rs:54:5；已单开 plan 修完待 25 机器验证
+
+- source_plan: `_bmad-output/initiative-terminal-blocks/epic-username-selector/story-mtime-recency-tracer-plan.md`
+  summary: bin 测试目标不编译（src/terminal/view.rs 测试模块 24 处 E0252 重复 import），picker 侧单测无法执行。
+  evidence: stash 后基线复建同样 24 错、与本改动无关；core 7/7 绿、bin check 干净。本 epic 后续 entry 的 picker 单测同样被挡。
+  revisit_when: view.rs 测试 import 修复后；复验=cargo test --bin tty7-app instance_picker 全绿（含 rows_retain_snapshot_mtimes）。
