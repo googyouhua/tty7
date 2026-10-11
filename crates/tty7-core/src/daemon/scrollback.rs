@@ -232,6 +232,94 @@ pub fn forget(pane_id: u64) {
     if let Some(path) = path_for(pane_id) {
         let _ = std::fs::remove_file(path);
     }
+    forget_blocks(pane_id);
+}
+
+/// The pane's closed command blocks (entry-5, CAP-5): ids, exit codes and
+/// `folded` flags as JSON beside the scrollback snapshot.
+///
+/// A separate sidecar — not a section of the scrollback binary format — so an
+/// old build's snapshot stays byte-identical and readable, and a missing or
+/// unreadable sidecar restores as "all unfolded" instead of failing the
+/// screen restore. Mode 0600 like the snapshot: these are someone's terminal
+/// output either way.
+pub fn save_blocks(pane_id: u64, blocks: &[crate::daemon::protocol::CommandBlock]) {
+    let Some(path) = blocks_path_for(pane_id) else {
+        return;
+    };
+    if blocks.is_empty() {
+        // No rows means no folds to restore: drop a stale sidecar instead of
+        // writing `"[]"` over it every keeper pass.
+        if let Err(e) = std::fs::remove_file(path) {
+            // Best-effort like every fs op here; a surviving stale file only
+            // costs folds, and `load_blocks` empty-maps anything unreadable.
+            // Not-found is the common case (a pane that never folded).
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::debug!("stale blocks sidecar kept for {pane_id}: {e}");
+            }
+        }
+        return;
+    };
+    let bytes = serde_json::to_vec(blocks).unwrap_or_default();
+    if bytes.is_empty() {
+        return;
+    }
+    if std::fs::create_dir_all(path.parent().expect("blocks path has a parent")).is_err() {
+        return;
+    }
+    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    if write_private(&temp, &bytes).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return;
+    }
+    if std::fs::rename(&temp, &path).is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
+/// The stored blocks, or `None` when there is nothing worth restoring: no
+/// file, an unreadable file, or an empty table. Never fails the caller —
+/// folds are decoration over the screen, and losing them restores as "all
+/// unfolded".
+pub fn load_blocks(pane_id: u64) -> Option<Vec<crate::daemon::protocol::CommandBlock>> {
+    let raw = std::fs::read(blocks_path_for(pane_id)?).ok()?;
+    let blocks: Vec<crate::daemon::protocol::CommandBlock> = serde_json::from_slice(&raw).ok()?;
+    (!blocks.is_empty()).then_some(blocks)
+}
+
+pub fn forget_blocks(pane_id: u64) {
+    if let Some(path) = blocks_path_for(pane_id) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn blocks_path_for(pane_id: u64) -> Option<PathBuf> {
+    Some(dir()?.join(format!("{pane_id}.blocks.json")))
+}
+
+/// Drop block sidecars for panes that nothing refers to any more — the same
+/// relevance rule as [`sweep`]: a folds file nobody can ask to restore is
+/// only a way to leave terminal output on disk indefinitely.
+pub fn sweep_blocks(keep: &HashSet<u64>) {
+    let Some(dir) = dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(id) = name
+            .strip_suffix(".blocks.json")
+            .and_then(|stem| stem.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if !keep.contains(&id) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Drop snapshots for panes that nothing refers to any more.
@@ -267,7 +355,7 @@ fn sweep_in(dir: &Path, keep: &HashSet<u64>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn size(cols: u16, rows: u16) -> WinSize {
@@ -344,8 +432,8 @@ mod tests {
     /// The same shared temp directory every other module's tests pin, by the
     /// same name: the override is a process-wide `OnceLock`, so the first
     /// caller decides for all of them and agreeing on the path is what keeps
-    /// that harmless.
-    fn pin_config_dir() {
+    /// that harmless. `pub(crate)` so `server.rs` tests pin the same dir.
+    pub(crate) fn pin_config_dir() {
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         crate::core::config::set_config_dir(dir);
@@ -355,9 +443,10 @@ mod tests {
     /// one test deletes whatever snapshot files exist — including another
     /// test's, mid-flight. Serialize the tests that touch the scrollback
     /// directory; the pure encode/decode tests need no lock.
-    static FS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// `pub(crate)` so `server.rs` tests reuse the same lock and pin.
+    pub(crate) static FS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn lock_fs() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn lock_fs() -> std::sync::MutexGuard<'static, ()> {
         FS_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -475,5 +564,120 @@ mod tests {
             Vec::new(),
             "a pane that has printed nothing is not a corrupt file"
         );
+    }
+
+    /// Entry-5: folds ride a sidecar next to the snapshot, and a missing or
+    /// foreign sidecar reads as "nothing folded" rather than failing the
+    /// screen restore.
+    #[test]
+    fn folded_blocks_come_back_from_the_sidecar() {
+        let _fs = lock_fs();
+        pin_config_dir();
+        let pane = 90_006;
+        let blocks = vec![
+            crate::daemon::protocol::CommandBlock {
+                id: 1,
+                exit_code: Some(0),
+                folded: true,
+                truncated: false,
+            },
+            crate::daemon::protocol::CommandBlock {
+                id: 2,
+                exit_code: Some(1),
+                folded: false,
+                truncated: false,
+            },
+        ];
+        save_blocks(pane, &blocks);
+        assert_eq!(
+            load_blocks(pane).expect("a saved table is readable"),
+            blocks,
+            "a restored pane has to fold the same rows it folded before it died"
+        );
+        forget(pane);
+        assert!(
+            load_blocks(pane).is_none(),
+            "forgetting a pane drops its folds with its screen"
+        );
+        assert!(
+            load_blocks(90_007).is_none(),
+            "a pane that never folded is all unfolded, not an error"
+        );
+    }
+
+    #[test]
+    fn a_foreign_blocks_sidecar_reads_as_nothing_folded() {
+        let _fs = lock_fs();
+        pin_config_dir();
+        let pane = 90_008;
+        std::fs::create_dir_all(
+            blocks_path_for(pane)
+                .expect("a path")
+                .parent()
+                .expect("a parent"),
+        )
+        .unwrap();
+        std::fs::write(blocks_path_for(pane).expect("a path"), b"NOT JSON WE WROTE").unwrap();
+        assert!(
+            load_blocks(pane).is_none(),
+            "a damaged sidecar costs only the folds, never the screen"
+        );
+        forget_blocks(pane);
+    }
+
+    #[test]
+    fn saving_an_empty_table_deletes_the_sidecar() {
+        let _fs = lock_fs();
+        pin_config_dir();
+        let pane = 90_010;
+        let blocks = vec![crate::daemon::protocol::CommandBlock {
+            id: 1,
+            exit_code: Some(0),
+            folded: true,
+            truncated: false,
+        }];
+        save_blocks(pane, &blocks);
+        assert!(
+            load_blocks(pane).is_some(),
+            "a pane with folds has a sidecar"
+        );
+        save_blocks(pane, &[]);
+        assert!(
+            load_blocks(pane).is_none(),
+            "an unfolded table leaves no sidecar behind, not an empty JSON array"
+        );
+        assert!(
+            blocks_path_for(pane).is_none_or(|p| !p.exists()),
+            "no stale file for the sweeps to carry"
+        );
+        forget_blocks(pane);
+    }
+
+    #[test]
+    fn sweep_blocks_keeps_referenced_sidecars_drops_the_rest() {
+        use std::collections::HashSet;
+
+        let _fs = lock_fs();
+        pin_config_dir();
+        let kept = 90_011;
+        let stale = 90_012;
+        let block = vec![crate::daemon::protocol::CommandBlock {
+            id: 1,
+            exit_code: Some(0),
+            folded: true,
+            truncated: false,
+        }];
+        save_blocks(kept, &block);
+        save_blocks(stale, &block);
+        sweep_blocks(&HashSet::from([kept]));
+        assert!(
+            load_blocks(kept).is_some(),
+            "a referenced pane keeps its folds"
+        );
+        assert!(
+            load_blocks(stale).is_none(),
+            "an unreferenced sidecar is terminal output on disk no more"
+        );
+        forget_blocks(kept);
     }
 }

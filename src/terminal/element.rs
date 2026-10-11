@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::{Column as AlacColumn, Line as AlacLine, Point as AlacPoint};
 use alacritty_terminal::selection::SelectionRange;
+use alacritty_terminal::term::Term;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
@@ -1796,6 +1797,45 @@ fn paint_marked(
     );
 }
 
+/// The fold mapping for one frame, computed in `render` (same-frame fresh)
+/// and reused by `paint` after a generation check. The generation is the
+/// scrolled/folded identity of the window — history size, display offset,
+/// viewport rows, alternate screen, and the fold table epoch (span count plus
+/// sorted folded seqs) — so any scroll, growth, fold, resize or alt-screen
+/// flip between render and paint (or a retained repaint with no render at
+/// all) recomputes live instead of painting through a stale map.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct FrameMap {
+    pub(super) rows: usize,
+    pub(super) history_size: usize,
+    pub(super) display_offset: i32,
+    pub(super) alt_screen: bool,
+    pub(super) fold_epoch: (usize, Vec<u64>),
+    pub(super) fold_top: i64,
+    pub(super) fold_map: Option<Vec<i64>>,
+    pub(super) gutter_markers: Vec<Option<(u64, bool, bool)>>,
+}
+
+impl FrameMap {
+    /// Whether this slot still names the window the live grid shows: every
+    /// component of the generation must match. A single mismatch means the
+    /// render-time mapping is stale for this paint.
+    pub(super) fn matches(
+        &self,
+        rows: usize,
+        history: usize,
+        offset: i32,
+        alt: bool,
+        epoch: &(usize, Vec<u64>),
+    ) -> bool {
+        self.rows == rows
+            && self.history_size == history
+            && self.display_offset == offset
+            && self.alt_screen == alt
+            && self.fold_epoch == *epoch
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct GridSnapshot {
     cursor: Option<GridCursor>,
@@ -1805,9 +1845,33 @@ pub(super) struct GridSnapshot {
     any_current: bool,
     /// Scrollback state at snapshot time, so the paint pass can map a kitty
     /// image's absolute anchor row back to a screen row: screen_row =
-    /// anchor_row - history_size + display_offset.
-    display_offset: i32,
-    history_size: usize,
+    /// anchor_row - history_size + display_offset. Also the scroll state the
+    /// fold mapping was built against: a retained repaint with no render (and
+    /// no fresh slot) falls back to these rows, so a stale snapshot never
+    /// misroutes.
+    pub(super) display_offset: i32,
+    pub(super) history_size: usize,
+    /// The fold mapping this frame painted with, if any: `None` is the
+    /// identity window (nothing folded, alternate screen, or a frame that
+    /// never locked the tracker). Paint reuses the render slot's mapping when
+    /// its generation still matches and recomputes (writing the fresh mapping
+    /// back to the slot) when it does not, so grid, gutter and clicks share
+    /// the one mapping of the frame.
+    pub(super) fold_map: Option<Vec<i64>>,
+    /// Span count plus sorted folded seqs from the same lock scope as
+    /// `fold_map` (see [`BlockTracker::fold_epoch`](super::blocks::BlockTracker::fold_epoch)):
+    /// paint requires full equality with the render slot before reusing its
+    /// rows, so a fold/unfold between render and paint recomputes live
+    /// instead of painting through a stale map.
+    pub(super) fold_epoch: (usize, Vec<u64>),
+    /// The viewport's top absolute row the mapping was built against (the
+    /// identity window's top when `fold_map` is `None`), so a retained
+    /// repaint can resolve through the painted rows without re-locking.
+    pub(super) fold_top: i64,
+    /// The gutter's markers for `fold_map`, one entry per painted row —
+    /// `(seq, folded, failed)` for the closed span starting there, if any.
+    /// Resolved in the same lock scope as the grid, read back lock-free.
+    pub(super) gutter_markers: Vec<Option<(u64, bool, bool)>>,
 }
 
 impl GridSnapshot {
@@ -1843,7 +1907,7 @@ impl TerminalElement {
         rows: usize,
         cols: usize,
         want_sliver: bool,
-        cx: &App,
+        cx: &mut App,
         dim: f32,
         under: Rgba,
         must_block: bool,
@@ -1851,8 +1915,13 @@ impl TerminalElement {
         let mut cursor: Option<GridCursor> = None;
         let mut sliver: Option<Vec<RenderCell>> = None;
         let mut any_selected = false;
+        let (any_match, any_current);
         let display_offset;
         let history_size;
+        let fold_map;
+        let fold_epoch;
+        let fold_top;
+        let gutter_markers;
         let prompt_shape = self.prompt_cursor_shape(cx);
         {
             let mut palette = self.view.read(cx).terminal.palette;
@@ -1891,6 +1960,74 @@ impl TerminalElement {
             history_size = term.grid().history_size();
             let selection = content.selection;
 
+            // Folded blocks collapse their rows out of the window,
+            // top-aligned with the blanks at the bottom: with any fold
+            // mapping, rows come from the grid directly instead of
+            // `display_iter`, and each folded span shows its one-line summary
+            // on its first row.
+            let store = self.view.read(&*cx).terminal.block_tracker();
+            let tracker = store.try_lock().ok();
+            // Spans address the primary grid; a full-screen program owns the
+            // alternate one, so folds never remap it.
+            let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+            let live_epoch: (usize, Vec<u64>) = tracker
+                .as_deref()
+                .map(|tracker| tracker.fold_epoch())
+                .unwrap_or_default();
+            // The render pass already computed this frame's mapping under the
+            // same locks (grid first, tracker second). When its generation
+            // still names this paint — same history, offset, rows, alt-screen
+            // and fold table — reuse it verbatim, so the grid paints exactly
+            // the rows the gutter laid down this frame: zero lag, no
+            // chase. Anything else (scroll or growth between render and
+            // paint, a fold/unfold, a resize, an alt-screen flip, or a
+            // retained repaint with no render at all) recomputes live below
+            // and writes the fresh mapping back to the slot.
+            let slot = self.view.read(&*cx).frame_map.clone();
+            let reuse = slot.as_ref().is_some_and(|slot| {
+                slot.matches(rows, history_size, display_offset, alt_screen, &live_epoch)
+            });
+            if reuse {
+                let slot = slot.as_ref().expect("checked above");
+                fold_map = slot.fold_map.clone();
+                fold_top = slot.fold_top;
+                fold_epoch = slot.fold_epoch.clone();
+                gutter_markers = slot.gutter_markers.clone();
+            } else {
+                fold_map = tracker.as_deref().and_then(|tracker| {
+                    (!alt_screen)
+                        .then(|| super::blocks::visible_map(&term, tracker, rows))
+                        .flatten()
+                });
+                // The gutter's markers for this exact mapping, resolved here in
+                // the same lock scope that paints the grid, so the two can
+                // never see different frames of the scrollback. The identity
+                // top matches `window_abs_range`, from the same scroll state
+                // the mapping was built against.
+                fold_top = history_size as i64 - display_offset as i64;
+                fold_epoch = live_epoch.clone();
+                gutter_markers = match tracker.as_deref() {
+                    Some(tracker) if !alt_screen => {
+                        super::blocks::gutter_markers(tracker, fold_map.as_deref(), fold_top, rows)
+                    }
+                    _ => Vec::new(),
+                };
+                // The fresh mapping is what the next click resolves through,
+                // even before the next render recomputes the slot.
+                self.view.update(cx, |view, _| {
+                    view.frame_map = Some(FrameMap {
+                        rows,
+                        history_size,
+                        display_offset,
+                        alt_screen,
+                        fold_epoch: fold_epoch.clone(),
+                        fold_top,
+                        fold_map: fold_map.clone(),
+                        gutter_markers: gutter_markers.clone(),
+                    });
+                });
+            }
+
             let cur = content.cursor;
             let cursor_row = cur.point.line.0 + display_offset;
             let cursor_hidden = matches!(cur.shape, CursorShape::Hidden);
@@ -1902,35 +2039,61 @@ impl TerminalElement {
             // the IME anchor can snap to it.
             let mut inverse_runs: Vec<(usize, usize)> = Vec::new();
 
-            for cell in content.display_iter {
-                let row = cell.point.line.0 + display_offset;
-                let col = cell.point.column.0;
-                if row < 0 || row as usize >= rows || col >= cols {
-                    continue;
-                }
-                if cursor_hidden
-                    && row == cursor_row
-                    && cell.cell.flags.contains(Flags::INVERSE)
-                    && !cell
-                        .cell
-                        .flags
-                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    match inverse_runs.last_mut() {
-                        Some((start, len)) if *start + *len == col => *len += 1,
-                        _ => inverse_runs.push((col, 1)),
+            // With any fold mapping the rows below come from the grid
+            // directly, so the display iterator has nothing to add.
+            if fold_map.is_none() {
+                for cell in content.display_iter {
+                    let row = cell.point.line.0 + display_offset;
+                    let col = cell.point.column.0;
+                    if row < 0 || row as usize >= rows || col >= cols {
+                        continue;
                     }
+                    if cursor_hidden
+                        && row == cursor_row
+                        && cell.cell.flags.contains(Flags::INVERSE)
+                        && !cell
+                            .cell
+                            .flags
+                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        match inverse_runs.last_mut() {
+                            Some((start, len)) if *start + *len == col => *len += 1,
+                            _ => inverse_runs.push((col, 1)),
+                        }
+                    }
+                    let rc =
+                        snapshot_cell(cell.cell, cell.point, &palette, colors, selection.as_ref());
+                    any_selected |= rc.selected;
+                    buf[row as usize * cols + col] = if dim < 1. {
+                        dim_cell(rc, dim, under)
+                    } else {
+                        rc
+                    };
                 }
-                let rc = snapshot_cell(cell.cell, cell.point, &palette, colors, selection.as_ref());
-                any_selected |= rc.selected;
-                buf[row as usize * cols + col] = if dim < 1. {
-                    dim_cell(rc, dim, under)
-                } else {
-                    rc
-                };
+            } else if let (Some(map), Some(tracker)) = (fold_map.as_ref(), tracker.as_deref()) {
+                paint_folded_rows(
+                    &term,
+                    tracker,
+                    map,
+                    buf,
+                    cols,
+                    history_size,
+                    &palette,
+                    colors,
+                    selection.as_ref(),
+                    dim,
+                    under,
+                    &mut any_selected,
+                );
             }
 
-            if want_sliver && (display_offset as usize) < term.grid().history_size() {
+            // The sliver overlaps the row above the viewport during a
+            // fractional scroll; a folded window has no row above it in the
+            // mapping, so there is nothing to overlap with.
+            if fold_map.is_none()
+                && want_sliver
+                && (display_offset as usize) < term.grid().history_size()
+            {
                 let line = AlacLine(-display_offset - 1);
                 let mut row_buf = vec![RenderCell::default(); cols];
                 for (col, slot) in row_buf
@@ -1955,32 +2118,83 @@ impl TerminalElement {
                 sliver = Some(row_buf);
             }
 
-            let row = cursor_row;
             let col = cur.point.column.0;
-            if row >= 0 && (row as usize) < rows && col < cols {
-                // Snap the IME anchor to the fake caret when there is
-                // exactly one caret-sized inverse run on the row.
-                let ime_col = match inverse_runs.as_slice() {
-                    [(start, len)] if cursor_hidden && *len <= 2 => *start,
-                    _ => col,
-                };
-                cursor = Some(GridCursor {
-                    row: row as usize,
-                    col,
-                    ime_col,
-                    hidden: cursor_hidden,
-                    // Checked under the grid lock: `on_alt_screen` would take
-                    // it a second time.
-                    style: prompt_shape
-                        .filter(|_| !term.mode().contains(TermMode::ALT_SCREEN))
-                        .unwrap_or_else(|| cursor_style_from_shape(cur.shape)),
-                });
+            // A folded window maps the cursor through the same rows it
+            // paints; a cursor inside a collapsed span stays hidden.
+            if let Some(map) = fold_map.as_ref() {
+                let cursor_abs = history_size as i64 + i64::from(cur.point.line.0);
+                if let Some(pos) = map.iter().position(|&a| a == cursor_abs) {
+                    let srow = pos;
+                    if col < cols {
+                        cursor = Some(GridCursor {
+                            row: srow,
+                            col,
+                            ime_col: col,
+                            hidden: cursor_hidden,
+                            style: prompt_shape
+                                .filter(|_| !term.mode().contains(TermMode::ALT_SCREEN))
+                                .unwrap_or_else(|| cursor_style_from_shape(cur.shape)),
+                        });
+                    }
+                }
+            } else {
+                let row = cursor_row;
+                if row >= 0 && (row as usize) < rows && col < cols {
+                    // Snap the IME anchor to the fake caret when there is
+                    // exactly one caret-sized inverse run on the row.
+                    let ime_col = match inverse_runs.as_slice() {
+                        [(start, len)] if cursor_hidden && *len <= 2 => *start,
+                        _ => col,
+                    };
+                    cursor = Some(GridCursor {
+                        row: row as usize,
+                        col,
+                        ime_col,
+                        hidden: cursor_hidden,
+                        // Checked under the grid lock: `on_alt_screen` would take
+                        // it a second time.
+                        style: prompt_shape
+                            .filter(|_| !term.mode().contains(TermMode::ALT_SCREEN))
+                            .unwrap_or_else(|| cursor_style_from_shape(cur.shape)),
+                    });
+                }
             }
+
+            // Search matches and hovered links map through the same rows the
+            // window paints: the identity window by offset, a folded window
+            // through its mapping. Inside the lock scope: the folded mapping
+            // lives and dies with it.
+            (any_match, any_current) = match fold_map.as_ref() {
+                None => {
+                    let to_screen = |line: i32| {
+                        let srow = line + display_offset;
+                        (srow >= 0 && (srow as usize) < rows).then_some(srow as usize)
+                    };
+                    let lo = -display_offset;
+                    let hi = -display_offset + rows as i32 - 1;
+                    let (hit, current) =
+                        self.flag_search_matches(buf, cols, lo, hi, &to_screen, cx);
+                    self.flag_hovered_link(buf, cols, lo, hi, &to_screen, cx);
+                    (hit, current)
+                }
+                Some(map) => {
+                    let to_screen = |line: i32| {
+                        let abs = history_size as i64 + i64::from(line);
+                        map.iter().position(|&a| a == abs)
+                    };
+                    // Grid lines, like `lo`/`hi` above: absolute rows re-based on
+                    // the history the mapping was built against.
+                    let grid_line = |abs: i64| (abs - history_size as i64) as i32;
+                    let lo = map.first().map(|&a| grid_line(a)).unwrap_or(0);
+                    let hi = map.last().map(|&a| grid_line(a)).unwrap_or(-1);
+                    let (hit, current) =
+                        self.flag_search_matches(buf, cols, lo, hi, &to_screen, cx);
+                    self.flag_hovered_link(buf, cols, lo, hi, &to_screen, cx);
+                    (hit, current)
+                }
+            };
         }
 
-        let (any_match, any_current) =
-            self.flag_search_matches(buf, rows, cols, display_offset, cx);
-        self.flag_hovered_link(buf, rows, cols, display_offset, cx);
         Some(GridSnapshot {
             cursor,
             sliver,
@@ -1989,26 +2203,34 @@ impl TerminalElement {
             any_current,
             display_offset,
             history_size,
+            fold_map,
+            fold_epoch,
+            fold_top,
+            gutter_markers,
         })
     }
 
     fn flag_hovered_link(
         &self,
         buf: &mut [RenderCell],
-        rows: usize,
         cols: usize,
-        display_offset: i32,
+        lo: i32,
+        hi: i32,
+        to_screen: &dyn Fn(i32) -> Option<usize>,
         cx: &App,
     ) {
         let Some(link) = self.view.read(cx).hovered_link.as_ref() else {
             return;
         };
         for &(start, end) in &link.runs {
-            let grid_row = start.line.0 + display_offset;
-            if grid_row < 0 || grid_row as usize >= rows {
+            if end.line.0 < lo || start.line.0 > hi {
                 continue;
             }
-            let row = grid_row as usize * cols;
+            // Single-row runs, as before: only the start row is painted.
+            let Some(srow) = to_screen(start.line.0) else {
+                continue;
+            };
+            let row = srow * cols;
             for col in start.column.0..=end.column.0.min(cols.saturating_sub(1)) {
                 let cell = &mut buf[row + col];
                 osc8_underline::unmark(cell);
@@ -2021,24 +2243,39 @@ impl TerminalElement {
     fn flag_search_matches(
         &self,
         buf: &mut [RenderCell],
-        rows: usize,
         cols: usize,
-        display_offset: i32,
+        lo: i32,
+        hi: i32,
+        to_screen: &dyn Fn(i32) -> Option<usize>,
         cx: &App,
     ) -> (bool, bool) {
         let Some(search) = self.view.read(cx).search.as_ref() else {
             return (false, false);
         };
         let (mut any_hit, mut any_current) = (false, false);
-        let first = search
-            .matches
-            .partition_point(|m| m.end().line.0 + display_offset < 0);
-        for (i, m) in search.matches.iter().enumerate().skip(first) {
+        for (i, m) in search.matches.iter().enumerate() {
             let is_current = search.current_index == Some(i);
             let start = *m.start();
             let end = *m.end();
-            if start.line.0 + display_offset >= rows as i32 {
+            if end.line.0 < lo {
+                continue;
+            }
+            if start.line.0 > hi {
                 break;
+            }
+            // Mapped first: a match hidden entirely inside folded rows
+            // reports nothing — flagging it would claim a visible hit with
+            // nothing highlighted.
+            let mut line = start.line.0;
+            let mut visible = false;
+            while !visible && line <= end.line.0 {
+                if line >= lo && line <= hi && to_screen(line).is_some() {
+                    visible = true;
+                }
+                line += 1;
+            }
+            if !visible {
+                continue;
             }
             if is_current {
                 any_current = true;
@@ -2047,8 +2284,14 @@ impl TerminalElement {
             }
             let mut line = start.line.0;
             while line <= end.line.0 {
-                let row = line + display_offset;
-                if row >= 0 && (row as usize) < rows {
+                let Some(srow) = (line >= lo && line <= hi)
+                    .then(|| to_screen(line))
+                    .flatten()
+                else {
+                    line += 1;
+                    continue;
+                };
+                {
                     let col_start = if line == start.line.0 {
                         start.column.0
                     } else {
@@ -2061,7 +2304,7 @@ impl TerminalElement {
                     };
                     let mut col = col_start;
                     while col <= col_end && col < cols {
-                        let rc = &mut buf[row as usize * cols + col];
+                        let rc = &mut buf[srow * cols + col];
                         if is_current {
                             rc.match_current = true;
                         } else {
@@ -2100,7 +2343,10 @@ impl TerminalElement {
                     // only a memory. Reading the grid now is what lets the
                     // menu name the file that was actually under the click.
                     match should_show_context_menu(v.mouse_mode(), mods.shift) {
-                        true => v.record_menu_link(col, row, cx),
+                        true => {
+                            v.record_menu_link(col, row, cx);
+                            v.record_menu_block(row);
+                        }
                         false => v.forget_menu_link(),
                     }
                 }
@@ -2190,6 +2436,100 @@ impl TerminalElement {
     }
 }
 
+/// Paints the window through a fold mapping: every visible absolute row comes
+/// from the grid directly (top-aligned, blanks at the bottom), and each
+/// folded span's first row carries its one-line summary.
+#[allow(clippy::too_many_arguments)]
+fn paint_folded_rows<T: alacritty_terminal::event::EventListener>(
+    term: &Term<T>,
+    tracker: &super::blocks::BlockTracker,
+    map: &[i64],
+    buf: &mut [RenderCell],
+    cols: usize,
+    history_size: usize,
+    palette: &[Rgb; 256],
+    colors: &PaintColors,
+    selection: Option<&SelectionRange>,
+    dim: f32,
+    under: Rgba,
+    any_selected: &mut bool,
+) {
+    debug_assert!(
+        map.len() * cols <= buf.len(),
+        "a mapping never exceeds the viewport it paints"
+    );
+    for (srow, abs) in map.iter().enumerate() {
+        let line = AlacLine((*abs - history_size as i64) as i32);
+        for (col, slot) in buf[srow * cols..(srow + 1) * cols]
+            .iter_mut()
+            .enumerate()
+            .take(term.columns().min(cols))
+        {
+            let point = AlacPoint::new(line, AlacColumn(col));
+            let mut rc = snapshot_cell(
+                &term.grid()[line][AlacColumn(col)],
+                point,
+                palette,
+                colors,
+                selection,
+            );
+            if dim < 1. {
+                rc = dim_cell(rc, dim, under);
+            }
+            *any_selected |= rc.selected;
+            *slot = rc;
+        }
+    }
+    // Folded spans collapse to their summary on their first (visible) row.
+    for span in tracker.spans() {
+        if !tracker.is_folded(span.seq) {
+            continue;
+        }
+        let Some(srow) = super::blocks::fold_summary_row(map, span.start_abs) else {
+            continue;
+        };
+        let summary = super::blocks::fold_summary(term, span, cols);
+        paint_summary_row(&mut buf[srow * cols..(srow + 1) * cols], &summary, colors);
+    }
+}
+
+/// Overwrites a painted row with a fold summary: same backgrounds (selection
+/// included), default foreground, no emphasis. Wide chars advance two cells
+/// with a spacer behind them, the way the grid lays them out.
+fn paint_summary_row(row: &mut [RenderCell], summary: &str, colors: &PaintColors) {
+    use unicode_width::UnicodeWidthChar as _;
+
+    let mut col = 0;
+    for ch in summary.chars().chain(std::iter::repeat(' ')) {
+        if col >= row.len() {
+            break;
+        }
+        let wide = ch.width().unwrap_or(1) == 2;
+        {
+            let cell = &mut row[col];
+            cell.c = ch;
+            cell.marks = None;
+            cell.fg = colors.default_fg;
+            cell.bold = false;
+            cell.italic = false;
+            cell.strikeout = false;
+            cell.underline = UnderlineKind::None;
+            cell.underline_color = None;
+            cell.spacer = false;
+            cell.match_hit = false;
+            cell.match_current = false;
+            cell.link_hover = false;
+            cell.osc8_dots = false;
+        }
+        col += 1;
+        if wide && col < row.len() {
+            row[col].spacer = true;
+            row[col].c = ' ';
+            col += 1;
+        }
+    }
+}
+
 impl IntoElement for TerminalElement {
     type Element = Self;
     fn into_element(self) -> Self::Element {
@@ -2273,6 +2613,9 @@ impl Element for TerminalElement {
                 window.scale_factor(),
                 cx,
             );
+            // Stashed for the surface-level right-click handler — see
+            // `menu_click_in_grid`.
+            view.grid_origin = Some(bounds.origin);
             // Whatever lays itself over the bottom rows (the composer)
             // measures up from the bottom, past this.
             let slack = bounds.size.height - line_height * fits as f32;
@@ -4879,5 +5222,52 @@ mod tests {
             ..blank
         };
         assert!(!lends_to_icon(&icon_row(coloured), 0, 1));
+    }
+
+    #[test]
+    fn frame_map_generation_rejects_any_single_mismatch() {
+        let base = FrameMap {
+            rows: 24,
+            history_size: 10,
+            display_offset: 2,
+            alt_screen: false,
+            fold_epoch: (1, vec![3]),
+            fold_top: 8,
+            fold_map: None,
+            gutter_markers: Vec::new(),
+        };
+        let epoch = (1, vec![3]);
+        assert!(
+            base.matches(24, 10, 2, false, &epoch),
+            "the generation it was built against reuses"
+        );
+        assert!(
+            !base.matches(25, 10, 2, false, &epoch),
+            "a resize must not reuse"
+        );
+        assert!(
+            !base.matches(24, 11, 2, false, &epoch),
+            "history growth must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 3, false, &epoch),
+            "a scroll must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 2, true, &epoch),
+            "an alt-screen flip must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 2, false, &(2, vec![3])),
+            "a closed span must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 2, false, &(1, vec![4])),
+            "a refold must not reuse"
+        );
+        assert!(
+            !base.matches(24, 10, 2, false, &(1, vec![])),
+            "an unfold must not reuse"
+        );
     }
 }

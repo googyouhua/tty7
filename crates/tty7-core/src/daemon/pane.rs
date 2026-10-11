@@ -17,8 +17,8 @@ use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
 use crate::core::term_modes::TerminalModes;
 use crate::daemon::protocol::{
-    AuthResponse, DaemonMsg, LeaseRequest, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext,
-    RemoteKind, ShellSpec, WinSize,
+    AuthResponse, COMMAND_BLOCK_CAP, CommandBlock, DaemonMsg, LeaseRequest, MAX_FRAME,
+    NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec, WinSize,
 };
 use crate::daemon::shell_integration;
 
@@ -771,6 +771,20 @@ struct PaneState {
     agent_clock: AgentClock,
     alive: bool,
     exit_code: Option<i32>,
+    /// Closed command blocks, oldest first — the tracer's table, paired
+    /// `B`→`D` in [`note_block_marks`]. Entry-1 owns the schema (see
+    /// [`CommandBlock`]); later entries only consume it.
+    command_blocks: std::collections::VecDeque<CommandBlock>,
+    /// Next block id (1-based). Bumped only when a `D` closes a pending `B`,
+    /// so ids name closings, in closing order.
+    next_block_id: u64,
+    /// The outer command's pending `B`: a `B` arrived outside the alternate
+    /// screen and its `D` has not. Only one layer of nesting is kept (see
+    /// [`note_block_marks`]); `None` while no outer command is running.
+    block_outer: Option<BlockSlot>,
+    /// The one nested command's pending `B`, opened by a `B` past the outer
+    /// slot's `C`. `None` while no nested command is running.
+    block_nested: Option<BlockSlot>,
 }
 
 /// When the agent session last heard from the agent, for the two conclusions
@@ -1395,6 +1409,12 @@ pub struct Carried {
     pub agent_argv: Option<Vec<String>>,
     pub agent_session: Option<crate::core::cli_agent::AgentSessionState>,
     pub follow_nested: bool,
+    /// The pane's closed command blocks (entry-5, CAP-5): `folded` flags ride
+    /// the handoff so an exec upgrade keeps the same folded rows.
+    pub command_blocks: Vec<CommandBlock>,
+    /// Next block id, carried so ids keep naming closings in closing order
+    /// across the exec.
+    pub next_block_id: u64,
 }
 
 /// A pty master this process inherited from its own previous image.
@@ -1623,6 +1643,10 @@ pub struct Restore {
     /// the capped snapshot, so replaying the segments alone brings the screen
     /// back under the default name.
     pub title: Option<String>,
+    /// The pane's closed command blocks at snapshot time (entry-5, CAP-5).
+    /// Replayed output rebuilds the client's spans from its marks; this table
+    /// restores the server-side `folded` flags those spans adopt.
+    pub blocks: Vec<CommandBlock>,
 }
 
 /// The OSC that puts a restored pane's title back.
@@ -1781,16 +1805,25 @@ impl DaemonPane {
         let reader_handle = pair.master.try_clone_reader()?;
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
 
-        let (ring, restored_title) = match restore {
+        // Blocks arrive with the restore (entry-5, CAP-5); the replayed marks
+        // rebuild the client's spans, and this table restores their folded
+        // flags on adopt. Fresh panes start empty.
+        let (ring, restored_title, command_blocks, next_block_id) = match restore {
             Some(restore) => {
                 let mut ring = ReplayRing::seeded(restore.segments, size);
                 if let Some(title) = restore.title.as_deref() {
                     ring.append(&retitle(title));
                 }
                 ring.append(&restore_preamble(restore.banner.as_deref()));
-                (ring, restore.title)
+                let next = restored_next_block_id(&restore.blocks);
+                (ring, restore.title, restore.blocks.into(), next)
             }
-            None => (ReplayRing::new(size), None),
+            None => (
+                ReplayRing::new(size),
+                None,
+                std::collections::VecDeque::new(),
+                0,
+            ),
         };
 
         Ok(Self::over_pty(
@@ -1830,6 +1863,10 @@ impl DaemonPane {
                 agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
+                command_blocks,
+                next_block_id,
+                block_outer: None,
+                block_nested: None,
             },
             owner,
             on_dead,
@@ -1983,6 +2020,8 @@ impl DaemonPane {
             agent: st.agent,
             agent_argv: st.agent_argv.clone(),
             agent_session: st.agent_session.clone(),
+            command_blocks: st.command_blocks.iter().cloned().collect(),
+            next_block_id: st.next_block_id,
         })
     }
 
@@ -2069,6 +2108,10 @@ impl DaemonPane {
                 agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
+                command_blocks: carried.command_blocks.into(),
+                next_block_id: carried.next_block_id,
+                block_outer: None,
+                block_nested: None,
             },
             carried.owner,
             on_dead,
@@ -2137,6 +2180,10 @@ impl DaemonPane {
             agent_clock: AgentClock::default(),
             alive: true,
             exit_code: None,
+            command_blocks: std::collections::VecDeque::new(),
+            next_block_id: 0,
+            block_outer: None,
+            block_nested: None,
         }));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(OutputGate::new());
@@ -2411,6 +2458,11 @@ impl DaemonPane {
                                     && st.osc_title.is_some()
                                     && (st.remote.is_some() || st.follow_nested));
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
+                            // Before `record_output`: `note_block_marks`
+                            // gates each mark on the modes as that mark found
+                            // them, folded from the pre-chunk state.
+                            let block_marks = std::mem::take(&mut signals.blocks);
+                            note_block_marks(&mut st, bytes, &block_marks);
                             record_output(&mut st, bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
                             apply_signals(&mut st, signals);
@@ -2682,6 +2734,7 @@ impl DaemonPane {
             at_prompt: st.shell.active.then_some(st.shell.mark_at_prompt),
             remote_prompt_seen: st.remote_prompt_seen,
             bracketed_paste: Some(st.modes.is_on(crate::core::term_modes::BRACKETED_PASTE)),
+            blocks: st.command_blocks.iter().cloned().collect(),
         }
     }
 
@@ -2772,6 +2825,37 @@ impl DaemonPane {
     /// fallback also serves local panes whose shells stopped reporting.
     pub fn set_follow_nested(&self, on: bool) {
         self.state.lock().unwrap().follow_nested = on;
+    }
+
+    /// Fold (`true`) or unfold one closed command block (entry-5, CAP-5).
+    /// Returns whether `block_id` named a row. Unknown ids are silence —
+    /// the GUI sends fire-and-forget after a local toggle, and a row the
+    /// daemon evicted (or never closed) is not an error.
+    pub fn set_block_folded(&self, block_id: u64, folded: bool) -> bool {
+        let mut st = self.state.lock().unwrap();
+        set_block_folded(&mut st, block_id, folded)
+    }
+
+    /// Drop the pane's block table (entry-5, CAP-5): the GUI cleared its
+    /// scrollback, so absolute rows were rebirthed and every span points at
+    /// rows that no longer exist. Also drops a pending open, so a `D`
+    /// arriving after the clear closes nothing.
+    pub fn clear_command_blocks(&self) {
+        let mut st = self.state.lock().unwrap();
+        clear_command_blocks(&mut st);
+    }
+
+    /// A clone of the pane's closed command blocks, oldest first, for the
+    /// periodic snapshot writer. Small (capped at [`COMMAND_BLOCK_CAP`]),
+    /// so the keeper writes it unconditionally.
+    pub fn block_table_snapshot(&self) -> Vec<CommandBlock> {
+        self.state
+            .lock()
+            .unwrap()
+            .command_blocks
+            .iter()
+            .cloned()
+            .collect()
     }
 
     fn hangup(&self) {
@@ -4166,6 +4250,176 @@ struct SniffSignals {
     shell: Vec<ShellState>,
     agent_events: Vec<crate::core::cli_agent::AgentEvent>,
     notification: Option<String>,
+    /// Block-table marks in stream order, each with the offset one past its
+    /// terminator (as [`OscTokenizer::feed_at`] reports) — see [`BlockMark`].
+    blocks: Vec<(usize, BlockMark)>,
+}
+
+/// A block-table mark: `B` opens a block, `C` says its command started, `D`
+/// closes it. `C` never opens or closes on its own — it is the watershed that
+/// tells a redrawn prompt's `B` (before any `C`, still the same run) apart
+/// from a nested command's `B` (past the `C`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockMark {
+    Open,
+    Command,
+    Close { exit_code: Option<i32> },
+}
+
+/// One pending `B`: whether its command text (`C`) has arrived yet.
+#[derive(Debug, Clone, Copy, Default)]
+struct BlockSlot {
+    has_c: bool,
+}
+
+/// Reads the block mark out of an OSC 133 payload's tail (`B`, `C`, `D;0`, …).
+fn parse_block_mark(rest: &[u8]) -> Option<BlockMark> {
+    let (&kind, tail) = rest.split_first()?;
+    if !tail.is_empty() && tail.first() != Some(&b';') {
+        return None;
+    }
+    match kind {
+        b'B' => Some(BlockMark::Open),
+        b'C' => Some(BlockMark::Command),
+        b'D' => Some(BlockMark::Close {
+            exit_code: tail
+                .strip_prefix(b";")
+                .and_then(|c| std::str::from_utf8(c).ok())
+                .and_then(|s| s.trim().parse::<i32>().ok()),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether the alternate screen is on — blocks never span it.
+fn on_alt_screen(modes: &TerminalModes) -> bool {
+    modes.is_on(47) || modes.is_on(1047) || modes.is_on(1049)
+}
+
+/// Folds one read's block marks into the pane's block table. `bytes` is the
+/// chunk the marks were sniffed from, and each mark carries the offset one
+/// past its terminator, so the alternate-screen gate reads the modes as the
+/// mark itself found them: marks under a full-screen program are that
+/// program's, not a command's, so none of `B`, `C` or `D` counts there.
+///
+/// Only one layer of nesting is kept, across two slots (outer + one nested),
+/// with `C` as the watershed. A `B` with no outer slot opens the outer one;
+/// a `B` before the outer slot's `C` refreshes it (a redrawn prompt is still
+/// one command run, not two); a `B` past it opens the nested slot, whose own
+/// pre-`C` redraws refresh it the same way. A `B` past both slots' `C` —
+/// outer past its `C` with the nested slot taken past its own — is a second
+/// layer of nesting, which is not paired: both slots are voided instead, so
+/// the stretch records no blocks rather than wrong ones, and the next `B`
+/// starts over. `C` annotates the
+/// topmost open slot; `D` closes it. An unpaired `D` (no slot open) closes
+/// nothing.
+///
+/// A slot the alternate screen touches is voided on the spot — blocks never
+/// span it — even when the program started and exited inside one read with no
+/// mark of its own, and even in a read that carried no marks at all.
+fn note_block_marks(st: &mut PaneState, bytes: &[u8], marks: &[(usize, BlockMark)]) {
+    // A scratch fold of the same modes over the same bytes, advanced mark by
+    // mark: `record_output` folds the whole chunk at once below, which would
+    // only say how the chunk ended. Starting from the pre-chunk state and
+    // feeding the same bytes lands on the same end state; the scratch copy is
+    // discarded.
+    let mut probe = st.modes.clone();
+    let mut prev = 0;
+    // Voids every pending slot: the alternate screen touched the stretch, or
+    // a second layer of nesting showed up. Either way the open runs stop
+    // meaning anything a block could honestly name.
+    let void_slots = |st: &mut PaneState| {
+        st.block_outer = None;
+        st.block_nested = None;
+    };
+    for (off, mark) in marks {
+        let end = (*off).min(bytes.len());
+        if probe.feed_alt_touched(&bytes[prev..end]) {
+            void_slots(st);
+        }
+        prev = end;
+        if on_alt_screen(&probe) {
+            continue;
+        }
+        match mark {
+            BlockMark::Open => {
+                // No outer slot, or still before the outer command's `C`: a
+                // redrawn prompt is still one run.
+                if st.block_outer.is_none_or(|slot| !slot.has_c) {
+                    st.block_outer = Some(BlockSlot::default());
+                } else if st.block_nested.is_none() {
+                    st.block_nested = Some(BlockSlot::default());
+                } else if st.block_nested.is_none_or(|slot| !slot.has_c) {
+                    // Same redraw one level down: the nested prompt redrawn
+                    // before its own `C` is still one inner run, not a layer.
+                    st.block_nested = Some(BlockSlot::default());
+                } else {
+                    // A second layer of nesting: void both slots rather than
+                    // pair wrong blocks. The `B` itself is dropped with them.
+                    void_slots(st);
+                }
+            }
+            BlockMark::Command => {
+                if let Some(slot) = st.block_nested.as_mut() {
+                    slot.has_c = true;
+                } else if let Some(slot) = st.block_outer.as_mut() {
+                    slot.has_c = true;
+                }
+            }
+            BlockMark::Close { exit_code } => {
+                let open = match (&st.block_nested, &st.block_outer) {
+                    (Some(_), _) => &mut st.block_nested,
+                    (None, Some(_)) => &mut st.block_outer,
+                    (None, None) => continue,
+                };
+                *open = None;
+                st.next_block_id += 1;
+                st.command_blocks.push_back(CommandBlock {
+                    id: st.next_block_id,
+                    exit_code: *exit_code,
+                    folded: false,
+                    truncated: false,
+                });
+                while st.command_blocks.len() > COMMAND_BLOCK_CAP {
+                    st.command_blocks.pop_front();
+                }
+            }
+        }
+    }
+    // The tail past the last mark can still hold a full-screen program that
+    // started (and maybe exited) with no further mark in this read.
+    if probe.feed_alt_touched(&bytes[prev..]) {
+        void_slots(st);
+    }
+}
+
+/// Drops the pane's block table. Wired to [`ClientMsg::ClearCommandBlocks`]
+/// (entry-5, CAP-5): the GUI cleared its scrollback, so the daemon's rows
+/// name output the client no longer shows.
+fn clear_command_blocks(st: &mut PaneState) {
+    st.command_blocks.clear();
+    st.block_outer = None;
+    st.block_nested = None;
+}
+
+/// Folds or unfolds one closed block by id (entry-5, CAP-5). Returns whether
+/// `block_id` named a row; unknown ids are silence, not an error.
+fn set_block_folded(st: &mut PaneState, block_id: u64, folded: bool) -> bool {
+    match st.command_blocks.iter_mut().find(|b| b.id == block_id) {
+        Some(block) => {
+            block.folded = folded;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The next block id for a restored table (entry-5, CAP-5): one past the
+/// highest carried id, so restored ids keep naming closings in closing order
+/// and a fresh closing never aliases a restored row. Empty tables restart
+/// at 0 — matching the fresh-pane path, where the first `D` bumps 0 to 1.
+fn restored_next_block_id(blocks: &[CommandBlock]) -> u64 {
+    blocks.iter().map(|b| b.id + 1).max().unwrap_or(0)
 }
 
 struct OscSniffer {
@@ -4192,7 +4446,7 @@ impl OscSniffer {
         let shell = &mut self.shell;
         let title_life = &mut self.title_life;
         let notes = &mut self.notes;
-        self.tok.feed(bytes, |payload| {
+        self.tok.feed_at(bytes, |off, payload| {
             // In stream order, so that a shell which re-titles itself right
             // after the `D` mark gets the last word over the retirement.
             if title_life.saw(payload) == crate::core::osc::TitleEffect::Retire {
@@ -4203,6 +4457,9 @@ impl OscSniffer {
             } else if let Some(title) = parse_osc_title(payload) {
                 signals.title = Some(title);
             } else if let Some(rest) = payload.strip_prefix(b"133;") {
+                if let Some(mark) = parse_block_mark(rest) {
+                    signals.blocks.push((off, mark));
+                }
                 if handle_osc133(shell, rest) {
                     match signals.shell.last_mut() {
                         Some(last) if last.at_prompt == shell.at_prompt => {
@@ -6096,6 +6353,444 @@ mod tests {
         Arc::new(Mutex::new(Box::new(std::io::sink())))
     }
 
+    /// Drives raw pty bytes through the sniffer and the block table the way
+    /// the reader thread does: sniff, gate on the modes as the chunk found
+    /// them, record, apply. Returns the state for the test to inspect.
+    fn feed_blocks(st: &mut PaneState, sniffer: &mut OscSniffer, bytes: &[u8]) {
+        let signals = sniffer.feed(bytes);
+        // Fan-out is skipped: these tests drive the block table only, and
+        // `apply_signals` wants a subscriber-carrying state shape.
+        note_block_marks(st, bytes, &signals.blocks);
+        record_output(st, bytes);
+    }
+
+    fn block_state() -> (PaneState, OscSniffer) {
+        (test_state(true), OscSniffer::new())
+    }
+
+    /// Perf gate A-track (daemon): an 11 MB `cat`-like feed with block marks
+    /// paired must cost <=10% over the same feed without marks (5-run
+    /// average). Deterministic and CI-runnable; the gate reads the increment's
+    /// share of the total feed time, which is the only part a user could
+    /// perceive. Prints the averages and the share — the numbers, not just a
+    /// pass, are the evidence.
+    #[test]
+    fn perf_gate_block_pairing_overhead_within_ten_percent() {
+        const TOTAL: usize = 11 * 1024 * 1024;
+        const CHUNK: usize = 64 * 1024;
+        const RUNS: usize = 5;
+        const COMMANDS: usize = 200;
+
+        const LINE: &[u8] =
+            b"the quick brown fox jumps over the lazy dog 0123456789 !@#$%^&*()\r\n";
+        const MARK_B: &[u8] = b"\x1b]133;B\x07";
+        const MARK_C: &[u8] = b"\x1b]133;C;cat shakespeare.txt\x07";
+        const MARK_D: &[u8] = b"\x1b]133;D;0\x07";
+
+        // The same text in both payloads: `marked` only adds the B/C/D
+        // triples (one per command), so the delta is the pairing cost plus
+        // the bytes of the marks themselves (conservative: it overstates
+        // pairing alone).
+        let mut text = Vec::with_capacity(TOTAL);
+        while text.len() < TOTAL {
+            let take = (TOTAL - text.len()).min(LINE.len());
+            text.extend_from_slice(&LINE[..take]);
+        }
+        assert_eq!(text.len(), TOTAL);
+        let per = TOTAL / COMMANDS;
+        let mut marked = Vec::with_capacity(TOTAL + 8192);
+        for piece in text.chunks(per) {
+            marked.extend_from_slice(MARK_B);
+            marked.extend_from_slice(MARK_C);
+            marked.extend_from_slice(piece);
+            marked.extend_from_slice(MARK_D);
+        }
+
+        // One pass through the reader thread's hot path per chunk: sniff,
+        // pair the block marks against the modes as the chunk found them,
+        // record, apply — exactly the order the live reader uses.
+        fn feed_once(payload: &[u8]) -> (std::time::Duration, usize) {
+            let mut st = test_state(true);
+            let mut sniffer = OscSniffer::new();
+            let start = std::time::Instant::now();
+            for chunk in payload.chunks(CHUNK) {
+                let mut signals = sniffer.feed(chunk);
+                let blocks = std::mem::take(&mut signals.blocks);
+                note_block_marks(&mut st, chunk, &blocks);
+                record_output(&mut st, chunk);
+                apply_signals(&mut st, signals);
+            }
+            (start.elapsed(), st.command_blocks.len())
+        }
+
+        // Warm up once so a cold allocator does not bill the first timed run.
+        feed_once(&text[..CHUNK]);
+
+        let mut plain_sum = std::time::Duration::ZERO;
+        let mut marked_sum = std::time::Duration::ZERO;
+        let mut paired = 0;
+        for _ in 0..RUNS {
+            let (dt, _) = feed_once(&text);
+            plain_sum += dt;
+            let (dt, blocks) = feed_once(&marked);
+            marked_sum += dt;
+            paired = blocks;
+        }
+        assert_eq!(
+            paired, COMMANDS,
+            "the marked feed must actually pair every command"
+        );
+        let plain = plain_sum.as_secs_f64() / RUNS as f64;
+        let marked_avg = marked_sum.as_secs_f64() / RUNS as f64;
+        let share = (marked_avg - plain) / marked_avg;
+        println!(
+            "perf_gate daemon 11MB feed ({RUNS}-run avg): plain {plain:.3}s, \
+             marked {marked_avg:.3}s, increment {:.3}s ({:.2}% of feed total)",
+            marked_avg - plain,
+            share * 100.0,
+        );
+        assert!(
+            (0.0..=0.10).contains(&share),
+            "block pairing took {share:.2}% of the feed time (plain {plain:.3}s, marked {marked_avg:.3}s)"
+        );
+    }
+
+    /// Matrix row: a normal command brackets exactly one block.
+    #[test]
+    fn command_blocks_pair_b_to_d() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07$ cargo build\x1b]133;C;cargo build\x07output\x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        let block = &st.command_blocks[0];
+        assert_eq!(block.id, 1);
+        assert_eq!(block.exit_code, Some(0));
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+    }
+
+    /// Matrix row: an interrupted command still closes, with its real code.
+    #[test]
+    fn command_blocks_record_interrupt_exit_codes() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07\x1b]133;C;sleep 60\x07^C\x1b]133;D;130\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].exit_code, Some(130));
+    }
+
+    /// Matrix row: output with no marks builds nothing.
+    #[test]
+    fn command_blocks_ignore_output_without_marks() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"plain output, no integration\r\nmore\r\n",
+        );
+        assert!(st.command_blocks.is_empty());
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+    }
+
+    /// Matrix row: marks under a full-screen program build nothing.
+    #[test]
+    fn command_blocks_ignore_marks_on_the_alternate_screen() {
+        let (mut st, mut sniffer) = block_state();
+        st.modes.feed(b"\x1b[?1049h");
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07tui noise\x1b]133;D;0\x07",
+        );
+        assert!(st.command_blocks.is_empty());
+        // …while the same marks off it pair normally.
+        st.modes.feed(b"\x1b[?1049l");
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07cmd\x1b]133;D;0\x07");
+        assert_eq!(st.command_blocks.len(), 1);
+    }
+
+    /// Matrix row: a `B` with no `D` yet (command still running) leaves the
+    /// table alone; the `D` closes it — with no `C` anywhere in between.
+    #[test]
+    fn command_blocks_close_without_a_c_mark() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07$ sleep 60");
+        assert!(st.command_blocks.is_empty());
+        assert!(st.block_outer.is_some());
+        feed_blocks(&mut st, &mut sniffer, b"output\x1b]133;D;0\x07");
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].id, 1);
+    }
+
+    /// A `D` with no `B` before it closes nothing — e.g. the shell's own
+    /// startup mark, or a replay that starts mid-command.
+    #[test]
+    fn command_blocks_ignore_an_unpaired_d() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;D;0\x07");
+        assert!(st.command_blocks.is_empty());
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+    }
+
+    /// A redrawn prompt re-arms the one pending block instead of opening a
+    /// second: one command run is one block.
+    #[test]
+    fn command_blocks_coalesce_a_second_b_before_the_d() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07\x1b]133;B\x07cmd\x1b]133;D;1\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].exit_code, Some(1));
+    }
+
+    /// One nested layer pairs three blocks: each inner `B…D` closes on its
+    /// own `D`, and the outer `D` still finds the outer `B` afterwards — the
+    /// mismatch this entry fixes (the first inner `D` used to close the
+    /// outer run and drop the whole outer command).
+    #[test]
+    fn command_blocks_pair_one_nested_layer() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07\
+              \x1b]133;B\x07inner-1\x1b]133;C;first\x07out-1\x1b]133;D;0\x07\
+              \x1b]133;B\x07inner-2\x1b]133;C;second\x07out-2\x1b]133;D;3\x07\
+              \x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 3);
+        let exits: Vec<Option<i32>> = st.command_blocks.iter().map(|b| b.exit_code).collect();
+        assert_eq!(exits, vec![Some(0), Some(3), Some(0)]);
+        let ids: Vec<u64> = st.command_blocks.iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+    }
+
+    /// A `B` past the outer `C` with no nested slot opens one — even when the
+    /// nested command itself sends no `C`: `C` is a watershed, never a gate.
+    #[test]
+    fn command_blocks_nest_without_an_inner_c() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07\
+              \x1b]133;B\x07inner-output\x1b]133;D;0\x07\
+              \x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 2);
+    }
+
+    /// A `C` with no open slot annotates nothing and opens nothing: inner raw
+    /// output under an outer command leaves just the outer block.
+    #[test]
+    fn command_blocks_ignore_a_c_with_no_open_slot() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07raw inner output\x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+    }
+
+    /// A second layer of nesting voids both slots: the stretch records no
+    /// blocks rather than wrong ones, later `D`s close nothing, and the next
+    /// `B` starts over.
+    #[test]
+    fn command_blocks_void_both_slots_on_a_second_layer() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07\
+              \x1b]133;B\x07inner\x1b]133;C;ssh deeper\x07\
+              \x1b]133;B\x07too deep\x07",
+        );
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+        // The inner and outer `D`s arrive at voided slots: nothing closes.
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"lost output\x1b]133;D;0\x07more lost\x1b]133;D;0\x07",
+        );
+        assert!(st.command_blocks.is_empty());
+        // A fresh `B` starts over with clean ids.
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07recovered\x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].id, 1);
+    }
+
+    /// A redrawn prompt past no `C` is still one run — the `C` watershed only
+    /// splits once the command actually started.
+    #[test]
+    fn command_blocks_coalesce_redraws_before_the_c() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07\x1b]133;B\x07cmd\x1b]133;C;cmd\x07out\x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+    }
+
+    /// The nested prompt redrawn before its own `C` is still one inner run,
+    /// not a second layer: redraws coalesce per slot.
+    #[test]
+    fn command_blocks_coalesce_nested_redraws_before_the_c() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07outer\x1b]133;C;ssh far\x07\
+              \x1b]133;B\x07\x1b]133;B\x07inner\x1b]133;C;cmd\x07out\x1b]133;D;0\x07\
+              \x1b]133;D;0\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 2);
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+    }
+
+    /// A full-screen program between a `B` and its `D` voids the pending run —
+    /// blocks never span the alternate screen — even when it starts and exits
+    /// inside one read, and even when the read carries no marks at all.
+    #[test]
+    fn command_blocks_void_pending_runs_across_the_alternate_screen() {
+        for chunked in [false, true] {
+            let (mut st, mut sniffer) = block_state();
+            feed_blocks(
+                &mut st,
+                &mut sniffer,
+                b"\x1b]133;B\x07edit\x1b]133;C;nvim x\x07",
+            );
+            assert!(st.block_outer.is_some());
+            if chunked {
+                feed_blocks(&mut st, &mut sniffer, b"\x1b[?1049h");
+                feed_blocks(&mut st, &mut sniffer, b"screen paint");
+                feed_blocks(&mut st, &mut sniffer, b"\x1b[?1049l");
+            } else {
+                feed_blocks(&mut st, &mut sniffer, b"\x1b[?1049hpaint\x1b[?1049l");
+            }
+            assert!(
+                st.block_outer.is_none() && st.block_nested.is_none(),
+                "chunked={chunked}"
+            );
+            feed_blocks(&mut st, &mut sniffer, b"after\x1b]133;D;0\x07");
+            assert!(st.command_blocks.is_empty(), "chunked={chunked}");
+        }
+    }
+
+    /// An unparsable exit still closes the block; the code is just unknown.
+    #[test]
+    fn command_blocks_close_on_an_unparsable_exit_code() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07cmd\x1b]133;D;oops\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert_eq!(st.command_blocks[0].exit_code, None);
+    }
+
+    /// Matrix row: clearing drops the table (and any pending open), so no
+    /// stale row survives into the next command.
+    #[test]
+    fn clear_command_blocks_drops_rows_and_pending_opens() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(
+            &mut st,
+            &mut sniffer,
+            b"\x1b]133;B\x07a\x1b]133;D;0\x07\x1b]133;B\x07",
+        );
+        assert_eq!(st.command_blocks.len(), 1);
+        assert!(st.block_outer.is_some());
+        clear_command_blocks(&mut st);
+        assert!(st.command_blocks.is_empty());
+        assert!(st.block_outer.is_none() && st.block_nested.is_none());
+        // The orphaned `D` of the cleared pending open closes nothing.
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;D;0\x07");
+        assert!(st.command_blocks.is_empty());
+    }
+
+    /// Entry-5: folding one row leaves the rest alone; unknown ids are
+    /// silence so a fire-and-forget toggle against an evicted row is not an
+    /// error.
+    #[test]
+    fn set_block_folded_toggles_one_row_and_ignores_unknown_ids() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07a\x1b]133;D;0\x07");
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07b\x1b]133;D;1\x07");
+        assert!(set_block_folded(&mut st, 1, true));
+        assert!(st.command_blocks[0].folded);
+        assert!(!st.command_blocks[1].folded);
+        assert!(set_block_folded(&mut st, 1, false));
+        assert!(!st.command_blocks[0].folded);
+        assert!(!set_block_folded(&mut st, 999, true));
+    }
+
+    /// Entry-5: a restore continues ids past the carried table so a fresh
+    /// closing never aliases a restored row; empty tables restart like fresh
+    /// panes.
+    #[test]
+    fn restored_next_block_id_continues_past_the_carried_table() {
+        assert_eq!(restored_next_block_id(&[]), 0);
+        let blocks = vec![
+            CommandBlock {
+                id: 3,
+                exit_code: Some(0),
+                folded: true,
+                truncated: false,
+            },
+            CommandBlock {
+                id: 7,
+                exit_code: Some(1),
+                folded: false,
+                truncated: false,
+            },
+        ];
+        assert_eq!(restored_next_block_id(&blocks), 8);
+    }
+
+    /// Entry-5: clearing drops folded flags with the rows — no stale fold
+    /// survives into the next command.
+    #[test]
+    fn clear_command_blocks_drops_folded_flags_with_the_rows() {
+        let (mut st, mut sniffer) = block_state();
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07a\x1b]133;D;0\x07");
+        assert!(set_block_folded(&mut st, 1, true));
+        clear_command_blocks(&mut st);
+        assert!(st.command_blocks.is_empty());
+        feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07b\x1b]133;D;0\x07");
+        assert!(!st.command_blocks[0].folded);
+    }
+
+    /// The table is bounded: the 201st closing evicts the oldest.
+    #[test]
+    fn command_blocks_evict_oldest_first_at_the_cap() {
+        let (mut st, mut sniffer) = block_state();
+        for _ in 0..COMMAND_BLOCK_CAP + 1 {
+            feed_blocks(&mut st, &mut sniffer, b"\x1b]133;B\x07c\x1b]133;D;0\x07");
+        }
+        assert_eq!(st.command_blocks.len(), COMMAND_BLOCK_CAP);
+        assert_eq!(st.command_blocks[0].id, 2);
+        assert_eq!(
+            st.command_blocks[COMMAND_BLOCK_CAP - 1].id,
+            (COMMAND_BLOCK_CAP + 1) as u64
+        );
+    }
+
     fn test_state(alive: bool) -> PaneState {
         PaneState {
             id: 0,
@@ -6125,6 +6820,10 @@ mod tests {
             agent_clock: AgentClock::default(),
             alive,
             exit_code: None,
+            command_blocks: std::collections::VecDeque::new(),
+            next_block_id: 0,
+            block_outer: None,
+            block_nested: None,
         }
     }
 

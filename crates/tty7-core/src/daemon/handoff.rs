@@ -103,6 +103,15 @@ struct PaneRecord {
     /// panes, since the switch defaults on everywhere.
     #[serde(default = "follow_nested_default")]
     follow_nested: bool,
+    /// The pane's closed command blocks (entry-5, CAP-5). Newer than the
+    /// fields around it, so an old image's blob still parses — defaulting to
+    /// no blocks, like a fresh pane.
+    #[serde(default)]
+    blocks: Vec<crate::daemon::protocol::CommandBlock>,
+    /// Next block id, so ids keep naming closings in closing order across
+    /// the exec. Defaults to 0, matching a fresh pane.
+    #[serde(default)]
+    next_block_id: u64,
     /// Length of this pane's ring in the data section, which follows the
     /// manifest in pane order.
     ring_len: u32,
@@ -252,6 +261,8 @@ fn stage(panes: &[Carried], next_pane_id: u64) -> std::io::Result<std::fs::File>
             agent_argv: pane.agent_argv.clone(),
             agent_session: pane.agent_session.clone(),
             follow_nested: pane.follow_nested,
+            blocks: pane.command_blocks.clone(),
+            next_block_id: pane.next_block_id,
             ring_len: encoded.len() as u32,
         });
         data.extend_from_slice(&encoded);
@@ -387,6 +398,8 @@ pub fn adopt(fd: RawFd) -> Option<Adopted> {
             agent_argv: record.agent_argv,
             agent_session: record.agent_session,
             follow_nested: record.follow_nested,
+            command_blocks: record.blocks,
+            next_block_id: record.next_block_id,
         });
     }
 
@@ -432,6 +445,8 @@ mod tests {
             agent_argv: None,
             agent_session: None,
             follow_nested: false,
+            command_blocks: Vec::new(),
+            next_block_id: 0,
         }
     }
 
@@ -477,6 +492,29 @@ mod tests {
             "a silent pane is still a live shell"
         );
         assert!(adopted.panes[0].ring.is_empty());
+    }
+
+    /// Entry-5: folds ride the exec handoff with the pane, and the next id
+    /// keeps naming closings in closing order on the far side.
+    #[test]
+    fn folded_blocks_cross_the_blob_with_their_ids() {
+        let mut pane = carried(7, 31, b"first pane");
+        pane.command_blocks = vec![crate::daemon::protocol::CommandBlock {
+            id: 4,
+            exit_code: Some(0),
+            folded: true,
+            truncated: false,
+        }];
+        pane.next_block_id = 4;
+        let staged = stage(&[pane], 10).expect("stage the blob");
+        let adopted = adopt(std::os::fd::IntoRawFd::into_raw_fd(staged)).expect("read it back");
+        assert_eq!(adopted.panes[0].command_blocks.len(), 1);
+        assert_eq!(adopted.panes[0].command_blocks[0].id, 4);
+        assert!(
+            adopted.panes[0].command_blocks[0].folded,
+            "an exec upgrade must not unfold what the user folded"
+        );
+        assert_eq!(adopted.panes[0].next_block_id, 4);
     }
 
     #[test]

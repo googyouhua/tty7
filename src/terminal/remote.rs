@@ -12,6 +12,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
+use crate::terminal::blocks::{BlockStore, BlockTracker, cut_anchor, prune_top_abs};
 use crate::terminal::command_cursor::{CommandCursorStyle, CommandMark};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
 use crate::terminal::prompt_reflow::{PromptBreak, PromptMark};
@@ -112,6 +113,10 @@ struct ReaderSignals {
     osc_notes: OscNotes,
     clipboard_write_busy: Arc<AtomicBool>,
     lease: Arc<Mutex<Option<String>>>,
+    /// The pane's command blocks, built live from the same marks the grid
+    /// parses — see `crate::terminal::blocks`. Written by the reader thread,
+    /// read by the paint path and the block actions.
+    blocks: BlockStore,
     /// Whether this pane's pty is one a conhost renders into, and so whether
     /// the reader puts back the cursor a repaint parked. Decided per pane from
     /// its [`PtySource`], and shared rather than copied because the reader can
@@ -636,6 +641,11 @@ pub struct RemoteTerminal {
     /// Who runs this pane at their own size — a phone, by the name it paired
     /// under — while the daemon says so. See [`Self::take_back`].
     lease: Arc<Mutex<Option<String>>>,
+    /// The pane's command blocks — see `crate::terminal::blocks`. Shared with
+    /// the pane's reader, which builds them, and the view, which folds, jumps
+    /// and copies them. On the pane rather than its view so a relink keeps
+    /// both the spans and the fold state.
+    blocks: BlockStore,
     route: PaneRoute,
     proxy: EventProxy,
     reader_thread: Option<JoinHandle<()>>,
@@ -950,6 +960,13 @@ impl RemoteTerminal {
         // Drop them; the daemon does not replay out-of-band image frames, so a
         // browser redraws on its next transmit (see issue #213's reattach note).
         self.images.clear();
+        // Same for the block spans: absolute rows were rebirthed, and the
+        // replay below rebuilds them. The watermark is kept — daemon ids
+        // outlive the grid — and no resync is armed, so the next adoption
+        // pairs the rebuilt spans against the table's tail.
+        if let Ok(mut tracker) = self.blocks.lock() {
+            tracker.reset_for_relink();
+        }
 
         let quit = Arc::new(AtomicBool::new(false));
         let reader = Self::spawn_reader(
@@ -980,6 +997,7 @@ impl RemoteTerminal {
                 osc_notes: self.osc_notes.clone(),
                 clipboard_write_busy: self.clipboard_write_busy.clone(),
                 lease: self.lease.clone(),
+                blocks: self.blocks.clone(),
                 // Deliberately the pane's existing answer rather than one
                 // rebuilt from `route`: the pty on the far side is the same pty
                 // it was before the link dropped, and only this value still
@@ -1085,6 +1103,7 @@ impl RemoteTerminal {
         let osc_notes = OscNotes::default();
         let clipboard_write_busy = Arc::new(AtomicBool::new(false));
         let lease = Arc::new(Mutex::new(None));
+        let blocks: BlockStore = Arc::new(Mutex::new(BlockTracker::default()));
 
         let reader_quit = Arc::new(AtomicBool::new(false));
         let local_conpty = Arc::new(AtomicBool::new(pty == PtySource::LocalConpty));
@@ -1114,6 +1133,7 @@ impl RemoteTerminal {
                 osc_notes: osc_notes.clone(),
                 clipboard_write_busy: clipboard_write_busy.clone(),
                 lease: lease.clone(),
+                blocks: blocks.clone(),
                 local_conpty: local_conpty.clone(),
                 color_scheme_updates: color_scheme_updates.clone(),
             },
@@ -1156,6 +1176,7 @@ impl RemoteTerminal {
             note_budget: Mutex::default(),
             clipboard_write_busy,
             lease,
+            blocks,
             route: PaneRoute::Local,
             proxy,
             reader_thread: Some(reader_thread),
@@ -1234,6 +1255,7 @@ impl RemoteTerminal {
                     osc_notes,
                     clipboard_write_busy,
                     lease,
+                    blocks,
                     local_conpty,
                     color_scheme_updates,
                 } = signals;
@@ -1263,6 +1285,11 @@ impl RemoteTerminal {
                 let mut command_tok = OscTokenizer::new(&[b"133"]);
                 let mut command_cursor = CommandCursorStyle::default();
                 let mut prompt_break = PromptBreak::default();
+                // The block table's twin of the daemon's scratch mode fold:
+                // persistent across batches (split sequences carry), folded
+                // cut by cut so a full-screen program inside one batch voids
+                // before the cuts past it are acted on.
+                let mut alt_probe = TerminalModes::new();
                 // A new link replays the pane from scratch, 2031 included
                 // (`term_modes` restores it ahead of the ring).
                 let mut modes = TerminalModes::new();
@@ -1351,6 +1378,13 @@ impl RemoteTerminal {
                                     });
                                 }
                                 command_cuts(&mut command_tok, &out_batch, &mut cuts);
+                                // Fold the same bytes for alternate-screen
+                                // touch in cut order: a program that started
+                                // and exited inside this batch voids before
+                                // the cuts past it are acted on, which the
+                                // grid's endpoint mode alone cannot see.
+                                let alt_voids = alt_void_flags(&mut alt_probe, &out_batch, &cuts);
+                                let mut alt_cut = 0usize;
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let Some(waited) = feed_grid(
@@ -1359,15 +1393,25 @@ impl RemoteTerminal {
                                         &out_batch,
                                         cuts,
                                         &quit,
-                                        |term, cut| match cut {
-                                            ReaderCut::Parked(cut) => {
-                                                parked_cursor.apply(term, cut)
-                                            }
-                                            ReaderCut::Command(mark) => {
-                                                command_cursor.apply(term, mark)
-                                            }
-                                            ReaderCut::Prompt(mark) => {
-                                                prompt_break.apply(term, mark)
+                                        |term, cut| {
+                                            let i = alt_cut;
+                                            alt_cut += 1;
+                                            void_blocks_on_touch(
+                                                &blocks,
+                                                alt_voids.get(i).is_some_and(|v| *v),
+                                            );
+                                            match cut {
+                                                ReaderCut::Parked(cut) => {
+                                                    parked_cursor.apply(term, cut)
+                                                }
+                                                ReaderCut::Command(mark, _) => {
+                                                    command_cursor.apply(&mut *term, mark);
+                                                    note_block_cut(&mut *term, &blocks, &cut);
+                                                }
+                                                ReaderCut::Prompt(mark) => {
+                                                    prompt_break.apply(&mut *term, mark);
+                                                    note_block_cut(&mut *term, &blocks, &cut);
+                                                }
                                             }
                                         },
                                     ) else {
@@ -1378,6 +1422,16 @@ impl RemoteTerminal {
                                         tr_adv_t += t0.elapsed() - waited;
                                     }
                                 }
+                                // The tail past the last cut can still hold a
+                                // program that started and exited with no
+                                // further mark in this batch.
+                                void_blocks_on_touch(
+                                    &blocks,
+                                    alt_voids.last().is_some_and(|v| *v),
+                                );
+                                // A full-screen program between two marks owns
+                                // the open runs even though no cut said so.
+                                void_blocks_on_alt(&term, &blocks);
                                 if let Ok(mut notes) = osc_notes.lock() {
                                     osc.feed(&out_batch, &mut *notes);
                                 }
@@ -1517,14 +1571,26 @@ impl RemoteTerminal {
                                 // comes back with the prompt's cursor.
                                 let mut cuts: Vec<(usize, ReaderCut)> = Vec::new();
                                 command_cuts(&mut command_tok, &bytes, &mut cuts);
+                                // As in the live batch: a program inside the
+                                // replay voids before the cuts past it act.
+                                let alt_voids = alt_void_flags(&mut alt_probe, &bytes, &cuts);
+                                let mut alt_cut = 0usize;
                                 let fed =
                                     feed_grid(&term, &mut processor, &bytes, cuts, &quit, |term, cut| {
+                                        let i = alt_cut;
+                                        alt_cut += 1;
+                                        void_blocks_on_touch(
+                                            &blocks,
+                                            alt_voids.get(i).is_some_and(|v| *v),
+                                        );
                                         match cut {
-                                            ReaderCut::Command(mark) => {
-                                                command_cursor.apply(term, mark)
+                                            ReaderCut::Command(mark, _) => {
+                                                command_cursor.apply(&mut *term, mark);
+                                                note_block_cut(&mut *term, &blocks, &cut);
                                             }
                                             ReaderCut::Prompt(mark) => {
-                                                prompt_break.apply(term, mark)
+                                                prompt_break.apply(&mut *term, mark);
+                                                note_block_cut(&mut *term, &blocks, &cut);
                                             }
                                             ReaderCut::Parked(_) => {}
                                         }
@@ -1532,6 +1598,16 @@ impl RemoteTerminal {
                                 if fed.is_none() {
                                     return;
                                 }
+                                // The tail past the last cut, as in the live
+                                // batch.
+                                void_blocks_on_touch(
+                                    &blocks,
+                                    alt_voids.last().is_some_and(|v| *v),
+                                );
+                                // The replay may end mid-program: what it
+                                // leaves on the alternate screen still owns
+                                // the open runs.
+                                void_blocks_on_alt(&term, &blocks);
                                 if processor.sync_timeout().sync_timeout().is_some() {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
@@ -1982,6 +2058,24 @@ impl RemoteTerminal {
         }
     }
 
+    /// Report a local fold toggle to the daemon (entry-5, CAP-5).
+    /// Fire-and-forget like [`Self::set_follow_nested`]: the local view
+    /// already updated, and an unknown id on the far side is silence.
+    pub fn set_block_folded(&self, pane_id: u64, block_id: u64, folded: bool) {
+        self.link.send(ClientMsg::SetBlockFolded {
+            pane_id,
+            block_id,
+            folded,
+        });
+    }
+
+    /// Tell the daemon its block table is stale (entry-5, CAP-5): the GUI
+    /// cleared its scrollback. Fire-and-forget; the local spans already
+    /// dropped through the clear path.
+    pub fn clear_command_blocks(&self, pane_id: u64) {
+        self.link.send(ClientMsg::ClearCommandBlocks { pane_id });
+    }
+
     pub fn resize(&mut self, size: TermSize, cell_w: u16, cell_h: u16) {
         let echoed = self.resize_echoed();
         // The cell size has to be part of the early-out, not just cols/rows: it
@@ -2059,6 +2153,11 @@ impl RemoteTerminal {
 
     pub fn prompt_cycle(&self) -> u64 {
         self.shell_state.lock().map(|s| s.cycle).unwrap_or(0)
+    }
+
+    /// The pane's command blocks — see `crate::terminal::blocks`.
+    pub fn block_tracker(&self) -> BlockStore {
+        self.blocks.clone()
     }
 
     pub fn last_exit_code(&self) -> Option<i32> {
@@ -2582,6 +2681,24 @@ impl RemoteTerminal {
             }
         }
         query(pane_id).unwrap_or_default()
+    }
+
+    /// The same table through this pane's own route: a pane on a remote host
+    /// is owned by the daemon at the far end of [`Self::route`], and only a
+    /// query sent down that link can see its blocks. Unreachable links read
+    /// as empty, with the same silent-default error semantics as
+    /// [`Self::query_procs`] — adoption enriches spans, so a failed poll is
+    /// silence, never a stall.
+    pub fn query_procs_routed(&self, pane_id: u64) -> PaneProcs {
+        fn query(route: &PaneRoute, pane_id: u64) -> anyhow::Result<PaneProcs> {
+            let mut stream = connect_routed(route)?;
+            ClientMsg::QueryProcs { pane_id }.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::Procs(procs) => Ok(procs),
+                other => Err(anyhow::anyhow!("unexpected reply to QueryProcs: {other:?}")),
+            }
+        }
+        query(&self.route, pane_id).unwrap_or_default()
     }
 }
 
@@ -3601,7 +3718,7 @@ mod chunking_tests {
         let mut processor: ansi::Processor = ansi::Processor::new();
         let cuts = offsets
             .iter()
-            .map(|&off| (off, ReaderCut::Command(CommandMark::Finished)))
+            .map(|&off| (off, ReaderCut::Command(CommandMark::Finished, None)))
             .collect();
         let mut stops = Vec::new();
         let fed = feed_grid(
@@ -3636,11 +3753,267 @@ mod chunking_tests {
     }
 }
 
+/// Block spans as the reader builds them: anchors, exit codes and pairing,
+/// through the same `command_cuts` + `feed_grid` + `note_block_cut` path the
+/// live batches and the replay take.
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+    use crate::daemon::protocol::CommandBlock;
+    use crate::terminal::blocks::{BlockStore, block_text};
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::grid::Scroll;
+
+    const COLS: usize = 24;
+    const ROWS: usize = 8;
+
+    struct Harness {
+        term: FairMutex<Term<VoidListener>>,
+        processor: ansi::Processor,
+        tok: OscTokenizer,
+        store: BlockStore,
+        alt: TerminalModes,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            Self::with_history(crate::core::config::Config::default().scrollback_limit)
+        }
+
+        fn with_history(scrolling_history: usize) -> Self {
+            let mut config = terminal_config_from_user(&crate::core::config::Config::default());
+            config.scrolling_history = scrolling_history;
+            Self {
+                term: FairMutex::new(Term::new(config, &TermSize::new(COLS, ROWS), VoidListener)),
+                processor: ansi::Processor::new(),
+                tok: OscTokenizer::new(&[b"133"]),
+                store: BlockStore::default(),
+                alt: TerminalModes::new(),
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            let mut cuts = Vec::new();
+            command_cuts(&mut self.tok, bytes, &mut cuts);
+            // The same cut-ordered alt fold the live batches and the replay
+            // take, so the harness voids the same stretches they do.
+            let voids = alt_void_flags(&mut self.alt, bytes, &cuts);
+            let mut at_cut = 0usize;
+            let quit = AtomicBool::new(false);
+            let fed = feed_grid(
+                &self.term,
+                &mut self.processor,
+                bytes,
+                cuts,
+                &quit,
+                |term, cut| {
+                    let i = at_cut;
+                    at_cut += 1;
+                    void_blocks_on_touch(&self.store, voids.get(i).is_some_and(|v| *v));
+                    note_block_cut(&mut *term, &self.store, &cut)
+                },
+            );
+            assert!(fed.is_some());
+            void_blocks_on_touch(&self.store, voids.last().is_some_and(|v| *v));
+            void_blocks_on_alt(&self.term, &self.store);
+        }
+
+        fn spans(&self) -> Vec<crate::terminal::blocks::BlockSpan> {
+            self.store.lock().unwrap().spans().to_vec()
+        }
+    }
+
+    /// The `D`'s exit code rides its cut into the span.
+    #[test]
+    fn the_d_mark_s_exit_code_rides_its_cut() {
+        let mut tok = OscTokenizer::new(&[b"133"]);
+        let mut cuts = Vec::new();
+        command_cuts(&mut tok, b"\x1b]133;C\x07run\x1b]133;D;130\x07", &mut cuts);
+        assert!(matches!(
+            cuts.as_slice(),
+            [
+                (_, ReaderCut::Command(CommandMark::Started, None)),
+                (_, ReaderCut::Command(CommandMark::Finished, Some(130)))
+            ]
+        ));
+        let mut cuts = Vec::new();
+        command_cuts(&mut tok, b"\x1b]133;D\x07", &mut cuts);
+        assert!(matches!(
+            cuts.as_slice(),
+            [(_, ReaderCut::Command(CommandMark::Finished, None))]
+        ));
+    }
+
+    /// `C` never gates: `B … D` with no `C` builds a span, while `C … D`
+    /// with no `B` builds nothing — through the real reader path.
+    #[test]
+    fn b_to_d_pairs_without_a_c_mark() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ sleep 60\r\noutput\r\n\x1b]133;D;0\x07");
+        let spans = h.spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].exit_code, Some(0));
+
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;C;sleep 60\x07output\r\n\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+    }
+
+    /// One nested layer builds three spans through the real reader path — the
+    /// same mark sequence the daemon test pairs into three blocks, so both
+    /// ends agree on the same stream.
+    #[test]
+    fn one_nested_layer_builds_three_spans() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ ssh far\r\n");
+        h.feed(b"\x1b]133;C;ssh far\x07");
+        h.feed(b"\x1b]133;B\x07$ first\r\nfirst-out\r\n\x1b]133;D;0\x07");
+        h.feed(b"\x1b]133;B\x07$ second\r\nsecond-out\r\n\x1b]133;D;3\x07");
+        h.feed(b"back home\r\n\x1b]133;D;0\x07");
+        let spans = h.spans();
+        assert_eq!(spans.len(), 3);
+        let exits: Vec<Option<i32>> = spans.iter().map(|s| s.exit_code).collect();
+        assert_eq!(exits, vec![Some(0), Some(3), Some(0)]);
+        // Close order, outer first-started: the inners land before it.
+        assert!(spans[2].start_abs < spans[0].start_abs);
+        assert!(spans[0].end_abs <= spans[1].start_abs);
+    }
+
+    /// A second layer of nesting voids both pending runs: later `D`s close
+    /// nothing, and the next command starts over.
+    #[test]
+    fn a_second_nesting_layer_voids_both_pending_runs() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ ssh far\r\n\x1b]133;C;ssh far\x07");
+        h.feed(b"\x1b]133;B\x07$ ssh deeper\r\n\x1b]133;C;ssh deeper\x07");
+        h.feed(b"\x1b]133;B\x07too deep\r\n");
+        h.feed(b"lost\x1b]133;D;0\x07more lost\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+        h.feed(b"\x1b]133;B\x07$ recovered\r\nback\r\n\x1b]133;D;0\x07");
+        assert_eq!(h.spans().len(), 1);
+    }
+
+    /// A full-screen program between a `B` and its `D` voids the pending run:
+    /// no span spans the alternate screen.
+    #[test]
+    fn a_full_screen_program_between_b_and_d_builds_no_span() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ nvim x\r\n\x1b]133;C;nvim x\x07");
+        h.feed(b"\x1b[?1049h");
+        h.feed(b"screen paint");
+        h.feed(b"\x1b[?1049l");
+        h.feed(b"after\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+    }
+
+    /// A program that starts and exits inside one batch voids the pending run
+    /// too: the grid's endpoint mode never saw it, so only the cut-ordered
+    /// fold catches it — the client's twin of the server's single-chunk case.
+    #[test]
+    fn a_full_screen_program_inside_one_batch_builds_no_span() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ nvim x\r\n\x1b]133;C;nvim x\x07");
+        h.feed(b"\x1b[?1049hpaint\x1b[?1049l");
+        h.feed(b"after\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+        // Mixed into one batch with the marks around it, the `D` past the
+        // program still lands orphaned — while a later command pairs again.
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ nvim x\r\n\x1b]133;C;nvim x\x07\x1b[?1049hpaint\x1b[?1049lafter\x1b]133;D;0\x07");
+        assert!(h.spans().is_empty());
+        h.feed(b"\x1b]133;B\x07$ recovered\r\nback\r\n\x1b]133;D;0\x07");
+        assert_eq!(h.spans().len(), 1);
+    }
+
+    /// A `D` landing mid-scroll must anchor at the true absolute row
+    /// (`history + line`, no `display_offset`): subtracting the scroll
+    /// distance would understate `end_abs`, leaking folded rows and dropping
+    /// trailing rows from the copy.
+    #[test]
+    fn a_d_landing_while_scrolled_anchors_the_true_absolute_row() {
+        let mut h = Harness::new();
+        h.feed(b"\x1b]133;B\x07$ long-command\r\n");
+        for i in 0..20 {
+            h.feed(format!("line-{i:02}\r\n").as_bytes());
+        }
+        // Scroll up five rows mid-command, then let the tail land.
+        h.term.lock().scroll_display(Scroll::Delta(5));
+        h.feed(b"tail-0\r\ntail-1\r\ntail-2\r\n\x1b]133;D;0\x07");
+        let spans = h.spans();
+        assert_eq!(spans.len(), 1);
+        let term = h.term.lock();
+        let text = block_text(&term, &spans[0], true).expect("the grid still holds the span");
+        for tail in ["tail-0", "tail-1", "tail-2"] {
+            assert!(text.contains(tail), "the copy keeps {tail}:\n{text}");
+        }
+        assert!(text.ends_with("exit 0"), "the exit line closes it:\n{text}");
+        assert!(
+            text.contains("line-19"),
+            "no rows leak off the front:\n{text}"
+        );
+        // The span's own row count agrees with the text it copies.
+        let body_lines = text.lines().count() - 1;
+        assert_eq!(
+            body_lines as u64,
+            spans[0]
+                .end_abs
+                .saturating_sub(spans[0].start_abs)
+                .saturating_add(1) as u64,
+            "span rows and copied rows agree"
+        );
+    }
+
+    /// Overflowing a tiny scrollback cap aliases absolute rows (history sticks
+    /// at the cap while content renumbers), so the next mark's verification
+    /// fails and the table clears through the clear path instead of folding
+    /// and copying the wrong rows — and later commands build spans again.
+    #[test]
+    fn overflowing_a_small_scrollback_cap_drops_spans() {
+        let mut h = Harness::with_history(6);
+        // An established span, well within the grid.
+        h.feed(b"\x1b]133;B\x07$ first\r\nfirst-out\r\n\x1b]133;D;0\x07");
+        assert_eq!(h.spans().len(), 1);
+        // A flood that evicts its rows, then a fresh command.
+        for i in 0..20 {
+            h.feed(format!("line-{i:02}\r\n").as_bytes());
+        }
+        h.feed(b"\x1b]133;B\x07$ second\r\nsecond-out\r\n\x1b]133;D;0\x07");
+        // The stale span is gone; only the post-flood one stands. (At the
+        // cap, fresh anchors collapse — absolute rows cannot count past a
+        // stuck history — so the copy below is only asked to close with its
+        // exit line, not to span the output. True numbering past the cap is
+        // a deeper fix than overflow detection.)
+        let spans = h.spans();
+        assert_eq!(spans.len(), 1);
+        let term = h.term.lock();
+        let text = block_text(&term, &spans[0], true).expect("the fresh span copies");
+        assert!(
+            !text.contains("first-out"),
+            "no stale rows leak in:\n{text}"
+        );
+        assert!(text.ends_with("exit 0"), "the exit line closes it:\n{text}");
+        drop(term);
+        // The clear armed resync: the stale snapshot pairs nothing, and the
+        // fresh span pairs against post-clear ids alone.
+        let stale = |id| CommandBlock {
+            id,
+            exit_code: Some(0),
+            folded: false,
+            truncated: false,
+        };
+        h.store.lock().unwrap().adopt(&[stale(1)]);
+        assert!(h.spans()[0].daemon_id.is_none());
+        h.store.lock().unwrap().adopt(&[stale(1), stale(2)]);
+        assert_eq!(h.spans()[0].daemon_id, Some(2));
+    }
+}
+
 /// A point in a batch of pty output where the reader stops advancing the
 /// emulator to act on the state the bytes before it left behind.
 enum ReaderCut {
     Parked(CursorCut),
-    Command(CommandMark),
+    /// A command mark; the exit code rides along on `Finished` (`D;130`).
+    Command(CommandMark, Option<i32>),
     Prompt(PromptMark),
 }
 
@@ -3650,7 +4023,11 @@ fn command_cuts(tok: &mut OscTokenizer, bytes: &[u8], cuts: &mut Vec<(usize, Rea
     let before = cuts.len();
     tok.feed_at(bytes, |off, payload| {
         if let Some(mark) = CommandMark::parse(payload) {
-            cuts.push((off, ReaderCut::Command(mark)));
+            let exit = match mark {
+                CommandMark::Finished => crate::terminal::blocks::parse_d_exit_code(payload),
+                CommandMark::Started => None,
+            };
+            cuts.push((off, ReaderCut::Command(mark, exit)));
         } else if let Some(mark) = PromptMark::parse(payload) {
             cuts.push((off, ReaderCut::Prompt(mark)));
         }
@@ -3659,6 +4036,109 @@ fn command_cuts(tok: &mut OscTokenizer, bytes: &[u8], cuts: &mut Vec<(usize, Rea
         // Stable, so a mark that ends where a cursor show does keeps its place
         // after it.
         cuts.sort_by_key(|(off, _)| *off);
+    }
+}
+
+/// Notes a command/prompt mark on the pane's block table. Shared by the live
+/// batch and the replay: a relink rebuilds spans from the same marks.
+///
+/// `B` opens a span, `D` closes the topmost one for any pending `B`, and `C`
+/// annotates the topmost open slot (the watershed between a redrawn prompt's
+/// `B` and a nested command's `B`) — exactly like the daemon. Each mark is
+/// gated on the alternate screen as the cut finds it: marks under a
+/// full-screen program are that program's, not a command's, and void both
+/// pending slots with them.
+///
+/// Every `B` and `D` also re-verifies all spans against the grid *before*
+/// acting: any start row that changed (or left the grid) proves scroll-cap
+/// eviction aliased absolute rows, so the table clears through the clear
+/// path rather than folding and copying the wrong rows. The `D` verifies
+/// again after closing, so a span whose start row is already gone drops
+/// without waiting for the next mark.
+fn note_block_cut<T: EventListener>(term: &mut Term<T>, blocks: &BlockStore, cut: &ReaderCut) {
+    use crate::terminal::blocks::row_text;
+
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        if let Ok(mut tracker) = blocks.lock() {
+            tracker.void_pending();
+        }
+        return;
+    }
+    let Ok(mut tracker) = blocks.lock() else {
+        return;
+    };
+    match cut {
+        ReaderCut::Prompt(PromptMark::Ready) => {
+            tracker.verify_all(&|abs| row_text(term, abs));
+            tracker.note_b(cut_anchor(term));
+        }
+        ReaderCut::Command(CommandMark::Started, _) => {
+            tracker.note_c();
+        }
+        ReaderCut::Command(CommandMark::Finished, exit) => {
+            tracker.verify_all(&|abs| row_text(term, abs));
+            let anchor = cut_anchor(term);
+            let fp = tracker.open_start().and_then(|start| row_text(term, start));
+            tracker.note_d(anchor, *exit, fp);
+            tracker.verify_all(&|abs| row_text(term, abs));
+        }
+        _ => return,
+    }
+    tracker.prune_before(prune_top_abs(term));
+}
+
+/// Voids the pane's pending block slots when the grid stands on the alternate
+/// screen: a full-screen program owns the stretch, so no open run may become
+/// a span. Batches with no marks never reach [`note_block_cut`], yet a
+/// program that started between two marks still spans the open runs — hence
+/// this, after every batch the reader parses.
+fn void_blocks_on_alt<T: EventListener>(term: &FairMutex<Term<T>>, blocks: &BlockStore) {
+    if !term.lock().mode().contains(TermMode::ALT_SCREEN) {
+        return;
+    }
+    if let Ok(mut tracker) = blocks.lock() {
+        tracker.void_pending();
+    }
+}
+
+/// Folds `bytes` through the pane's mode probe in cut order and reports, per
+/// cut, whether the alternate screen was touched since the previous cut (the
+/// batch start for the first one). The trailing entry covers the tail past
+/// the last cut, so a program that started and exited with no mark of its own
+/// still voids. The probe is the caller's to keep across batches; split
+/// sequences carry, exactly like the grid's own parse.
+///
+/// Mirrors the daemon's per-segment fold: the endpoint mode the grid is left
+/// in cannot see a program that started and exited inside one batch, and
+/// without this the client would pair a span the server voided.
+fn alt_void_flags(
+    probe: &mut TerminalModes,
+    bytes: &[u8],
+    cuts: &[(usize, ReaderCut)],
+) -> Vec<bool> {
+    let mut flags = Vec::with_capacity(cuts.len() + 1);
+    let mut at = 0;
+    for (off, _) in cuts {
+        // Cuts arrive in ascending order, but never let a stray one panic
+        // the slice: a backward cut folds nothing.
+        let end = (*off).min(bytes.len()).max(at);
+        flags.push(probe.feed_alt_touched(&bytes[at..end]));
+        at = end;
+    }
+    flags.push(probe.feed_alt_touched(&bytes[at..]));
+    flags
+}
+
+/// Voids the pane's pending block slots when `touched` says the alternate
+/// screen owned the stretch just parsed — the per-cut counterpart to
+/// [`void_blocks_on_alt`], run before the cut's own mark is acted on so a `B`
+/// past the stretch opens fresh and a `D` past it lands orphaned.
+fn void_blocks_on_touch(blocks: &BlockStore, touched: bool) {
+    if !touched {
+        return;
+    }
+    if let Ok(mut tracker) = blocks.lock() {
+        tracker.void_pending();
     }
 }
 
@@ -5109,6 +5589,18 @@ mod tests {
         assert!(err.to_string().contains("cannot be routed"), "{err}");
     }
 
+    /// A routed procs query an unreachable link answers as empty: adoption
+    /// enriches spans, so a failed poll is silence with the same
+    /// silent-default semantics as the local query — never a stall.
+    #[test]
+    fn a_routed_procs_query_without_a_link_reads_as_empty() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.route = PaneRoute::Unroutable("no ssh details".into());
+        assert_eq!(term.query_procs_routed(7), PaneProcs::default());
+    }
+
     #[test]
     fn a_local_spawn_carries_its_workspace_so_the_shell_gets_tty7_ws() {
         let ws = "0d4e1a54-0000-4000-8000-000000000001";
@@ -5916,6 +6408,51 @@ mod tests {
         match ClientMsg::read(&mut daemon_side).unwrap() {
             ClientMsg::Input(bytes) => assert_eq!(bytes, b"echo hi\r"),
             other => panic!("expected Input, got {other:?}"),
+        }
+    }
+
+    /// Entry-5: the fold/clear push actually emits the addressed frames. The
+    /// view loop and toggles call these two helpers; if either sent the wrong
+    /// ids — or nothing — the daemon table would silently never converge.
+    #[test]
+    fn block_fold_and_clear_emit_the_addressed_frames() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        term.set_block_folded(7, 42, true);
+        term.set_block_folded(7, 42, false);
+        term.clear_command_blocks(7);
+
+        match ClientMsg::read(&mut daemon_side).unwrap() {
+            ClientMsg::SetBlockFolded {
+                pane_id,
+                block_id,
+                folded,
+            } => assert_eq!(
+                (pane_id, block_id, folded),
+                (7, 42, true),
+                "the fold push names its pane, row and direction"
+            ),
+            other => panic!("expected SetBlockFolded, got {other:?}"),
+        }
+        match ClientMsg::read(&mut daemon_side).unwrap() {
+            ClientMsg::SetBlockFolded {
+                pane_id,
+                block_id,
+                folded,
+            } => assert_eq!(
+                (pane_id, block_id, folded),
+                (7, 42, false),
+                "the unfold direction travels the same addressed frame"
+            ),
+            other => panic!("expected SetBlockFolded, got {other:?}"),
+        }
+        match ClientMsg::read(&mut daemon_side).unwrap() {
+            ClientMsg::ClearCommandBlocks { pane_id } => {
+                assert_eq!(pane_id, 7, "the clear push names its pane")
+            }
+            other => panic!("expected ClearCommandBlocks, got {other:?}"),
         }
     }
 

@@ -157,6 +157,29 @@ impl TerminalModes {
     /// across chunks are carried, so the caller may feed whatever sizes the pty
     /// hands it.
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.feed_inner(bytes, None);
+    }
+
+    /// Like [`Self::feed`], and reports whether the alternate screen was on at
+    /// any point while folding — the starting state included. Only `h`
+    /// completions can switch one on (and the starting state may already hold
+    /// one), so the watch is exact without checking after every byte: a mode
+    /// the chunk switched on and back off again still counts as touched.
+    ///
+    /// The block table uses this to void a pending block the moment a
+    /// full-screen program touches its span, even when the program started and
+    /// exited inside one read with no mark of its own.
+    pub fn feed_alt_touched(&mut self, bytes: &[u8]) -> bool {
+        let mut touched = self.is_alt_on();
+        self.feed_inner(bytes, Some(&mut touched));
+        touched
+    }
+
+    fn is_alt_on(&self) -> bool {
+        self.is_on(47) || self.is_on(1047) || self.is_on(1049)
+    }
+
+    fn feed_inner(&mut self, bytes: &[u8], mut alt_touched: Option<&mut bool>) {
         let mut i = 0;
         while i < bytes.len() {
             if self.state == State::Text {
@@ -199,6 +222,12 @@ impl TerminalModes {
                     b'h' | b'l' => {
                         if private {
                             self.apply(b == b'h');
+                            if b == b'h'
+                                && let Some(touched) = alt_touched.as_deref_mut()
+                                && self.is_alt_on()
+                            {
+                                *touched = true;
+                            }
                         }
                         self.state = State::Text;
                     }

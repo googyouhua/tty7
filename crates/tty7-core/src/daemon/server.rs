@@ -259,10 +259,20 @@ fn spawn_snapshot_keeper(registry: Arc<Registry>) {
                 std::thread::sleep(crate::daemon::scrollback::SNAPSHOT_INTERVAL);
                 for pane in registry.all() {
                     if marks.get(&pane.id) == Some(&pane.scrollback_mark()) {
+                        // The ring did not move, but folds live outside it: a
+                        // fold toggled since the last pass has to reach the
+                        // disk even when the pane printed nothing. The table
+                        // is capped and tiny, so it rides every pass
+                        // unconditionally (entry-5, CAP-5).
+                        crate::daemon::scrollback::save_blocks(
+                            pane.id,
+                            &pane.block_table_snapshot(),
+                        );
                         continue;
                     }
                     let (segments, title, mark) = pane.scrollback_snapshot();
                     crate::daemon::scrollback::save(pane.id, &segments, title.as_deref());
+                    crate::daemon::scrollback::save_blocks(pane.id, &pane.block_table_snapshot());
                     marks.insert(pane.id, mark);
                 }
                 // Before the sweep, so a closed tab that has aged out takes its
@@ -275,6 +285,7 @@ fn spawn_snapshot_keeper(registry: Arc<Registry>) {
                 }
                 let restorable = restorable_pane_ids(&registry);
                 crate::daemon::scrollback::sweep(&restorable);
+                crate::daemon::scrollback::sweep_blocks(&restorable);
                 crate::daemon::history::sweep(&restorable);
                 marks.retain(|id, _| registry.get(*id).is_some());
             }
@@ -294,6 +305,7 @@ fn store_scrollback_now(registry: &Registry) {
     for pane in registry.all() {
         let (segments, title, _) = pane.scrollback_snapshot();
         crate::daemon::scrollback::save(pane.id, &segments, title.as_deref());
+        crate::daemon::scrollback::save_blocks(pane.id, &pane.block_table_snapshot());
     }
 }
 
@@ -312,6 +324,11 @@ fn restored_screen(
     // emptiness check decides is whether a *restore* happened, not whether the
     // file stays: a snapshot holding nothing is not a screen to hand over, but
     // it is still a file nobody will read again.
+    // Blocks ride the same handoff (entry-5, CAP-5): the replayed marks
+    // rebuild the client's spans, and this table restores their folds. A
+    // missing sidecar restores as all unfolded — never a failed screen.
+    // Loaded before the forget below, which drops both files.
+    let blocks = crate::daemon::scrollback::load_blocks(request.pane_id).unwrap_or_default();
     crate::daemon::scrollback::forget(request.pane_id);
     if segments.is_empty() {
         return None;
@@ -324,6 +341,7 @@ fn restored_screen(
         segments,
         banner: request.banner,
         title,
+        blocks,
     })
 }
 
@@ -353,6 +371,7 @@ fn hibernate_pane(registry: &Registry, pane_id: u64) {
     };
     let (segments, title, _) = pane.scrollback_snapshot();
     crate::daemon::scrollback::save(pane_id, &segments, title.as_deref());
+    crate::daemon::scrollback::save_blocks(pane_id, &pane.block_table_snapshot());
     pane.kill();
 }
 
@@ -1206,6 +1225,29 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             Ok(())
         }
 
+        ClientMsg::SetBlockFolded {
+            pane_id,
+            block_id,
+            folded,
+        } => {
+            // Fire-and-forget from the GUI after a local fold toggles
+            // (entry-5, CAP-5). Unknown panes and ids are silence.
+            if let Some(pane) = registry.get(pane_id) {
+                pane.set_block_folded(block_id, folded);
+            }
+            Ok(())
+        }
+
+        ClientMsg::ClearCommandBlocks { pane_id } => {
+            // The GUI cleared its scrollback (entry-5, CAP-5): drop the
+            // daemon's rows so the next adoption cannot pair new spans
+            // against output the client no longer shows.
+            if let Some(pane) = registry.get(pane_id) {
+                pane.clear_command_blocks();
+            }
+            Ok(())
+        }
+
         ClientMsg::OnWorkspace(req) => {
             let mut w = write_stream;
             crate::daemon::ssh::workspace::handle(&req).encode(&mut w)?;
@@ -1366,6 +1408,26 @@ fn run_stream(
                     }
                     kill_pane(&registry, pane_id);
                 }
+                ClientMsg::SetBlockFolded {
+                    pane_id,
+                    block_id,
+                    folded,
+                } => {
+                    // Same fire-and-forget as the opening dispatch above,
+                    // routed by id so it works over the attached link too.
+                    if pane_id == id {
+                        pane.set_block_folded(block_id, folded);
+                    } else if let Some(target) = registry.get(pane_id) {
+                        target.set_block_folded(block_id, folded);
+                    }
+                }
+                ClientMsg::ClearCommandBlocks { pane_id } => {
+                    if pane_id == id {
+                        pane.clear_command_blocks();
+                    } else if let Some(target) = registry.get(pane_id) {
+                        target.clear_command_blocks();
+                    }
+                }
                 _ => {}
             }
         }
@@ -1462,6 +1524,100 @@ fn spawn_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_screen_carries_folds_into_the_restore() {
+        use crate::daemon::scrollback::tests::{lock_fs, pin_config_dir};
+        use crate::daemon::scrollback::{Segment, load, save, save_blocks};
+
+        let _fs = lock_fs();
+        pin_config_dir();
+        let pane = 917_001;
+        let size = crate::daemon::protocol::WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 17,
+        };
+        let blocks = vec![
+            crate::daemon::protocol::CommandBlock {
+                id: 1,
+                exit_code: Some(0),
+                folded: true,
+                truncated: false,
+            },
+            crate::daemon::protocol::CommandBlock {
+                id: 2,
+                exit_code: Some(1),
+                folded: false,
+                truncated: false,
+            },
+        ];
+        save(
+            pane,
+            &[Segment {
+                size,
+                bytes: b"a screen worth restoring".to_vec(),
+            }],
+            Some("t"),
+        );
+        save_blocks(pane, &blocks);
+
+        let restore = restored_screen(crate::daemon::protocol::RestoreFrom {
+            pane_id: pane,
+            banner: None,
+        })
+        .expect("a saved screen restores");
+        assert_eq!(
+            restore.blocks, blocks,
+            "the same rows come back folded after a restart"
+        );
+        assert!(
+            restored_screen(crate::daemon::protocol::RestoreFrom {
+                pane_id: pane,
+                banner: None,
+            })
+            .is_none(),
+            "the handoff is one-shot: loaded files are forgotten"
+        );
+        assert!(
+            load(pane).is_none(),
+            "no snapshot left for a second restore"
+        );
+    }
+
+    #[test]
+    fn restored_screen_with_no_screen_drops_folds_too() {
+        use crate::daemon::scrollback::tests::{lock_fs, pin_config_dir};
+        use crate::daemon::scrollback::{load, save, save_blocks};
+
+        let _fs = lock_fs();
+        pin_config_dir();
+        let pane = 917_003;
+        save(pane, &[], Some("t"));
+        save_blocks(
+            pane,
+            &[crate::daemon::protocol::CommandBlock {
+                id: 1,
+                exit_code: Some(0),
+                folded: true,
+                truncated: false,
+            }],
+        );
+
+        assert!(
+            restored_screen(crate::daemon::protocol::RestoreFrom {
+                pane_id: pane,
+                banner: None,
+            })
+            .is_none(),
+            "a snapshot holding nothing is not a screen to hand over"
+        );
+        assert!(
+            load(pane).is_none() && crate::daemon::scrollback::load_blocks(pane).is_none(),
+            "one-shot handoff: folds without a screen are forgotten, not kept"
+        );
+    }
 
     #[test]
     fn alloc_id_is_monotonic_from_one() {
@@ -1613,6 +1769,129 @@ mod tests {
                 other => panic!("expected Error, got {other:?}"),
             }
             h.join().unwrap();
+        }
+
+        /// Entry-5: the fold/clear dispatch arms are not no-ops. A block
+        /// closed through echoed marks folds over `SetBlockFolded` and
+        /// vanishes over `ClearCommandBlocks`, as observed through
+        /// `QueryProcs` — deleting any arm body breaks this test while
+        /// every pane-helper test stays green.
+        #[test]
+        fn block_fold_and_clear_round_trip_through_the_conn() {
+            use crate::daemon::pane::DaemonPane;
+            use crate::daemon::protocol::ShellSpec;
+
+            let reg = Arc::new(Registry::new());
+            let pane = DaemonPane::spawn(
+                917_002,
+                Some(std::path::PathBuf::from("/")),
+                SIZE,
+                Some(ShellSpec {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exec cat".into()],
+                    args_are_tty7_defaults: false,
+                }),
+                None,
+                None,
+                None,
+                false,
+                || {},
+            )
+            .expect("spawn pane");
+            reg.insert(pane);
+
+            // One connection per request, the way CLI polling talks to the
+            // daemon: the opening dispatch answers a single frame and closes.
+            fn ask(reg: &Arc<Registry>, msg: ClientMsg) -> Option<DaemonMsg> {
+                let (mut client, server) = UnixStream::pair().unwrap();
+                let reg = reg.clone();
+                let h = thread::spawn(move || {
+                    let _ = handle_conn(server, reg);
+                });
+                msg.encode(&mut client).unwrap();
+                let reply = DaemonMsg::read(&mut client).ok();
+                drop(client);
+                h.join().unwrap();
+                reply
+            }
+
+            fn procs(reg: &Arc<Registry>) -> crate::daemon::protocol::PaneProcs {
+                match ask(reg, ClientMsg::QueryProcs { pane_id: 917_002 }) {
+                    Some(DaemonMsg::Procs(procs)) => procs,
+                    other => panic!("expected Procs, got {other:?}"),
+                }
+            }
+
+            // Marks in through `cat`'s echo pair one block on the daemon.
+            // Retried: bytes sent before `cat` replaces the starting shell
+            // are consumed as shell input, not echoed — a later round lands
+            // while `cat` holds the pty and comes straight back.
+            let marks = b"\x1b]133;B\x07\x1b]133;C;echo%20hi\x07hi\r\n\x1b]133;D;0\x07".to_vec();
+            let mut id = None;
+            for _ in 0..10 {
+                assert!(
+                    matches!(
+                        ask(
+                            &reg,
+                            ClientMsg::SendInput {
+                                pane_id: 917_002,
+                                bytes: marks.clone(),
+                            }
+                        ),
+                        Some(DaemonMsg::InputAck { .. })
+                    ),
+                    "echo input is accepted"
+                );
+                for _ in 0..25 {
+                    let procs = procs(&reg);
+                    let blocks = &procs.context.expect("pane reports a context").blocks;
+                    if let Some(b) = blocks.first() {
+                        id = Some(b.id);
+                        assert!(!b.folded, "fresh blocks arrive unfolded");
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                if id.is_some() {
+                    break;
+                }
+            }
+            let id = id.expect("the echoed marks paired one block");
+
+            // Fire-and-forget arms send no reply; the next poll showing the
+            // effect is what proves the arm ran.
+            ask(
+                &reg,
+                ClientMsg::SetBlockFolded {
+                    pane_id: 917_002,
+                    block_id: id,
+                    folded: true,
+                },
+            );
+            let mut folded = false;
+            for _ in 0..100 {
+                let procs = procs(&reg);
+                let blocks = &procs.context.expect("pane reports a context").blocks;
+                if blocks.iter().any(|b| b.id == id && b.folded) {
+                    folded = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(folded, "the fold arm actually folded the row");
+
+            ask(&reg, ClientMsg::ClearCommandBlocks { pane_id: 917_002 });
+            let mut cleared = false;
+            for _ in 0..100 {
+                let procs = procs(&reg);
+                let blocks = &procs.context.expect("pane reports a context").blocks;
+                if blocks.is_empty() {
+                    cleared = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(cleared, "the clear arm actually dropped the table");
         }
 
         #[test]

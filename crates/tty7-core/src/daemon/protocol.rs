@@ -619,7 +619,45 @@ pub struct PaneContext {
     /// rather than assuming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bracketed_paste: Option<bool>,
+    /// The pane's closed command blocks, oldest first — see [`CommandBlock`].
+    /// Empty (and absent on the wire) until the first `D` closes one, and
+    /// silent from a daemon built before the field existed, which reads as
+    /// "this daemon cannot say", never as "no commands ran".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<CommandBlock>,
 }
+
+/// One command's run, bracketed by its OSC 133 `B` (prompt ready) and `D`
+/// (command finished) marks — the tracer's unit of scrollback (story
+/// tracer-plan, entry-1 owns this schema; later entries only consume it).
+///
+/// The daemon builds this table and hands it to clients inside
+/// [`PaneContext::blocks`]; the client's own spans pair against it in
+/// close order purely as enrichment (`daemon_id`/`truncated` land on spans
+/// nothing routes on yet). `folded` is server-side truth (entry-5, CAP-5):
+/// the GUI reports folds over [`ClientMsg::SetBlockFolded`] and the daemon
+/// persists them with the pane, so a restart restores the same folded rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandBlock {
+    /// 1-based, in the order the pane's `D` marks closed them.
+    pub id: u64,
+    /// The `D` mark's exit status, when it carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Whether the GUI currently folds this block to one line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub folded: bool,
+    /// Whether the ring evicted the block's early output. Always `false`
+    /// from this daemon revision: without per-block offsets there is no
+    /// honest way to say, and a guess would mislabel live blocks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// How many closed blocks a pane keeps. Oldest-first eviction, same order of
+/// magnitude as the replay ring: enough that close-order pairing against the
+/// client's own spans stays aligned.
+pub const COMMAND_BLOCK_CAP: usize = 200;
 
 fn default_term() -> String {
     "xterm-256color".to_string()
@@ -996,6 +1034,20 @@ pub enum ClientMsg {
     QueryProcs {
         pane_id: u64,
     },
+    /// Fold (`true`) or unfold one closed command block on the daemon's table.
+    /// Sent fire-and-forget by the GUI after a local fold toggles; an unknown
+    /// block id is silence, not an error. Entry-5, CAP-5.
+    SetBlockFolded {
+        pane_id: u64,
+        block_id: u64,
+        folded: bool,
+    },
+    /// Drop the daemon's command-block table (GUI cleared its scrollback, so
+    /// absolute rows were rebirthed and every span pointed at rows that no
+    /// longer exist). Entry-5, CAP-5: the deferred entry-1 clear wiring.
+    ClearCommandBlocks {
+        pane_id: u64,
+    },
     OnWorkspace(Box<WorkspaceRequest>),
     Version,
     /// Only after the daemon advertised [`FEATURE_SIZE_LEASE`].
@@ -1103,6 +1155,10 @@ mod kind {
     pub const LEASE: u8 = 57;
     pub const AGENT_EVENT: u8 = 58;
     pub const SET_FOLLOW_NESTED: u8 = 59;
+    /// [`ClientMsg::SetBlockFolded`], entry-5 (CAP-5).
+    pub const SET_BLOCK_FOLDED: u8 = 64;
+    /// [`ClientMsg::ClearCommandBlocks`], entry-5 (CAP-5).
+    pub const CLEAR_COMMAND_BLOCKS: u8 = 65;
 
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
@@ -1391,6 +1447,18 @@ impl ClientMsg {
             ClientMsg::QueryProcs { pane_id } => {
                 write_frame(w, kind::QUERY_PROCS, &to_json(pane_id)?)
             }
+            ClientMsg::SetBlockFolded {
+                pane_id,
+                block_id,
+                folded,
+            } => write_frame(
+                w,
+                kind::SET_BLOCK_FOLDED,
+                &to_json(&(pane_id, block_id, folded))?,
+            ),
+            ClientMsg::ClearCommandBlocks { pane_id } => {
+                write_frame(w, kind::CLEAR_COMMAND_BLOCKS, &to_json(pane_id)?)
+            }
             ClientMsg::ListForwards { pane_id } => {
                 write_frame(w, kind::LIST_FORWARDS, &to_json(pane_id)?)
             }
@@ -1515,6 +1583,17 @@ impl ClientMsg {
                 pane_id: from_json(&payload)?,
             },
             kind::QUERY_PROCS => ClientMsg::QueryProcs {
+                pane_id: from_json(&payload)?,
+            },
+            kind::SET_BLOCK_FOLDED => {
+                let (pane_id, block_id, folded) = from_json(&payload)?;
+                ClientMsg::SetBlockFolded {
+                    pane_id,
+                    block_id,
+                    folded,
+                }
+            }
+            kind::CLEAR_COMMAND_BLOCKS => ClientMsg::ClearCommandBlocks {
                 pane_id: from_json(&payload)?,
             },
             kind::ADD_FORWARD => {
@@ -1840,6 +1919,17 @@ mod tests {
             ClientMsg::Detach,
             ClientMsg::SetFollowNested(true),
             ClientMsg::SetFollowNested(false),
+            ClientMsg::SetBlockFolded {
+                pane_id: 7,
+                block_id: 3,
+                folded: true,
+            },
+            ClientMsg::SetBlockFolded {
+                pane_id: 7,
+                block_id: 3,
+                folded: false,
+            },
+            ClientMsg::ClearCommandBlocks { pane_id: 7 },
             ClientMsg::Kill { pane_id: 7 },
             ClientMsg::List,
             ClientMsg::Shutdown,

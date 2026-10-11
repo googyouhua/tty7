@@ -14,9 +14,13 @@ use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
 
 use super::TermSize;
+use super::blocks::{
+    BlockSpan, BlockTracker, block_command_text, block_output_text, block_text, screen_to_line,
+    visible_map,
+};
 use super::cmd_editor::CmdEditor;
 use super::completion::{self, CandidateKind, CompletionSession};
-use super::element::{GridSnapshot, RenderCell, TerminalElement};
+use super::element::{FrameMap, GridSnapshot, RenderCell, TerminalElement};
 use super::highlight::{self, TokenKind};
 use super::hold::{GapHold, Verdict};
 use super::remote::RemoteTerminal;
@@ -38,6 +42,11 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 pub(super) const GRID_PAD_X: f32 = 8.;
 pub(super) const GRID_PAD_Y: f32 = 4.;
+
+/// Width of the block gutter strip, measured from the surface's left edge —
+/// the grid itself starts at [`GRID_PAD_X`], so markers overhang its first
+/// cells by this minus that (a few pixels, on marked rows only).
+pub(super) const BLOCK_GUTTER_W: f32 = 14.;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputCaretPaint {
@@ -124,6 +133,11 @@ actions!(
         FindNext,
         FindPrevious,
         ClearScrollback,
+        JumpToBlockStart,
+        CopyBlock,
+        ToggleBlockFold,
+        CopyBlockCommand,
+        CopyBlockOutput,
         InsertNewline,
         InsertNewlineFallback,
         OneKeyOpen,
@@ -338,6 +352,14 @@ pub struct TerminalView {
     /// pane* when the next one starts.
     pub(super) grid_buf: Vec<RenderCell>,
     pub(super) grid_snap: Option<GridSnapshot>,
+    /// The fold mapping for this frame — map, viewport top, gutter markers
+    /// and the generation they were built against (history size, display
+    /// offset, rows, fold epoch, alternate screen). Computed in `render`
+    /// under the grid lock (then the tracker), so the gutter lays down the
+    /// same frame's rows the grid is about to paint: zero lag, not one frame
+    /// of chase. Paint reuses it after checking the generation and recomputes
+    /// live (writing back here) when it no longer matches.
+    pub(super) frame_map: Option<FrameMap>,
     /// Terminal mode and selection as of the last frame that got the lock.
     /// What the *frame* declares — the keymap context it publishes, whether it
     /// draws a selection — is read from here, so drawing never queues behind
@@ -402,6 +424,16 @@ pub struct TerminalView {
     /// the same reason [`context_menu_allowed`](Self::context_menu_allowed)
     /// is: by the time the menu is built the pointer is only a memory.
     menu_link: Option<super::search::LinkTarget>,
+    /// The grid's origin in window coordinates, stashed every prepaint so
+    /// the surface-level right-click handler can tell grid clicks (latched
+    /// exactly by the element's handler, which runs first) from padding
+    /// clicks (which reach no recorder and must clear the latch instead of
+    /// going stale).
+    pub(super) grid_origin: Option<gpui::Point<Pixels>>,
+    /// The command block the most recent right mouse-down landed in, latched
+    /// for the same reason: the block menu items and their actions resolve
+    /// through this rather than the live cursor. `None` hides them.
+    menu_block: Option<u64>,
     scroll_debt: f32,
     /// Lines travelled under the zoom modifier that have not yet added up to a
     /// font-size step. Kept apart from [`scroll_debt`](Self::scroll_debt) so
@@ -429,6 +461,10 @@ pub struct TerminalView {
     /// Whether a rescan is already waiting out the debounce. One task at a
     /// time, however fast the pane is printing.
     pub(super) search_scan_armed: bool,
+    /// When the daemon's block table was last adopted into the pane's spans.
+    /// Gated to a slow poll: adoption is a blocking round trip, and the ids
+    /// it carries enrich rather than route.
+    last_block_adopt: Option<std::time::Instant>,
     pub bell_flash: bool,
     /// Bumped by every bell, so only the timer armed by the latest one clears
     /// the flash: a burst of bells holds one steady flash instead of strobing.
@@ -471,6 +507,13 @@ pub struct TerminalView {
     /// shell cannot report (a far `su` to root, a frozen probe). Session
     /// state, never persisted: clearing it hands the pane back to tracking.
     manual_cwd: Option<std::path::PathBuf>,
+    /// Canonicalized `(pinned, tracked, rejoins)` behind `manual_cwd`, filled
+    /// in off the UI thread: `poll_foreground` only reads it, never blocks on
+    /// the filesystem (a sync `canonicalize` here trips `guard_off_ui`).
+    manual_cwd_canon: Option<(std::path::PathBuf, std::path::PathBuf, bool)>,
+    /// The pair a canonicalization job is already fetching, so every frame
+    /// does not spawn another one while the first is in flight.
+    manual_cwd_canon_pending: Option<(std::path::PathBuf, std::path::PathBuf)>,
     /// The Info panel's follow switch for this pane (default on; =off
     /// freezes). Display
     /// state only; the daemon holds the enforcing flag, fed by
@@ -1886,6 +1929,7 @@ impl TerminalView {
             grid_slack: px(0.),
             grid_buf: Vec::new(),
             grid_snap: None,
+            frame_map: None,
             frame_alt_screen: false,
             frame_has_selection: false,
             selecting: false,
@@ -1910,6 +1954,8 @@ impl TerminalView {
             link_repo_root_pending: false,
             context_menu_allowed: true,
             menu_link: None,
+            menu_block: None,
+            grid_origin: None,
             scroll_debt: 0.,
             zoom_debt: 0.,
             scroll_frac: 0.,
@@ -1926,6 +1972,7 @@ impl TerminalView {
             search_last_query: String::new(),
             search_scan_epoch: 0,
             search_scan_armed: false,
+            last_block_adopt: None,
             bell_flash: false,
             bell_epoch: 0,
             last_at_prompt: false,
@@ -1946,6 +1993,8 @@ impl TerminalView {
             agent_status_seen: false,
             git_status_cwd: None,
             manual_cwd: None,
+            manual_cwd_canon: None,
+            manual_cwd_canon_pending: None,
             follow_nested_ui: true,
             last_agent_activity: 0,
             cmd: CmdEditor::new(),
@@ -2361,9 +2410,13 @@ impl TerminalView {
     }
 
     /// Pin the pane's directory by hand; `None` (an empty submission) clears
-    /// the pin and hands the pane back to tracking.
+    /// the pin and hands the pane back to tracking. Re-pinning drops the
+    /// canonical cache: old pairs can never match the new pin, and a job
+    /// still in flight lands keyed, so it cannot poison the new pair.
     pub fn set_manual_cwd(&mut self, cwd: Option<std::path::PathBuf>) {
         self.manual_cwd = cwd;
+        self.manual_cwd_canon = None;
+        self.manual_cwd_canon_pending = None;
     }
 
     /// Whether this pane's follow switch stands on (Info panel). Display
@@ -2379,15 +2432,17 @@ impl TerminalView {
     }
 
     /// Whether a hand-pinned directory has been reached by tracking: exact
-    /// match anywhere, canonical match only through the pane's own host (a
-    /// remote path resolved locally would answer about the wrong machine —
-    /// see the host-boundary guard). Canonicalization runs only while a pin
-    /// stands unmatched, and stops the moment it rejoins.
+    /// match answers at once, anything else is decided off the UI thread
+    /// (a sync `canonicalize` on the poll path trips `guard_off_ui`).
+    /// Canonical answers arrive through the pane's own host and are cached
+    /// per `(pinned, tracked)` pair; until a reply lands the answer stays
+    /// false, which only delays the rejoin by a frame — the display never
+    /// moves either way.
     fn manual_cwd_rejoins(
-        &self,
+        &mut self,
         pinned: &std::path::Path,
         tracked: &std::path::Path,
-        cx: &gpui::App,
+        cx: &mut Context<Self>,
     ) -> bool {
         if pinned == tracked {
             return true;
@@ -2395,13 +2450,40 @@ impl TerminalView {
         if !self.paths_are_local() {
             return false;
         }
-        let Some(host) = self.host(cx) else {
-            return false;
-        };
-        match (host.canonicalize(pinned), host.canonicalize(tracked)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
+        if let Some((cp, ct, eq)) = self.manual_cwd_canon.as_ref() {
+            if cp == pinned && ct == tracked {
+                return *eq;
+            }
         }
+        let pair = (pinned.to_path_buf(), tracked.to_path_buf());
+        // Single flight: while any fetch is outstanding, wait for it instead
+        // of piling a new job per frame. A stale landing is harmless — the
+        // cache is keyed, so the next frame simply misses again and refetches.
+        if self.manual_cwd_canon_pending.is_none() {
+            self.manual_cwd_canon_pending = Some(pair.clone());
+            let Some(host) = self.host(cx) else {
+                self.manual_cwd_canon_pending = None;
+                return false;
+            };
+            crate::ui::host_ops::HostOps::run(
+                host,
+                cx,
+                {
+                    let pair = pair.clone();
+                    move |h| {
+                        let a = h.canonicalize(&pair.0).ok();
+                        let b = h.canonicalize(&pair.1).ok();
+                        (pair.0, pair.1, a.is_some() && a == b)
+                    }
+                },
+                move |view, (pinned, tracked, eq), cx| {
+                    view.manual_cwd_canon_pending = None;
+                    view.manual_cwd_canon = Some((pinned, tracked, eq));
+                    cx.notify();
+                },
+            );
+        }
+        false
     }
     /// The directory the Files panel roots its tree at — see [`files_cwd`].
     ///
@@ -3741,6 +3823,300 @@ impl TerminalView {
         }
     }
 
+    /// The closed span `seq` names, if the pane still holds it.
+    fn block_span(&self, seq: u64) -> Option<BlockSpan> {
+        self.terminal
+            .block_tracker()
+            .lock()
+            .ok()?
+            .spans()
+            .iter()
+            .find(|s| s.seq == seq)
+            .cloned()
+    }
+
+    /// The closed span under screen `row`, if any — resolved through the one
+    /// shared row function every mouse entry uses, so a folded window latches
+    /// the span it shows rather than the grid row beneath it. Grid first,
+    /// tracker second, `try_lock` only: a contended grid or tracker latches
+    /// nothing this event — transient, the next right-click re-latches —
+    /// rather than blocking the gesture or latching the wrong span.
+    fn block_at_screen_row(&self, row: usize) -> Option<BlockSpan> {
+        let rows = self.terminal.size().rows;
+        if row >= rows || self.frame_alt_screen {
+            return None;
+        }
+        let term = self.terminal.term.try_lock_unfair()?;
+        // Block spans address the primary grid; under a full-screen program
+        // the grid on screen is the alternate one, so there is nothing of
+        // theirs to point at.
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return None;
+        }
+        let line = self.mouse_grid_line(&term, row)?;
+        let abs = term.grid().history_size() as i64 + i64::from(line.0);
+        drop(term);
+        let store = self.terminal.block_tracker();
+        let tracker = store.try_lock().ok()?;
+        tracker.span_at(abs).cloned()
+    }
+
+    /// Latches the block a right mouse-down landed in for the menu builder —
+    /// the same reason `record_menu_link` exists: by build time the pointer
+    /// is only a memory.
+    pub fn record_menu_block(&mut self, row: usize) {
+        self.menu_block = self.block_at_screen_row(row).map(|s| s.seq);
+    }
+
+    /// Whether a window-coordinates click lands inside the grid or its
+    /// gutter — the region whose right-clicks the element's handler (or a
+    /// gutter marker) latches exactly. Anything clearly outside it reaches no
+    /// recorder. Margins absorb the fractional scroll shift between the
+    /// stashed prepaint origin and the painted one.
+    fn menu_click_in_grid(&self, pos: gpui::Point<Pixels>) -> bool {
+        let Some(origin) = self.grid_origin else {
+            return false;
+        };
+        let cols = self.terminal.size().cols as f32;
+        let rows = self.terminal.size().rows as f32;
+        let lx = (pos.x - origin.x).as_f32();
+        let ly = (pos.y - origin.y).as_f32();
+        let lh = self.line_height.as_f32().max(1.);
+        let cw = self.cell_width.as_f32().max(1.);
+        lx >= -GRID_PAD_X
+            && lx < cols * cw + GRID_PAD_X
+            && ly >= -GRID_PAD_Y - lh
+            && ly < rows * lh + GRID_PAD_Y + lh
+    }
+
+    /// The viewport goes to the latched block's first line: at the top when
+    /// it is (or evicted into) the scrollback, at the bottom when it sits in
+    /// the live screen band. Fold-aware: the identity offset assumes every
+    /// row shows, so with folds the target walks the hidden rows out through
+    /// the paint mapping to a fixed point — the start still lands at the top
+    /// row. Without folds, or on the alternate screen, the old arithmetic
+    /// runs exactly as before.
+    pub fn jump_to_block_start(&mut self, cx: &mut Context<Self>) {
+        let Some(span) = self.menu_block.and_then(|seq| self.block_span(seq)) else {
+            return;
+        };
+        self.cancel_scroll_anim();
+        let mut term = self.terminal.term.lock();
+        term.selection = None;
+        let history = term.grid().history_size() as i64;
+        let line = span.start_abs - history;
+        let mut target = match line <= 0 {
+            true => (-line).min(history),
+            false => 0,
+        };
+        if line <= 0 && !term.mode().contains(TermMode::ALT_SCREEN) {
+            let rows = self.terminal.size().rows;
+            if let Ok(tracker) = self.terminal.block_tracker().try_lock()
+                && tracker.has_folds()
+                && rows > 0
+            {
+                target =
+                    fold_aware_jump_target(&tracker, &term, span.start_abs, rows, target, history);
+            }
+        }
+        let current = term.grid().display_offset() as i64;
+        term.scroll_display(Scroll::Delta((target - current) as i32));
+        drop(term);
+        self.scroll_frac = 0.;
+        cx.notify();
+    }
+
+    /// Copies the latched block: command plus output as plain text, closed by
+    /// its exit line — the same plain-text semantics as `copy_selection`.
+    pub fn copy_block(&mut self, cx: &mut Context<Self>) {
+        self.copy_block_with(cx, block_text);
+    }
+
+    /// Copies the latched block's command line plus the exit line.
+    pub fn copy_block_command(&mut self, cx: &mut Context<Self>) {
+        self.copy_block_with(cx, block_command_text);
+    }
+
+    /// Copies the latched block's output lines plus the exit line.
+    pub fn copy_block_output(&mut self, cx: &mut Context<Self>) {
+        self.copy_block_with(cx, block_output_text);
+    }
+
+    /// Shared latch for the three block-copy items: resolves `menu_block`,
+    /// reads the grid's absolute rows (never the fold mapping, so folded
+    /// spans copy in full), and writes nothing when the span is gone or the
+    /// text is empty.
+    fn copy_block_with(
+        &mut self,
+        cx: &mut Context<Self>,
+        text_of: fn(
+            &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
+            &BlockSpan,
+            bool,
+        ) -> Option<String>,
+    ) {
+        let Some(span) = self.menu_block.and_then(|seq| self.block_span(seq)) else {
+            return;
+        };
+        let trim = cx.global::<Config>().clipboard_trim_trailing_spaces;
+        let term = self.terminal.term.lock();
+        let text = text_of(&term, &span, trim);
+        drop(term);
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Toggles the fold on the span `seq` names. Gutter-marker clicks route
+    /// here with the exact latched seq.
+    ///
+    /// Top-stable across the toggle: the window's top visible row is read
+    /// before the flip, and afterwards the offset is moved so that row still
+    /// tops the window — the same offset keeps naming the same visible set,
+    /// so the next wheel notch scrolls instead of correcting back-and-forth.
+    /// A mid-fractional remainder is dropped with the same move. A contended
+    /// tracker returns without toggling; a missing grid snapshot (or the
+    /// alternate screen, or no viewport rows) still lands the toggle and
+    /// skips only the correction.
+    pub fn toggle_fold_by_seq(&mut self, seq: u64, cx: &mut Context<Self>) {
+        // An in-flight wheel animation targets the pre-toggle window; letting
+        // it run would fight the correction below.
+        self.cancel_scroll_anim();
+        let rows = self.terminal.size().rows;
+        // Snapshot values only — the guard is dropped before the tracker lock
+        // so a fold can never wait on the grid.
+        let grid = self.terminal.term.try_lock_unfair().map(|term| {
+            (
+                term.grid().history_size() as i64,
+                term.grid().display_offset() as i64,
+                term.topmost_line().0 as i64,
+                term.bottommost_line().0 as i64,
+                term.mode().contains(TermMode::ALT_SCREEN),
+            )
+        });
+        let store = self.terminal.block_tracker();
+        let Ok(mut tracker) = store.lock() else {
+            return;
+        };
+        // The anchor the window top shows right now, before the flip: the
+        // mapped first row with folds, the identity top without (the toggle
+        // may be adding the first fold). Read before the flip so the
+        // correction below can name the same visible set afterwards.
+        let anchor: Option<i64> = match &grid {
+            Some((history, offset, topmost, bottommost, alt)) if !alt && rows > 0 => {
+                if tracker.has_folds() {
+                    let floor = history + topmost;
+                    let grid_bottom = history + bottommost;
+                    let bottom = (history - offset + rows as i64 - 1).min(grid_bottom);
+                    let (first, _, _) = tracker.window_edges(bottom, rows, floor);
+                    Some(first.unwrap_or(history - offset))
+                } else {
+                    Some(history - offset)
+                }
+            }
+            _ => None,
+        };
+        let daemon_id = tracker
+            .spans()
+            .iter()
+            .find(|s| s.seq == seq)
+            .and_then(|s| s.daemon_id);
+        let folded = !tracker.is_folded(seq);
+        if tracker.set_folded(seq, folded).is_some() {
+            // Top-stable: move the offset so the anchor still tops the
+            // window under the new fold state, and drop any mid-fractional
+            // remainder that belonged to the old one.
+            if let (Some(a), Some((history, offset, topmost, bottommost, _))) = (anchor, grid) {
+                let floor = history + topmost;
+                let grid_bottom = history + bottommost;
+                let want = tracker.offset_for_anchor(a, rows, history, floor, grid_bottom);
+                drop(tracker);
+                if want == offset {
+                    self.scroll_frac = 0.;
+                } else if let Some(mut term) = self.terminal.term.try_lock_unfair() {
+                    term.scroll_display(Scroll::Delta((want - offset) as i32));
+                    self.scroll_frac = 0.;
+                }
+                // Else the grid is contended: the correction (offset and frac)
+                // is skipped, and the toggle below already landed.
+            }
+            // Server-side truth (entry-5, CAP-5): report the toggle so a
+            // restart restores the same folded rows. Best effort — the local
+            // view already updated, and a span the daemon never saw (no id
+            // yet) converges on the next adoption's push-back instead.
+            if let Some(block_id) = daemon_id {
+                self.terminal
+                    .set_block_folded(self.pane_id, block_id, folded);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Whether the span `seq` names is folded. The context menu reads this
+    /// to label its fold item; the toggle itself goes through
+    /// [`Self::toggle_fold_by_seq`], the same path gutter clicks take.
+    fn block_folded(&self, seq: u64) -> bool {
+        self.terminal
+            .block_tracker()
+            .lock()
+            .map(|tracker| tracker.is_folded(seq))
+            .unwrap_or(false)
+    }
+
+    /// Toggles the fold on the latched menu block. Menu fold/unfold routes
+    /// here; gutter-marker clicks route to [`Self::toggle_fold_by_seq`]
+    /// with the same seq, so the two stay equivalent by construction.
+    pub fn toggle_menu_block_fold(&mut self, cx: &mut Context<Self>) {
+        if let Some(seq) = self.menu_block {
+            self.toggle_fold_by_seq(seq, cx);
+        }
+    }
+
+    /// Adopts the daemon's block table into the pane's spans, at most every
+    /// few seconds. Best-effort enrichment (ids nothing routes on), so a
+    /// failed or empty poll is silence, not an error.
+    fn maybe_adopt_daemon_blocks(&mut self) {
+        const BLOCK_ADOPT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        if self
+            .last_block_adopt
+            .is_some_and(|t| now.duration_since(t) < BLOCK_ADOPT_INTERVAL)
+        {
+            return;
+        }
+        self.last_block_adopt = Some(now);
+        // The table lives where the pane lives: a local pane's daemon answers
+        // the direct query, while a remote pane's table is only visible down
+        // its own route. Either way a failed or empty poll is silence, and
+        // the push-back below already rides the pane's own link.
+        let procs = match self.host_id.is_local() {
+            true => RemoteTerminal::query_procs(self.pane_id),
+            false => self.terminal.query_procs_routed(self.pane_id),
+        };
+        let Some(context) = procs.context else {
+            return;
+        };
+        if context.blocks.is_empty() {
+            return;
+        }
+        if let Ok(mut tracker) = self.terminal.block_tracker().lock() {
+            // Newly paired spans whose local fold disagrees with the daemon
+            // row are reported back: push them up so the daemon converges to
+            // what the GUI shows (entry-5, CAP-5). Both directions — a
+            // pre-adoption fold and a pre-adoption unfold alike.
+            let newly = tracker.adopt(&context.blocks);
+            let pushes: Vec<(u64, bool)> = newly
+                .into_iter()
+                .map(|(_, block_id, folded)| (block_id, folded))
+                .collect();
+            drop(tracker);
+            for (block_id, folded) in pushes {
+                self.terminal
+                    .set_block_folded(self.pane_id, block_id, folded);
+            }
+        }
+    }
+
     pub fn copy_contextual(&mut self, clear_on_copy: bool, cx: &mut Context<Self>) -> bool {
         if self.input_active() {
             if let Some(text) = self.cmd.selected_text() {
@@ -4170,6 +4546,17 @@ impl TerminalView {
         // behind the term's back would leave pointing at rows that no longer
         // exist.
         self.terminal.term.lock().clear_screen(ClearMode::Saved);
+        // Absolute rows were rebirthed with the grid, so every span points at
+        // rows that no longer exist. Drop them; the resync this arms keeps the
+        // next adoption from pairing new spans against pre-clear daemon ids.
+        if let Ok(mut tracker) = self.terminal.block_tracker().lock() {
+            tracker.clear_blocks();
+        }
+        // The daemon's rows name output no longer on any grid (entry-5,
+        // CAP-5): tell it to drop the table too, so the next adoption cannot
+        // pair new spans against these stale ids. Best effort — the local
+        // view already cleared.
+        self.terminal.clear_command_blocks(self.pane_id);
         // Image placements are anchored in absolute scrollback rows, so the
         // rows we just discarded moved every anchor. Drop them; the daemon does
         // not replay out-of-band image frames, so a browser redraws on its next
@@ -4258,6 +4645,7 @@ impl TerminalView {
         if self.terminal.exited {
             return;
         }
+        self.maybe_adopt_daemon_blocks();
         let at_prompt = self.terminal.at_prompt();
 
         if self
@@ -4280,7 +4668,7 @@ impl TerminalView {
         // either way), and from then on the shell drives again. Without this
         // a pin is a roach motel — set once, stuck until explicitly cleared.
         if let (Some(pinned), Some(tracked)) = (self.manual_cwd.clone(), self.cwd())
-            && self.manual_cwd_rejoins(&pinned, &tracked, cx)
+            && self.manual_cwd_rejoins(&pinned, &tracked, &mut *cx)
         {
             self.manual_cwd = None;
             cx.notify();
@@ -4792,7 +5180,48 @@ impl TerminalView {
         let content = term.renderable_content();
         let row = content.cursor.point.line.0 + content.display_offset as i32;
         let col = content.cursor.point.column.0;
-        (row >= 0).then_some((row as usize, col))
+        let identity = (row >= 0).then_some((row as usize, col));
+        // Fold-aware like paint and the mouse path: the input bar, completion
+        // menu and click mapping must sit on the row the frame painted, not
+        // the identity row from before the fold. Anything unmapped (cursor
+        // hidden inside a collapsed span, lock busy, no folds) keeps the old
+        // identity answer.
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return identity;
+        }
+        let rows = self.terminal.size().rows;
+        let history = term.grid().history_size();
+        let cursor_abs = history as i64 + i64::from(content.cursor.point.line.0);
+        let store = self.terminal.block_tracker();
+        let Ok(tracker) = store.try_lock() else {
+            return identity;
+        };
+        if let Some(slot) = self.frame_map.as_ref() {
+            if slot.matches(
+                rows,
+                history,
+                term.grid().display_offset() as i32,
+                false,
+                &tracker.fold_epoch(),
+            ) {
+                if let Some(map) = slot.fold_map.as_deref() {
+                    if let Some(pos) = map.iter().position(|&a| a == cursor_abs) {
+                        return Some((pos, col));
+                    }
+                }
+            }
+        }
+        if !tracker.has_folds() {
+            return identity;
+        }
+        match visible_map(&term, &tracker, rows) {
+            Some(map) => map
+                .iter()
+                .position(|&a| a == cursor_abs)
+                .map(|pos| (pos, col))
+                .or(identity),
+            None => identity,
+        }
     }
 
     /// Where the IME should compose when the input bar has moved below the
@@ -6091,8 +6520,13 @@ impl TerminalView {
     ) {
         let smart = cx.global::<Config>().smart_select;
         let mut term = self.terminal.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
-        let point = Point::new(Line(row as i32 - display_offset), Column(col));
+        // Fold-aware: the click lands on the painted row, so a folded window
+        // starts the selection on its summary's grid line. A blank short-map
+        // row (or a row the grid forgot) starts nothing.
+        let Some(line) = self.mouse_grid_line(&term, row) else {
+            return;
+        };
+        let point = Point::new(line, Column(col));
         let side = if left { Side::Left } else { Side::Right };
         if shift && clicks == 1 && term.selection.is_some() {
             if let Some(sel) = term.selection.as_mut() {
@@ -6132,8 +6566,12 @@ impl TerminalView {
             return;
         }
         let mut term = self.terminal.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
-        let point = Point::new(Line(row as i32 - display_offset), Column(col));
+        // Same mapping as the start: both ends name painted rows, and the
+        // grid in between reads verbatim, hidden rows included.
+        let Some(line) = self.mouse_grid_line(&term, row) else {
+            return;
+        };
+        let point = Point::new(line, Column(col));
         let side = if left { Side::Left } else { Side::Right };
         if let Some(sel) = term.selection.as_mut() {
             sel.update(point, side);
@@ -6202,9 +6640,13 @@ impl TerminalView {
         } else {
             term.screen_lines().saturating_sub(1)
         };
-        let point = Point::new(Line(row as i32 - offset as i32), Column(ds.col));
-        if let Some(sel) = term.selection.as_mut() {
-            sel.update(point, ds.side);
+        // The edge row through the same mapping: past a scroll the snapshot
+        // is stale by construction, so this lands on the live fallback.
+        if let Some(line) = self.mouse_grid_line(&term, row) {
+            let point = Point::new(line, Column(ds.col));
+            if let Some(sel) = term.selection.as_mut() {
+                sel.update(point, ds.side);
+            }
         }
         drop(term);
         if offset != before {
@@ -6432,13 +6874,47 @@ impl TerminalView {
     }
 
     /// Apply `delta` lines right now. Returns whether anything actually moved.
+    ///
+    /// With folds the wheel steps visible rows (each integer row lands on a
+    /// visible row, hidden runs skipped in one step) through
+    /// [`smooth_scroll_step_visible`]; without folds — or on the alternate
+    /// screen, or when the tracker is contended — the legacy absolute stepping
+    /// runs exactly as before.
     fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();
         let offset = term.grid().display_offset();
-        let max = term.grid().history_size();
-        let (jump, frac) = smooth_scroll_step(offset, self.scroll_frac, delta, max);
+        let history = term.grid().history_size();
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        let rows = self.terminal.size().rows;
+        let floor = history as i64 + term.topmost_line().0 as i64;
+        let grid_bottom = history as i64 + term.bottommost_line().0 as i64;
+        // Grid first, tracker second — the same order the paint pass takes —
+        // and only `try_lock`: a contended tracker falls back to the legacy
+        // path rather than blocking the scroll. One guard serves both the
+        // fold test and the step, so a notch can never test folded and then
+        // step legacy when the second lock loses a race.
+        let store = self.terminal.block_tracker();
+        let guard = (!alt_screen && rows > 0)
+            .then(|| store.try_lock().ok())
+            .flatten();
+        let (jump, frac) = match guard {
+            Some(tracker) if tracker.has_folds() => smooth_scroll_step_visible(
+                offset as i64,
+                self.scroll_frac,
+                delta,
+                &tracker,
+                history as i64,
+                rows,
+                floor,
+                grid_bottom,
+            ),
+            _ => {
+                let (jump, frac) = smooth_scroll_step(offset, self.scroll_frac, delta, history);
+                (jump as i64, frac)
+            }
+        };
         if jump != 0 {
-            term.scroll_display(Scroll::Delta(jump));
+            term.scroll_display(Scroll::Delta(jump as i32));
         }
         drop(term);
         if jump != 0 || frac != self.scroll_frac {
@@ -6502,6 +6978,70 @@ impl TerminalView {
         self.frame_has_selection = term.selection.is_some();
     }
 
+    /// The fold mapping for this frame, computed in `render` so the gutter
+    /// and the grid share one same-frame mapping instead of the gutter
+    /// reading the previous paint's snapshot a frame behind.
+    ///
+    /// One `try_lock` pair at the top of the frame — grid first, tracker
+    /// second, the same order the paint pass takes — never blocking: failing
+    /// the grid lock clears the slot (the gutter reads as no markers and the
+    /// paint recomputes live, so no previous-frame rows outlive the
+    /// contention); a contended tracker stores the fresh scroll state with no
+    /// fold knowledge, exactly the paint fallback, so no wrong-row markers
+    /// outlive the contention either.
+    /// Paint reuses the slot when its generation still matches and recomputes
+    /// live otherwise. The one exception is grid growth landing between this
+    /// render and the paint (reader thread, active output only): that frame's
+    /// gutter and grid can split by the grown rows and converge on the next
+    /// frame — the same transient any retained repaint already accepts.
+    pub(super) fn sync_frame_map(&mut self) {
+        let rows = self.terminal.size().rows;
+        if rows == 0 {
+            return;
+        }
+        let Some(term) = self.terminal.term.try_lock_unfair() else {
+            self.frame_map = None;
+            return;
+        };
+        let history_size = term.grid().history_size();
+        let display_offset = term.grid().display_offset() as i32;
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        let fold_top = history_size as i64 - display_offset as i64;
+        let store = self.terminal.block_tracker();
+        let Ok(tracker) = store.try_lock() else {
+            self.frame_map = Some(FrameMap {
+                rows,
+                history_size,
+                display_offset,
+                alt_screen,
+                fold_epoch: Default::default(),
+                fold_top,
+                fold_map: None,
+                gutter_markers: Vec::new(),
+            });
+            return;
+        };
+        let fold_epoch = tracker.fold_epoch();
+        let fold_map = (!alt_screen)
+            .then(|| super::blocks::visible_map(&term, &tracker, rows))
+            .flatten();
+        let gutter_markers = if !alt_screen {
+            super::blocks::gutter_markers(&tracker, fold_map.as_deref(), fold_top, rows)
+        } else {
+            Vec::new()
+        };
+        self.frame_map = Some(FrameMap {
+            rows,
+            history_size,
+            display_offset,
+            alt_screen,
+            fold_epoch,
+            fold_top,
+            fold_map,
+            gutter_markers,
+        });
+    }
+
     /// The scrollback bar, laid down the right edge of the grid.
     ///
     /// The track is inset to the rows themselves — [`GRID_PAD_Y`] is padding
@@ -6519,6 +7059,189 @@ impl TerminalView {
             // pane disagreeing with the sidebar about when a scrollbar is worth
             // showing would be the odd one out.
             .child(Scrollbar::vertical(&self.scroll_handle).id("terminal-scrollbar"))
+    }
+
+    /// One marker per visible screen row: the closed span starting there, if
+    /// any — `▾` while its rows show, `▸` while folded to one line. A span
+    /// that failed (any non-zero exit, Ctrl-C's 130 included) paints its
+    /// marker in the theme danger red with a red bar at the strip's left
+    /// edge — the block-start red bar. Laid down the left padding beside
+    /// the grid, the same absolutely positioned overlay pattern as
+    /// [`render_scrollbar`](Self::render_scrollbar): only rows with a span
+    /// get a child, so an integration-less pane renders nothing at all.
+    ///
+    /// The strip is marker paint only — clicks toggle the fold from the
+    /// element's mouse handler, which owns the cell geometry. Hover only
+    /// underlines the marker glyph itself: no overlay is ever raised, so a
+    /// hover can never cover the block's first line.
+    fn render_block_gutter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let markers = self.block_gutter_markers();
+        let line_height = self.line_height;
+        let view = cx.entity();
+        let danger = cx.theme().danger;
+        // The grid paints rows shifted by the fractional scroll offset
+        // (`element.rs` folds it into the paint origin), so the strip rides
+        // the same shift — otherwise markers and text part ways mid-scroll.
+        let shift =
+            line_height * (self.scroll_frac.clamp(0., 1.) - self.input_scroll_rows() as f32);
+        div()
+            .absolute()
+            .top(px(GRID_PAD_Y) + shift)
+            .left_0()
+            .w(px(BLOCK_GUTTER_W))
+            .h(line_height * self.terminal.size().rows as f32)
+            .children(
+                markers
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(move |(row, marker)| {
+                        let (seq, folded, failed) = marker?;
+                        let left = view.clone();
+                        let right = view.clone();
+                        Some(
+                            div()
+                                .absolute()
+                                .top(line_height * row as f32)
+                                .left_0()
+                                .w(px(BLOCK_GUTTER_W))
+                                .h(line_height)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                // The strip sits mostly outside the element's
+                                // hitbox, so without this the click would only
+                                // focus: occlude the grid behind (whose handler
+                                // then stands down) and fold here instead.
+                                .occlude()
+                                // Glyph-only hover: an underline on the marker
+                                // repaints nothing outside this strip, so the
+                                // block's first line stays visible.
+                                .hover(|s| s.underline())
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    move |_ev: &MouseDownEvent,
+                                          _window: &mut Window,
+                                          cx: &mut App| {
+                                        left.update(cx, |v, cx| v.toggle_fold_by_seq(seq, cx));
+                                    },
+                                )
+                                // Right-click parity with the element's
+                                // handler: latch the link and the block the
+                                // menu is about.
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    move |_ev: &MouseDownEvent,
+                                          _window: &mut Window,
+                                          cx: &mut App| {
+                                        right.update(cx, |v, cx| {
+                                            v.record_menu_link(0, row, cx);
+                                            v.menu_block = Some(seq);
+                                        });
+                                    },
+                                )
+                                // Failed spans redden the marker and raise the
+                                // block-start red bar, both in theme danger.
+                                .when(failed, |d| {
+                                    d.text_color(danger).child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(px(3.))
+                                            .bg(danger),
+                                    )
+                                })
+                                .child(match folded {
+                                    true => "▸",
+                                    false => "▾",
+                                }),
+                        )
+                    }),
+            )
+    }
+
+    /// The gutter's markers, one per screen row: `(seq, folded, failed)` —
+    /// see [`render_block_gutter`](Self::render_block_gutter).
+    ///
+    /// Read back from this frame's render slot, never recomputed and never a
+    /// paint behind: the grid's paint reuses the same slot when its
+    /// generation still matches, so a scroll landing between two lock
+    /// acquisitions cannot split gutter and grid across rows. No locks here
+    /// at all — a missing slot (a frame that never got the locks) or a length
+    /// mismatch (a resize the slot predates) reads as no markers rather than
+    /// ones for the wrong rows.
+    fn block_gutter_markers(&self) -> Vec<Option<(u64, bool, bool)>> {
+        let rows = self.terminal.size().rows;
+        match self.frame_map.as_ref() {
+            Some(slot) if slot.gutter_markers.len() == rows => slot.gutter_markers.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The grid line a screen `row` shows: the one shared row function every
+    /// mouse entry resolves through — selection start/update and drag-scroll,
+    /// link hover/click/resolve, the right-click latch. Prefers this frame's
+    /// render slot (the rows on screen, shared with the grid and gutter);
+    /// the slot validates against the live scroll state (rows, history,
+    /// display offset, alternate screen) *and* the live fold table (span
+    /// count plus folded seqs, recorded at render time), and any mismatch
+    /// recomputes live through `visible_map` instead, so a fold or unfold
+    /// between render and click never resolves through a stale map.
+    /// Only `try_lock`s, grid first then tracker; a contended tracker
+    /// resolves to nothing — transient, the next event recovers — never to a
+    /// stale or identity row. Without folds the mapping is `None` and this is
+    /// exactly the old identity path. Vi keyboard paths never come here.
+    fn mouse_grid_line(
+        &self,
+        term: &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
+        row: usize,
+    ) -> Option<Line> {
+        let rows = self.terminal.size().rows;
+        if row >= rows {
+            return None;
+        }
+        let history = term.grid().history_size();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return Self::grid_line(term, row);
+        }
+        // The live tracker in hand for both validation and fallback: with the
+        // grid guard above it this stays grid first, tracker second.
+        let store = self.terminal.block_tracker();
+        let Ok(tracker) = store.try_lock() else {
+            return None;
+        };
+        if let Some(slot) = self.frame_map.as_ref() {
+            if slot.matches(
+                rows,
+                history,
+                term.grid().display_offset() as i32,
+                false,
+                &tracker.fold_epoch(),
+            ) {
+                // Render and click agree on scroll state and fold table:
+                // resolve through the frame's rows, blank for blank. A row
+                // the mapping holds but the grid forgot falls through to
+                // the live path below rather than pointing at evicted rows.
+                if let Some(line) =
+                    screen_to_line(row, slot.fold_top, slot.fold_map.as_deref(), history as i64)
+                {
+                    if line >= term.topmost_line() && line <= term.bottommost_line() {
+                        return Some(line);
+                    }
+                } else {
+                    return None;
+                }
+            }
+        }
+        if !tracker.has_folds() {
+            return Self::grid_line(term, row);
+        }
+        let (top, _) = super::blocks::window_abs_range(term, rows);
+        let map = visible_map(term, &tracker, rows);
+        screen_to_line(row, top, map.as_deref(), history as i64)
+            .filter(|line| *line >= term.topmost_line() && *line <= term.bottommost_line())
     }
 
     fn grid_line(
@@ -6580,9 +7303,10 @@ impl TerminalView {
         };
     }
 
-    /// Drops a latched link, for a right click the application is taking.
+    /// Drops latched links, for a right click the application is taking.
     pub fn forget_menu_link(&mut self) {
         self.menu_link = None;
+        self.menu_block = None;
     }
 
     /// The path the context menu is about, if it is about one.
@@ -6867,7 +7591,7 @@ impl TerminalView {
         use alacritty_terminal::term::cell::Flags;
 
         let term = self.terminal.term.lock();
-        let Some(line) = Self::grid_line(&term, row) else {
+        let Some(line) = self.mouse_grid_line(&term, row) else {
             return true;
         };
         if col >= term.columns() {
@@ -7010,7 +7734,9 @@ impl TerminalView {
     /// declares — which wins outright, because the emitter said what it meant.
     fn link_line_at(&self, col: usize, row: usize) -> Option<GridLink> {
         let term = self.terminal.term.lock();
-        let line = Self::grid_line(&term, row)?;
+        // Links land on painted rows: a folded span's summary resolves to its
+        // first line, and hidden rows are unreachable by construction.
+        let line = self.mouse_grid_line(&term, row)?;
         if col >= term.columns() {
             return None;
         }
@@ -7971,6 +8697,7 @@ impl Drop for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_frame_facts();
+        self.sync_frame_map();
         self.sync_typeahead_owner();
         self.sync_scrollbar();
         self.sync_composer(window, cx);
@@ -8058,6 +8785,13 @@ impl Render for TerminalView {
                 cx.listener(|this, ev: &MouseDownEvent, _window, _cx| {
                     this.context_menu_allowed =
                         should_show_context_menu(this.mouse_mode(), ev.modifiers.shift);
+                    // Padding clicks reach neither the element's handler nor a
+                    // gutter marker, so a latch from an earlier click would go
+                    // stale — clear it. Grid clicks are left alone: the
+                    // element's handler runs first and re-records them exactly.
+                    if !this.menu_click_in_grid(ev.position) {
+                        this.forget_menu_link();
+                    }
                 }),
             )
             .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().drag_border.opacity(0.12)))
@@ -8109,6 +8843,17 @@ impl Render for TerminalView {
                 this.step_match(Direction::Left, cx);
             }))
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
+            .on_action(
+                cx.listener(|this, _: &JumpToBlockStart, _w, cx| this.jump_to_block_start(cx)),
+            )
+            .on_action(cx.listener(|this, _: &CopyBlock, _w, cx| this.copy_block(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleBlockFold, _w, cx| this.toggle_menu_block_fold(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CopyBlockCommand, _w, cx| this.copy_block_command(cx)),
+            )
+            .on_action(cx.listener(|this, _: &CopyBlockOutput, _w, cx| this.copy_block_output(cx)))
             .on_action(cx.listener(|this, _: &OneKeyOpen, _w, cx| this.open_onekey_picker(cx)))
             .on_action(cx.listener(|this, _: &OneKeyFillUsername, _w, cx| {
                 this.fill_onekey(tty7_core::core::onekey::OneKeyFill::Username, cx)
@@ -8150,6 +8895,7 @@ impl Render for TerminalView {
             .child(TerminalElement::new(entity))
             .children(composer_docked)
             .child(self.render_scrollbar())
+            .child(self.render_block_gutter(cx))
             .children(search_bar)
             .children(input_bar)
             .children(completion_menu)
@@ -8232,8 +8978,37 @@ impl Render for TerminalView {
                     .menu(t(L10nKey::AppMenuFind), Box::new(FindInTerminal))
                     // Inside the terminal, what gets cleared goes without
                     // saying; the menu bar keeps the full "Clear Scrollback".
-                    .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback))
-                    .menu("OneKey Autofill…", Box::new(OneKeyOpen));
+                    .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback));
+                // Block items hide (never grey) with no block under the
+                // click — the latch is what the actions resolve through too.
+                // The fold item shares the gutter's toggle path, so menu and
+                // gutter stay equivalent by construction; its label follows
+                // the latched span's fold state.
+                let menu = match menu_view.read(cx).menu_block {
+                    Some(seq) => {
+                        let folded = menu_view.read(cx).block_folded(seq);
+                        let fold_key = match folded {
+                            true => L10nKey::TerminalBlockUnfold,
+                            false => L10nKey::TerminalBlockFold,
+                        };
+                        menu.menu(
+                            t(L10nKey::TerminalBlockJumpToStart),
+                            Box::new(JumpToBlockStart),
+                        )
+                        .menu(t(fold_key), Box::new(ToggleBlockFold))
+                        .menu(t(L10nKey::TerminalBlockCopyBoth), Box::new(CopyBlock))
+                        .menu(
+                            t(L10nKey::TerminalBlockCopyCommand),
+                            Box::new(CopyBlockCommand),
+                        )
+                        .menu(
+                            t(L10nKey::TerminalBlockCopyOutput),
+                            Box::new(CopyBlockOutput),
+                        )
+                    }
+                    None => menu,
+                };
+                let menu = menu.menu("OneKey Autofill…", Box::new(OneKeyOpen));
 
                 // `fork_label` is tty7-core's capability probe, and core has no
                 // locale table — take the answer, not its English wording.
@@ -8584,6 +9359,29 @@ fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
         (true, false, true) => SelectEndCopy::Editor,
         (true, false, false) => SelectEndCopy::None,
     }
+}
+
+/// The scroll offset placing `start_abs` at the top row: grid geometry out
+/// of the term, fixed-point walk in the tracker (see
+/// [`BlockTracker::jump_target_for`]).
+fn fold_aware_jump_target(
+    tracker: &BlockTracker,
+    term: &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
+    start_abs: i64,
+    rows: usize,
+    identity: i64,
+    history: i64,
+) -> i64 {
+    use alacritty_terminal::grid::Dimensions as _;
+
+    tracker.jump_target_for(
+        start_abs,
+        rows,
+        identity,
+        history,
+        history + term.topmost_line().0 as i64,
+        history + term.bottommost_line().0 as i64,
+    )
 }
 
 /// Whether a file link's menu offers "Open with Default App" beside "Open".
@@ -9093,6 +9891,46 @@ fn smooth_scroll_step(offset: usize, frac: f32, delta: f32, max: usize) -> (i32,
     (new_offset as i32 - offset as i32, pos - new_offset)
 }
 
+/// Fold-aware sibling of [`smooth_scroll_step`]: `delta` counts visible rows,
+/// and every integer row lands on a visible row — a long hidden run is
+/// skipped in a single step instead of eating one dead notch per hidden row,
+/// and the pre-clamp binds at the remembered-content edge rather than the
+/// fold-unaware `history_size`. Without folds every step is exactly one
+/// absolute row and this agrees with [`smooth_scroll_step`] bit-for-bit (see
+/// test), so the unfoldered path keeps byte-identical behavior by calling the
+/// legacy function directly instead of coming here.
+fn smooth_scroll_step_visible(
+    offset: i64,
+    frac: f32,
+    delta: f32,
+    tracker: &BlockTracker,
+    history: i64,
+    rows: usize,
+    floor: i64,
+    grid_bottom: i64,
+) -> (i64, f32) {
+    if rows == 0 {
+        return (0, frac);
+    }
+    let total = frac + delta;
+    let steps = total.floor() as i32;
+    let stepped_frac = total - steps as f32;
+    if steps == 0 {
+        // A sub-line notch pushing up into a bound consumes the fraction —
+        // the legacy clamp's snap-back — while every other sub-line notch
+        // accumulates, so a reversed first notch eats frac first and no dead
+        // notch is followed by a snap jump.
+        if delta > 0. && !tracker.can_step_up(offset, history, rows, floor, grid_bottom) {
+            return (0, 0.);
+        }
+        return (0, stepped_frac);
+    }
+    let (new_offset, applied) =
+        tracker.step_offset_visible(offset, steps, history, rows, floor, grid_bottom);
+    let frac_new = if applied == steps { stepped_frac } else { 0. };
+    (new_offset - offset, frac_new)
+}
+
 /// Advance the in-flight scroll animation once per presented frame.
 ///
 /// Registered from [`TerminalView::queue_scroll_anim`]: gpui runs the callback
@@ -9226,6 +10064,14 @@ mod tests {
         assert!(!out.contains(" …"), "{out:?}");
     }
     use super::{
+        BlockTracker, description_budget, drag_scroll_step, elide, encode_mouse,
+        expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
+        focus_report_bytes, highlight_runs, input_cells, input_char_positions,
+        input_overflow_shift, input_overlay_rows, input_start, menu_layout, paste_bytes,
+        select_end_copy, should_show_context_menu, smooth_scroll_step, smooth_scroll_step_visible,
+        submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
+    };
+    use super::{
         COMPLETION_MENU_MAX_W, LoopbackPlan, PortRoute, RawInput, SelectEndCopy, Typeahead,
         WheelRoute, clipboard_paths, compose_notification_title, cwd_is_on_host, display_width,
         link_path_style, loopback_plan, observe_typeahead_for_owner, typeahead_boundary,
@@ -9235,13 +10081,6 @@ mod tests {
         TitleSettle, files_cwd, local_path_for_pane, remote_paste_spec, settle_title,
         stages_clipboard_image, staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro,
         wsl_share_path,
-    };
-    use super::{
-        description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
-        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, highlight_runs,
-        input_cells, input_char_positions, input_overflow_shift, input_overlay_rows, input_start,
-        menu_layout, paste_bytes, select_end_copy, should_show_context_menu, smooth_scroll_step,
-        submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -10292,6 +11131,101 @@ mod tests {
         assert_eq!(smooth_scroll_step(3, 0.5, -10.0, 100), (-3, 0.0));
         assert_eq!(smooth_scroll_step(98, 0.0, 7.3, 100), (2, 0.0));
         assert_eq!(smooth_scroll_step(0, 0.0, 2.5, 0), (0, 0.0));
+    }
+
+    /// Without folds the visible-row stepper must agree with the legacy
+    /// absolute stepper bit-for-bit: every integer step is exactly one
+    /// absolute row, and the bound/frac behavior is identical.
+    #[test]
+    fn smooth_scroll_step_visible_matches_legacy_without_folds() {
+        let tracker = BlockTracker::default();
+        let (history, rows, floor, grid_bottom) = (100i64, 24usize, 0i64, 123i64);
+        let cases = [
+            (0usize, 0.0f32, 0.4f32),
+            (0, 0.4, 0.8),
+            (5, 0.2, -0.5),
+            (3, 0.5, -10.0),
+            (98, 0.0, 7.3),
+            (100, 0.0, 2.0),
+            (100, 0.5, 0.3),
+            (0, 0.6, -0.3),
+            (0, 0.0, -0.4),
+            (1, 0.0, -2.5),
+            (99, 0.9, 1.5),
+            (50, 0.0, -50.0),
+            (50, 0.0, 60.0),
+        ];
+        for (offset, frac, delta) in cases {
+            let (jump, legacy_frac) = smooth_scroll_step(offset, frac, delta, history as usize);
+            let (jump_visible, frac_visible) = smooth_scroll_step_visible(
+                offset as i64,
+                frac,
+                delta,
+                &tracker,
+                history,
+                rows,
+                floor,
+                grid_bottom,
+            );
+            assert_eq!(
+                jump as i64, jump_visible,
+                "jump differs at offset={offset} frac={frac} delta={delta}"
+            );
+            assert!(
+                (legacy_frac - frac_visible).abs() < 1e-4,
+                "frac differs at offset={offset} frac={frac} delta={delta}: \
+                 legacy={legacy_frac} visible={frac_visible}"
+            );
+        }
+        // Degenerate empty history clamps everything, both paths.
+        assert_eq!(smooth_scroll_step(0, 0.0, 2.5, 0), (0, 0.0));
+        assert_eq!(
+            smooth_scroll_step_visible(0, 0.0, 2.5, &tracker, 0, 24, 0, 23),
+            (0, 0.0)
+        );
+    }
+
+    /// With a folded long block, one visible row up must skip the whole hidden
+    /// run in a single jump (no dead notch), and a reversed first notch must
+    /// eat the fractional remainder instead of snapping.
+    #[test]
+    fn smooth_scroll_step_visible_skips_hidden_rows_and_heals_dead_offsets() {
+        let mut tracker = BlockTracker::default();
+        tracker.note_b(100);
+        tracker.note_d(200, Some(0), None);
+        tracker.set_folded(1, true);
+        let (history, rows, floor, grid_bottom) = (400i64, 24usize, 0i64, 423i64);
+        // Pushing down at the live edge clamps, frac included.
+        assert_eq!(
+            smooth_scroll_step_visible(0, 0.0, -3.0, &tracker, history, rows, floor, grid_bottom),
+            (0, 0.0)
+        );
+        // Dead offset (window bottom inside the hidden run): one notch up
+        // must jump the run and keep the fractional remainder.
+        let dead = history + rows as i64 - 1 - 150;
+        let (jump, frac) =
+            smooth_scroll_step_visible(dead, 0.0, 1.2, &tracker, history, rows, floor, grid_bottom);
+        assert!(
+            jump > 1,
+            "one visible row up must skip the hidden run, got jump={jump}"
+        );
+        assert!((frac - 0.2).abs() < 1e-4, "remainder kept, got frac={frac}");
+        // Reversed first notch eats frac first: no jump, no dead snap later.
+        let (jump, frac) = smooth_scroll_step_visible(
+            dead,
+            0.8,
+            -0.5,
+            &tracker,
+            history,
+            rows,
+            floor,
+            grid_bottom,
+        );
+        assert_eq!(jump, 0);
+        assert!(
+            (frac - 0.3).abs() < 1e-4,
+            "reversal must consume frac first, got frac={frac}"
+        );
     }
 
     #[test]
@@ -12300,6 +13234,53 @@ mod gpui_tests {
             .update(cx, |view, _, _| {
                 assert_eq!(view.manual_cwd(), Some(dir.as_path()));
                 assert_eq!(view.effective_cwd(), Some(dir.clone()));
+            })
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    /// A cached canonical answer rejoins without spawning any host call: the
+    /// UI thread only ever reads the cache, so this stays deterministic even
+    /// though the fetch itself rides `HostOps` in the background.
+    #[gpui::test]
+    fn a_cached_canon_answer_rejoins_without_touching_the_host(cx: &mut TestAppContext) {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("tty7-view-canon-{}", std::process::id()));
+        let elsewhere =
+            std::env::temp_dir().join(format!("tty7-view-canon-else-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::create_dir_all(&elsewhere).expect("create dir");
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.set_manual_cwd(Some(dir.clone()));
+                // Pretend the background fetch already landed: same target.
+                view.manual_cwd_canon = Some((dir.clone(), elsewhere.clone(), true));
+                assert!(view.manual_cwd_canon_pending.is_none());
+            })
+            .unwrap();
+        DaemonMsg::Cwd(elsewhere.clone())
+            .encode(&mut daemon)
+            .unwrap();
+        daemon.flush().unwrap();
+        for _ in 0..200 {
+            let rejoined = window
+                .update(cx, |view, window, cx| {
+                    view.poll_foreground(window, cx);
+                    view.manual_cwd().is_none()
+                })
+                .unwrap();
+            if rejoined {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.manual_cwd(), None);
+                // Served from cache: no background job was kicked off.
+                assert!(view.manual_cwd_canon_pending.is_none());
             })
             .unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -15016,6 +15997,194 @@ mod gpui_tests {
         view.terminal.term.lock().grid().display_offset()
     }
 
+    /// The deferred wiring test: `toggle_fold_by_seq` reads the window's top
+    /// anchor before the flip and moves the offset so the same anchor still
+    /// tops the window — through a live grid, not the pure helpers. The
+    /// numbers below are hand-derived visible-row arithmetic, so a wrong
+    /// wiring fails even when the pure math is right.
+    #[gpui::test]
+    fn toggle_fold_by_seq_keeps_the_top_anchor_stable_on_a_live_grid(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                let rows = view.terminal.size().rows as usize;
+                // Scrollback the same way `scroll_into_history` builds it.
+                // Feed scrollback until there is plenty, whatever size the
+                // harness window settled the grid at.
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                for _ in 0..10 {
+                    {
+                        let mut term = view.terminal.term.lock();
+                        parser.advance(&mut *term, &b"line\r\n".repeat(40));
+                    }
+                    if view.terminal.term.lock().grid().history_size() >= 64 {
+                        break;
+                    }
+                }
+                let (history, floor, grid_bottom) = {
+                    let term = view.terminal.term.lock();
+                    (
+                        term.grid().history_size() as i64,
+                        term.grid().history_size() as i64 + term.topmost_line().0 as i64,
+                        term.grid().history_size() as i64 + term.bottommost_line().0 as i64,
+                    )
+                };
+                assert!(
+                    history >= 64,
+                    "enough scrollback to straddle a fold: history {history}"
+                );
+                assert!(rows >= 16, "room for the spans below the window");
+                // A ten-row span; the window top starts three rows above it.
+                let start = history - 30;
+                {
+                    let store = view.terminal.block_tracker();
+                    let mut tracker = store.lock().unwrap();
+                    tracker.note_b(start);
+                    tracker.note_d(start + 9, Some(0), None);
+                }
+                let offset0 = (history - start + 3) as usize;
+                {
+                    let mut term = view.terminal.term.lock();
+                    term.scroll_display(Scroll::Delta(offset0 as i32));
+                    assert_eq!(
+                        term.grid().display_offset(),
+                        offset0,
+                        "the viewport starts straddling the span"
+                    );
+                }
+                let anchor = history - offset0 as i64;
+                assert_eq!(anchor, start - 3);
+                // A stale fractional remainder must not survive the toggle.
+                view.scroll_frac = 0.5;
+                view.toggle_fold_by_seq(1, cx);
+                // Nine hidden rows sat below the anchor inside the window, so
+                // keeping the anchor on top moves the offset by exactly nine.
+                let want = offset0 as i64 - 9;
+                assert!(
+                    view.terminal.block_tracker().lock().unwrap().is_folded(1),
+                    "the toggle landed"
+                );
+                assert_eq!(
+                    display_offset(view) as i64,
+                    want,
+                    "the offset moved so the anchor still tops the window"
+                );
+                assert_eq!(view.scroll_frac, 0., "stale frac dropped with the move");
+                {
+                    let term = view.terminal.term.lock();
+                    let store = view.terminal.block_tracker();
+                    let tracker = store.lock().unwrap();
+                    let bottom = (history - want + rows as i64 - 1).min(grid_bottom);
+                    let mut map = visible_map(&term, &tracker, rows).expect("fold in window");
+                    map.retain(|&a| a >= floor);
+                    assert_eq!(map.first(), Some(&anchor), "anchor still tops");
+                }
+                // Unfolding restores the identical offset.
+                view.toggle_fold_by_seq(1, cx);
+                assert!(
+                    !view.terminal.block_tracker().lock().unwrap().is_folded(1),
+                    "the toggle back landed"
+                );
+                assert_eq!(display_offset(view), offset0, "unfold restores the offset");
+                assert_eq!(view.scroll_frac, 0.);
+                // A span outside the window: the offset is already correct, so
+                // only the stale frac is dropped (`want == offset` branch).
+                // Placed relative to the live row count so the anchor's walk
+                // can never reach it, whatever size the harness window gave.
+                {
+                    let store = view.terminal.block_tracker();
+                    let mut tracker = store.lock().unwrap();
+                    tracker.note_b(start + rows as i64 + 7);
+                    tracker.note_d(start + rows as i64 + 12, Some(0), None);
+                }
+                view.scroll_frac = 0.5;
+                view.toggle_fold_by_seq(2, cx);
+                assert!(
+                    view.terminal.block_tracker().lock().unwrap().is_folded(2),
+                    "the out-of-window toggle landed"
+                );
+                assert_eq!(
+                    display_offset(view),
+                    offset0,
+                    "nothing visible moved, so the offset stands"
+                );
+                assert_eq!(view.scroll_frac, 0., "but the stale frac is still dropped");
+            })
+            .unwrap();
+    }
+
+    /// Same wiring, anchor parked inside the span: the hidden anchor falls
+    /// back to the span's start row — the summary row — as the stable top.
+    #[gpui::test]
+    fn toggle_fold_by_seq_falls_back_to_the_summary_row_on_a_live_grid(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                let rows = view.terminal.size().rows as usize;
+                // Feed scrollback until there is plenty, whatever size the
+                // harness window settled the grid at.
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                for _ in 0..10 {
+                    {
+                        let mut term = view.terminal.term.lock();
+                        parser.advance(&mut *term, &b"line\r\n".repeat(40));
+                    }
+                    if view.terminal.term.lock().grid().history_size() >= 64 {
+                        break;
+                    }
+                }
+                let (history, floor, grid_bottom) = {
+                    let term = view.terminal.term.lock();
+                    (
+                        term.grid().history_size() as i64,
+                        term.grid().history_size() as i64 + term.topmost_line().0 as i64,
+                        term.grid().history_size() as i64 + term.bottommost_line().0 as i64,
+                    )
+                };
+                assert!(
+                    history >= 64,
+                    "enough scrollback to straddle a fold: history {history}"
+                );
+                assert!(rows >= 16, "room for the spans below the window");
+                let start = history - 30;
+                {
+                    let store = view.terminal.block_tracker();
+                    let mut tracker = store.lock().unwrap();
+                    tracker.note_b(start);
+                    tracker.note_d(start + 9, Some(0), None);
+                }
+                // Park the top five rows inside the ten-row span.
+                let offset1 = (history - start - 5) as usize;
+                {
+                    let mut term = view.terminal.term.lock();
+                    term.scroll_display(Scroll::Delta(offset1 as i32));
+                    assert_eq!(term.grid().display_offset(), offset1);
+                }
+                view.toggle_fold_by_seq(1, cx);
+                assert!(
+                    view.terminal.block_tracker().lock().unwrap().is_folded(1),
+                    "the toggle landed"
+                );
+                // From the summary row, 24 visible rows end at start + 32.
+                let want = history - start - 9;
+                assert_eq!(
+                    display_offset(view) as i64,
+                    want,
+                    "the offset moved so the summary row tops the window"
+                );
+                {
+                    let term = view.terminal.term.lock();
+                    let store = view.terminal.block_tracker();
+                    let tracker = store.lock().unwrap();
+                    let bottom = (history - want + rows as i64 - 1).min(grid_bottom);
+                    let mut map = visible_map(&term, &tracker, rows).expect("fold in window");
+                    map.retain(|&a| a >= floor);
+                    assert_eq!(map.first(), Some(&start), "summary row tops");
+                }
+            })
+            .unwrap();
+    }
+
     /// Shaped after what macOS actually delivers, measured on a wheel mouse and
     /// a trackpad: both arrive as pixels, and only the trackpad ever reports a
     /// phase. One wheel detent is ~103px, roughly five lines at a 21px line
@@ -16942,6 +18111,203 @@ mod gpui_tests {
         assert_eq!(buf.len(), 24 * 80);
     }
 
+    /// Seeds one closed span over the first rows and folds it, so the window
+    /// has a real fold mapping to share. Returns nothing: the span's seq is 1.
+    fn seed_one_folded_span(view: &Entity<TerminalView>, cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = view.read(cx).terminal.block_tracker();
+            let mut tracker = store.lock().expect("the test holds no other lock");
+            tracker.note_b(0);
+            tracker.note_c();
+            tracker.note_d(5, Some(0), Some(String::new()));
+            assert_eq!(
+                tracker.set_folded(1, true),
+                Some(true),
+                "the seeded span folds"
+            );
+        });
+    }
+
+    /// The gutter and the grid share the render frame's mapping: with a fold
+    /// in play, the gutter markers and the paint snapshot carry the same map,
+    /// top and markers — no frame of chase mid-scroll.
+    #[gpui::test]
+    fn gutter_and_grid_share_the_render_frames_mapping(cx: &mut TestAppContext) {
+        use super::super::element::{PaintColors, TerminalElement};
+        use alacritty_terminal::index::Line;
+
+        let (_window, view, _daemon) = rooted_harness(cx);
+        seed_one_folded_span(&view, cx);
+        // The laid-out window sizes the pane: build the test window against
+        // the live size, not the pre-layout one, or the slot's generation
+        // (which carries rows) can never match the paint's.
+        let (rows, cols) = cx.update(|cx| {
+            (
+                view.read(cx).terminal.size().rows,
+                view.read(cx).terminal.size().cols,
+            )
+        });
+
+        // Render computes the slot; the gutter reads it back same-frame.
+        cx.update(|cx| view.update(cx, |v, _| v.sync_frame_map()));
+        let slot = cx.update(|cx| view.read(cx).frame_map.clone());
+        let slot = slot.expect("render with free locks fills the slot");
+        assert!(
+            slot.fold_map.is_some(),
+            "the folded span has to remap the window"
+        );
+        let markers = cx.update(|cx| view.read(cx).block_gutter_markers());
+        assert_eq!(markers.len(), rows);
+        assert_eq!(
+            markers[0],
+            Some((1, true, false)),
+            "the folded span's marker sits on its first row"
+        );
+
+        // Paint reuses the slot: the snapshot carries the same rows.
+        let element = TerminalElement::new(view.clone());
+        let snap = cx.update(|cx| {
+            let colors = PaintColors::resolve(cx.theme(), cx);
+            let mut buf = Vec::new();
+            let snap = element.build_grid(
+                &colors,
+                &mut buf,
+                rows,
+                cols,
+                false,
+                cx,
+                1.,
+                gpui::Rgba::default(),
+                true,
+            );
+            (snap, buf.len())
+        });
+        let (snap, len) = snap;
+        assert_eq!(len, rows * cols);
+        let snap = snap.expect("the first frame waits and builds");
+        assert_eq!(snap.fold_map, slot.fold_map);
+        assert_eq!(snap.fold_top, slot.fold_top);
+        assert_eq!(snap.gutter_markers, slot.gutter_markers);
+
+        // Clicks resolve through the same rows: screen row 1 is the folded
+        // window's second painted row, not the identity row beneath the fold.
+        let line = cx.update(|cx| {
+            let term_arc = view.read(cx).terminal.term.clone();
+            let term = term_arc.lock();
+            view.read(cx).mouse_grid_line(&term, 1)
+        });
+        let map = slot.fold_map.as_ref().expect("checked above");
+        let history = cx.update(|cx| view.read(cx).terminal.term.lock().grid().history_size());
+        let expect = Line((map[1] - history as i64) as i32);
+        assert_eq!(line, Some(expect));
+        assert_ne!(
+            line,
+            Some(Line(1)),
+            "the identity row would be the stale-snapshot answer"
+        );
+    }
+
+    /// A fold change between render and paint/click falls back to a live
+    /// mapping, and a lock-contended paint leaves the slot alone for the
+    /// retained repaint to stand on.
+    #[gpui::test]
+    fn a_stale_render_slot_falls_back_live_and_survives_contention(cx: &mut TestAppContext) {
+        use super::super::element::{PaintColors, TerminalElement};
+        use alacritty_terminal::index::Line;
+
+        let (_window, view, _daemon) = rooted_harness(cx);
+        seed_one_folded_span(&view, cx);
+        let (rows, cols) = cx.update(|cx| {
+            (
+                view.read(cx).terminal.size().rows,
+                view.read(cx).terminal.size().cols,
+            )
+        });
+        cx.update(|cx| view.update(cx, |v, _| v.sync_frame_map()));
+        let element = TerminalElement::new(view.clone());
+        let build = |cx: &mut TestAppContext, must_block: bool| {
+            cx.update(|cx| {
+                let colors = PaintColors::resolve(cx.theme(), cx);
+                let mut buf = Vec::new();
+                element.build_grid(
+                    &colors,
+                    &mut buf,
+                    rows,
+                    cols,
+                    false,
+                    cx,
+                    1.,
+                    gpui::Rgba::default(),
+                    must_block,
+                )
+            })
+        };
+        assert!(build(cx, true).is_some());
+
+        // Unfold with no render in between: the slot is stale (still folded).
+        cx.update(|cx| {
+            let store = view.read(cx).terminal.block_tracker();
+            assert_eq!(
+                store
+                    .lock()
+                    .expect("the test holds no other lock")
+                    .set_folded(1, false),
+                Some(false),
+                "the span unfolds"
+            );
+        });
+        let stale = cx.update(|cx| view.read(cx).frame_map.clone());
+        assert!(
+            stale.as_ref().is_some_and(|s| s.fold_map.is_some()),
+            "no render ran, so the slot still holds the folded map"
+        );
+
+        // Paint recomputes live and writes the fresh mapping back.
+        let snap = build(cx, false).expect("the lock is free");
+        assert!(
+            snap.fold_map.is_none(),
+            "with nothing folded the paint is the identity window"
+        );
+        assert_eq!(
+            snap.gutter_markers[0],
+            Some((1, false, false)),
+            "the unfolded span keeps its marker, open"
+        );
+        let fresh = cx.update(|cx| view.read(cx).frame_map.clone());
+        let fresh = fresh.expect("a paint writes its mapping back");
+        assert_eq!(fresh.fold_map, None);
+        assert_eq!(fresh.gutter_markers, snap.gutter_markers);
+
+        // The click never trusted the stale rows either.
+        let line = cx.update(|cx| {
+            let term_arc = view.read(cx).terminal.term.clone();
+            let term = term_arc.lock();
+            view.read(cx).mouse_grid_line(&term, 1)
+        });
+        assert_eq!(
+            line,
+            Some(Line(1)),
+            "the unfolded window resolves the identity row, not the folded one"
+        );
+
+        // A paint that cannot have the lock leaves the slot alone, so the
+        // retained repaint keeps standing on the last good mapping.
+        let term = cx.update(|cx| view.read(cx).terminal.term.clone());
+        let held = term.lock();
+        let refused = build(cx, false);
+        assert!(
+            refused.is_none(),
+            "a contended paint says so instead of waiting"
+        );
+        let kept = cx.update(|cx| view.read(cx).frame_map.clone());
+        drop(held);
+        assert_eq!(
+            kept,
+            Some(fresh),
+            "the failed paint must not corrupt the slot"
+        );
+    }
+
     #[gpui::test]
     fn a_highlight_follows_its_text_as_output_scrolls_under_it(cx: &mut TestAppContext) {
         let (window, view, _daemon) = rooted_harness(cx);
@@ -17555,6 +18921,60 @@ mod gpui_tests {
             Some((3, 10)),
             "a Hidden shape must not collapse the editor anchor to the top-left corner"
         );
+    }
+
+    /// Folding a span above the live input must move the editor anchor with
+    /// the painted rows: `cursor_cell` resolves through the fold mapping like
+    /// paint and the mouse path, not the pre-fold identity row.
+    #[gpui::test]
+    fn cursor_cell_follows_the_input_row_through_a_fold(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                let rows = view.terminal.size().rows;
+                assert!(rows >= 16, "room for a fold above the cursor");
+                // Short history on purpose: the folded map comes up short and
+                // paints top-aligned, so the input row sits higher while the
+                // identity row still names the viewport bottom.
+                //
+                // Walk the fresh cursor to the bottom without scrolling any
+                // history in: the fold then sits strictly above the input.
+                {
+                    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                    let mut term = view.terminal.term.lock();
+                    parser.advance(&mut *term, &b"\r\n".repeat(rows - 1));
+                }
+                let (cursor_line, col, bottom) = {
+                    let term = view.terminal.term.lock();
+                    let content = term.renderable_content();
+                    (
+                        content.cursor.point.line.0,
+                        content.cursor.point.column.0,
+                        term.grid().history_size() as i64 + term.bottommost_line().0 as i64,
+                    )
+                };
+                // A ten-row span ending three rows above the cursor; folding
+                // it hides nine rows above the input row.
+                let (start, end) = (bottom - 12, bottom - 3);
+                {
+                    let store = view.terminal.block_tracker();
+                    let mut tracker = store.lock().unwrap();
+                    tracker.note_b(start);
+                    tracker.note_d(end, Some(0), None);
+                    tracker.set_folded(1, true);
+                }
+                let identity = cursor_line as usize;
+                assert!(
+                    identity > 9,
+                    "room above for the shift to show: identity {identity}"
+                );
+                assert_eq!(
+                    view.cursor_cell(),
+                    Some((identity - 9, col)),
+                    "the anchor rides the painted input row, not the pre-fold row"
+                );
+            })
+            .unwrap();
     }
 
     /// #844: a TUI that resets DECTCEM and draws its own reverse-video caret
