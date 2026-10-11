@@ -199,7 +199,12 @@ impl InstancePicker {
         }
     }
 
-    fn finish(&mut self, choice: Option<PickerSelection>, cx: &mut Context<Self>) {
+    fn finish(
+        &mut self,
+        choice: Option<PickerSelection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Enter reaches here twice (Input PressEnter + the Enter keybind):
         // the second call must not quit twice. A failed Windows relaunch
         // leaves `result` unset so the user can retry.
@@ -226,23 +231,27 @@ impl InstancePicker {
             }
         }
         *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(choice);
+        // Close the picker window first: `quit` alone stops the event loop
+        // but leaves the native surface mapped, and the compositor then
+        // reports the leftover window as "not responding" next to the main
+        // window the follow-up launch opens in-process.
+        window.remove_window();
         cx.quit();
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.input.read(cx).value().to_string();
         match self.state.confirm(&typed) {
-            Ok(choice) => self.finish(Some(choice), cx),
+            Ok(choice) => self.finish(Some(choice), window, cx),
             Err(_) => {
                 self.error = true;
                 cx.notify();
             }
         }
-        let _ = window;
     }
 
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.finish(None, cx);
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish(None, window, cx);
     }
 
     /// Up/Down move the rows, unless the new-name field holds the focus
@@ -282,7 +291,7 @@ impl Render for InstancePicker {
             .on_action(
                 cx.listener(|this, _: &ConfirmInstance, window, cx| this.confirm(window, cx)),
             )
-            .on_action(cx.listener(|this, _: &CancelInstance, _, cx| this.cancel(cx)))
+            .on_action(cx.listener(|this, _: &CancelInstance, window, cx| this.cancel(window, cx)))
             .on_action(cx.listener(|this, _: &PickerUp, window, cx| {
                 if !this.input_focused(window, cx) || !this.input_holds_text(cx) {
                     this.state.move_up();
@@ -352,7 +361,7 @@ impl Render for InstancePicker {
                         Button::new("instance-picker-close")
                             .label(t(L10nKey::InstancePickerClose))
                             .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
                     )
                     .child(
                         Button::new("instance-picker-enter")
