@@ -29,6 +29,9 @@
     - `cp .bench/results/io-tty7.txt /tmp/io-head.txt`
     - `TTY7_BIN=/tmp/tty7-perf-base/target/release/tty7-app scripts/bench/run_one.sh tty7 io` （baseline → `.bench/results/io-tty7.txt`，与 `/tmp/io-head.txt` 对比）
     - `git worktree remove /tmp/tty7-perf-base`
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-fold-scroll-jitter-fix.md`
+  summary: toggle_fold_by_seq 本体接线（翻转前 anchor 读取、has_folds 门、alt/rows=0/锁争用跳过）缺单测
+  evidence: 新纯函数单测全过但无一用例调用 toggle 本体；既有 view 单测皆为纯函数，TerminalView 方法需 gpui harness（同 mouse_grid_line 无 harness 条目）；接线回归仍靠真机验证
 - source_plan: `_bmad-output/initiative-terminal-blocks/plan-fold-display-fix.md`
   summary: mouse_grid_line 快照验证/回退分支缺单测（函数本体需 TerminalView gpui harness）。
   evidence: view.rs:11698 有 TestAppContext harness，但 mouse 路径无一使用；fold_epoch/回退逻辑仅由 live-Term 映射单测间接覆盖。
