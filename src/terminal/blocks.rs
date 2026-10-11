@@ -461,10 +461,31 @@ impl BlockTracker {
     /// first line). The one hidden-row helper every fold-aware path walks
     /// through: the paint mapping, the mouse hit-tests and the jump target
     /// all key off this, so a row is hidden for all of them or none.
+    ///
+    /// A row that starts another block (its `B`/prompt row) is never hidden
+    /// by a previous block's fold, even when the previous span's inclusive
+    /// `end_abs` shares that exact row (adjacent `D`/`B`). The prompt row
+    /// belongs to the next block: folding must leave it visible with only
+    /// its own interior hidden.
     pub fn hidden_abs_in(&self, abs: i64) -> bool {
-        self.spans
-            .iter()
-            .any(|s| self.folded.contains(&s.seq) && s.start_abs < abs && abs <= s.end_abs)
+        self.spans.iter().any(|s| {
+            self.folded.contains(&s.seq)
+                && s.start_abs < abs
+                && abs <= s.end_abs
+                && !self.is_next_block_start(s.seq, abs, s.end_abs)
+        })
+    }
+
+    /// Whether `abs` is the start row of another block sharing this exact
+    /// boundary row: `abs == end_abs` of span `seq` and also `start_abs` of
+    /// a different span. Strict interiors (`abs < end_abs`) are not exempt,
+    /// so nested starts inside an outer fold stay hidden.
+    fn is_next_block_start(&self, seq: u64, abs: i64, end_abs: i64) -> bool {
+        abs == end_abs
+            && self
+                .spans
+                .iter()
+                .any(|o| o.seq != seq && o.start_abs == abs)
     }
 
     /// Whether `abs` is hidden inside a folded span (past its first line).
@@ -559,11 +580,16 @@ impl BlockTracker {
 
     /// The folded span hiding `abs` (past its first line), if any. Nested folds
     /// chain: an inner span's start row can itself sit inside an outer fold,
-    /// so callers walk this until it reports nothing.
+    /// so callers walk this until it reports nothing. Shares
+    /// [`BlockTracker::hidden_abs_in`]'s boundary rule: a next block's start
+    /// row is never reported as hidden by a previous fold.
     fn folded_container(&self, abs: i64) -> Option<&BlockSpan> {
-        self.spans
-            .iter()
-            .find(|s| self.folded.contains(&s.seq) && s.start_abs < abs && abs <= s.end_abs)
+        self.spans.iter().find(|s| {
+            self.folded.contains(&s.seq)
+                && s.start_abs < abs
+                && abs <= s.end_abs
+                && !self.is_next_block_start(s.seq, abs, s.end_abs)
+        })
     }
 
     /// The nearest visible row strictly above `abs` (older), skipping folded
@@ -591,7 +617,17 @@ impl BlockTracker {
         let mut c = abs.saturating_add(1);
         loop {
             match self.folded_container(c) {
-                Some(span) => c = span.end_abs.saturating_add(1),
+                Some(span) => {
+                    // The run hides `c..=end`, except its end row when that
+                    // row starts the next block (shared `D`/`B` boundary):
+                    // that prompt row stays visible, so step onto it and let
+                    // the next lap return it instead of jumping over it.
+                    if self.is_next_block_start(span.seq, span.end_abs, span.end_abs) {
+                        c = span.end_abs;
+                    } else {
+                        c = span.end_abs.saturating_add(1);
+                    }
+                }
                 None => return Some(c),
             }
         }
@@ -1920,6 +1956,23 @@ mod tests {
         assert!(tracker.hidden_abs_in(101));
         assert!(tracker.hidden_abs_in(110));
         assert!(!tracker.hidden_abs_in(111), "past the end is outside");
+    }
+
+    /// Adjacent blocks share the boundary row (`D` == next `B`): folding the
+    /// first must leave the next block's prompt row visible.
+    #[test]
+    fn folded_prev_leaves_next_block_prompt_visible() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 110));
+        tracker.spans.push(span(2, 110, 120));
+        tracker.set_folded(1, true);
+        assert!(!tracker.hidden_abs_in(110), "next prompt stays");
+        assert!(tracker.hidden_abs_in(109));
+        let map = tracker.map_visible(120, 12);
+        assert!(map.contains(&100), "prev summary paints");
+        assert!(map.contains(&110), "next prompt paints");
+        assert_eq!(tracker.next_visible_row(100), Some(110));
+        assert_eq!(tracker.next_visible_row(109), Some(110));
     }
 
     /// The jump helper tops out at the span's start: the window bottom past
