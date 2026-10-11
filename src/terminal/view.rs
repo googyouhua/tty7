@@ -5180,7 +5180,48 @@ impl TerminalView {
         let content = term.renderable_content();
         let row = content.cursor.point.line.0 + content.display_offset as i32;
         let col = content.cursor.point.column.0;
-        (row >= 0).then_some((row as usize, col))
+        let identity = (row >= 0).then_some((row as usize, col));
+        // Fold-aware like paint and the mouse path: the input bar, completion
+        // menu and click mapping must sit on the row the frame painted, not
+        // the identity row from before the fold. Anything unmapped (cursor
+        // hidden inside a collapsed span, lock busy, no folds) keeps the old
+        // identity answer.
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return identity;
+        }
+        let rows = self.terminal.size().rows;
+        let history = term.grid().history_size();
+        let cursor_abs = history as i64 + i64::from(content.cursor.point.line.0);
+        let store = self.terminal.block_tracker();
+        let Ok(tracker) = store.try_lock() else {
+            return identity;
+        };
+        if let Some(slot) = self.frame_map.as_ref() {
+            if slot.matches(
+                rows,
+                history,
+                term.grid().display_offset() as i32,
+                false,
+                &tracker.fold_epoch(),
+            ) {
+                if let Some(map) = slot.fold_map.as_deref() {
+                    if let Some(pos) = map.iter().position(|&a| a == cursor_abs) {
+                        return Some((pos, col));
+                    }
+                }
+            }
+        }
+        if !tracker.has_folds() {
+            return identity;
+        }
+        match visible_map(&term, &tracker, rows) {
+            Some(map) => map
+                .iter()
+                .position(|&a| a == cursor_abs)
+                .map(|pos| (pos, col))
+                .or(identity),
+            None => identity,
+        }
     }
 
     /// Where the IME should compose when the input bar has moved below the
@@ -18880,6 +18921,60 @@ mod gpui_tests {
             Some((3, 10)),
             "a Hidden shape must not collapse the editor anchor to the top-left corner"
         );
+    }
+
+    /// Folding a span above the live input must move the editor anchor with
+    /// the painted rows: `cursor_cell` resolves through the fold mapping like
+    /// paint and the mouse path, not the pre-fold identity row.
+    #[gpui::test]
+    fn cursor_cell_follows_the_input_row_through_a_fold(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                let rows = view.terminal.size().rows;
+                assert!(rows >= 16, "room for a fold above the cursor");
+                // Short history on purpose: the folded map comes up short and
+                // paints top-aligned, so the input row sits higher while the
+                // identity row still names the viewport bottom.
+                //
+                // Walk the fresh cursor to the bottom without scrolling any
+                // history in: the fold then sits strictly above the input.
+                {
+                    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                    let mut term = view.terminal.term.lock();
+                    parser.advance(&mut *term, &b"\r\n".repeat(rows - 1));
+                }
+                let (cursor_line, col, bottom) = {
+                    let term = view.terminal.term.lock();
+                    let content = term.renderable_content();
+                    (
+                        content.cursor.point.line.0,
+                        content.cursor.point.column.0,
+                        term.grid().history_size() as i64 + term.bottommost_line().0 as i64,
+                    )
+                };
+                // A ten-row span ending three rows above the cursor; folding
+                // it hides nine rows above the input row.
+                let (start, end) = (bottom - 12, bottom - 3);
+                {
+                    let store = view.terminal.block_tracker();
+                    let mut tracker = store.lock().unwrap();
+                    tracker.note_b(start);
+                    tracker.note_d(end, Some(0), None);
+                    tracker.set_folded(1, true);
+                }
+                let identity = cursor_line as usize;
+                assert!(
+                    identity > 9,
+                    "room above for the shift to show: identity {identity}"
+                );
+                assert_eq!(
+                    view.cursor_cell(),
+                    Some((identity - 9, col)),
+                    "the anchor rides the painted input row, not the pre-fold row"
+                );
+            })
+            .unwrap();
     }
 
     /// #844: a TUI that resets DECTCEM and draws its own reverse-video caret
