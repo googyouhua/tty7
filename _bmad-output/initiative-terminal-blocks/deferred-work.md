@@ -48,3 +48,8 @@
   summary: bin 测试目标不编译（src/terminal/view.rs 测试模块 24 处 E0252 重复 import），picker 侧单测无法执行。
   evidence: stash 后基线复建同样 24 错、与本改动无关；core 7/7 绿、bin check 干净。本 epic 后续 entry 的 picker 单测同样被挡。
   revisit_when: view.rs 测试 import 修复后；复验=cargo test --bin tty7-app instance_picker 全绿（含 rows_retain_snapshot_mtimes）。
+
+- source_plan: `_bmad-output/initiative-terminal-blocks/epic-username-selector/story-core-delete-op-plus-probe-plus-memory-guard-plan.md`
+  summary: 全量 tty7-core 套件 3 个失败（daemon shell_integration x2、spawn x1），与 instance 改动无关。
+  evidence: 评审在基线 stash 下复现同败；diff 仅碰 instance.rs，被败模块不依赖 instance（仅 remote_link.rs 引用）。
+  revisit_when: daemon 测试在 CI/本机稳定后；复验=cargo test -p tty7-core 全绿。

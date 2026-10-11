@@ -199,7 +199,18 @@ pub fn read_last() -> Option<String> {
 
 /// Remember `name` (`DEFAULT_SENTINEL` for the default instance) in the
 /// given default directory, creating it when needed.
+///
+/// The shape is enforced here so the no-dangling-memory guarantee does not
+/// rest on call-site discipline (AD-7): only the sentinel or a
+/// [`validate_name`]-clean name is written, anything else is an
+/// `InvalidInput` error that leaves the directory and file untouched.
 pub fn write_last_in(default_dir: &Path, name: &str) -> std::io::Result<()> {
+    if name != DEFAULT_SENTINEL && validate_name(name).is_err() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{name}' is not an instance name — use [a-z0-9-], e.g. alice"),
+        ));
+    }
     std::fs::create_dir_all(default_dir)?;
     std::fs::write(default_dir.join(MEMORY_FILE), format!("{name}\n"))
 }
@@ -210,6 +221,228 @@ pub fn write_last(name: &str) -> std::io::Result<()> {
         return Err(std::io::Error::other("no default config directory"));
     };
     write_last_in(&dir, name)
+}
+
+/// What the dir-scoped liveness probe found: the seat is free, held by a
+/// live server, or could not be evaluated (in which case the caller must not
+/// fail open — see [`remove_instance_in`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatState {
+    /// No server holds `<dir>/daemon.lock`.
+    Free,
+    /// A live server holds the seat. The pid is advisory/unverified: it is
+    /// what the holder recorded, and `None` when it recorded nothing
+    /// (a pre-recording build) or the record is unreadable. Either way the
+    /// seat is held, so the directory must not be unlinked.
+    Live { pid: Option<u32> },
+    /// The probe could not be put to the kernel: non-unix (no probe
+    /// primitive there), or a lock error such as NFS `ENOTSUP`.
+    Unknown,
+}
+
+/// The seat holder for one instance directory, probed at
+/// `<dir>/daemon.lock` — the same seat file the singleton claims, addressed
+/// dir-scoped so the global pinned config dir is never consulted and
+/// `daemon/singleton.rs` stays untouched.
+///
+/// Mirrors the singleton's `holder_pid` flock loop: a shared non-blocking
+/// lock distinguishes a live holder (`EWOULDBLOCK`) from a free seat, and
+/// `EINTR` retries rather than reporting either way. The lock file is never
+/// created here: a seat file that does not exist has never had a holder, so
+/// that reads as [`SeatState::Free`].
+pub fn holder_pid_in(dir: &Path) -> SeatState {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd as _;
+
+        let path = dir.join("daemon.lock");
+        let file = match std::fs::File::options().read(true).open(&path) {
+            Ok(file) => file,
+            // Never had a holder; anything else (permissions, ENOTDIR, …)
+            // means the question could not be put to the kernel.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SeatState::Free,
+            Err(_) => return SeatState::Unknown,
+        };
+        loop {
+            // LOCK_SH is enough to conflict with a holder's LOCK_EX while
+            // keeping the probe as weak as possible.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+                return SeatState::Free;
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EWOULDBLOCK) => break,
+                Some(libc::EINTR) => continue,
+                _ => return SeatState::Unknown,
+            }
+        }
+        // The seat is held — the flock said so, which is authoritative. The
+        // pid is advisory: every holder writes its pid the moment it claims,
+        // so a missing or stale record still means "held, by someone unnamed".
+        let pid = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| c.trim().parse::<u32>().ok())
+            .filter(|&pid| pid > 1);
+        SeatState::Live { pid }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        // No probe primitive on this platform (mirrors the singleton's
+        // unix-only `holder_pid`): the caller double-confirms instead of
+        // deleting blind.
+        SeatState::Unknown
+    }
+}
+
+/// Why [`remove_instance_in`] refused or failed to remove an instance.
+/// `Live` and `Unknown` never unlink; the picker (entry 5) renders the
+/// liveness report for `Live` and a second confirm for `Unknown`.
+#[derive(Debug)]
+pub enum RemoveError {
+    /// The name is invalid or the sentinel, or the instance path is a
+    /// symlink (never followed) or otherwise not a real directory.
+    /// Nothing was touched, no path was built beyond the refusal.
+    Invalid(String),
+    /// A live server holds the seat. The pid is advisory/unverified (see
+    /// [`SeatState::Live`]); the directory still exists.
+    Live { pid: Option<u32> },
+    /// The liveness probe could not be evaluated. The directory still
+    /// exists; the caller double-confirms before proceeding.
+    Unknown(String),
+    /// The unlink itself (or resolving the root) failed.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for RemoveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoveError::Invalid(reason) => write!(f, "invalid instance: {reason}"),
+            RemoveError::Live { pid: Some(pid) } => write!(
+                f,
+                "instance is live (server pid {pid}, advisory); stop that instance's server first"
+            ),
+            RemoveError::Live { pid: None } => write!(
+                f,
+                "instance is live (holder pid unknown); stop its server first"
+            ),
+            RemoveError::Unknown(reason) => write!(f, "liveness probe unavailable: {reason}"),
+            RemoveError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for RemoveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RemoveError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for RemoveError {
+    fn from(e: std::io::Error) -> Self {
+        RemoveError::Io(e)
+    }
+}
+
+/// Remove the instance `name` under `root`: validate, run the authoritative
+/// in-op liveness probe, then unlink — one op so the probe and the unlink
+/// cannot disagree on the directory (AD-2).
+///
+/// - Invalid names and the `default` sentinel are refused before any path
+///   is built; a symlinked `tty7-<name>` is refused without following it.
+/// - A live seat ([`SeatState::Live`]) or an unevaluable probe
+///   ([`SeatState::Unknown`]) refuses without unlinking.
+/// - Otherwise the whole `tty7-<name>` directory is removed with
+///   `remove_dir_all` (permanent, no trash).
+///
+/// The residual probe→unlink window is documented, not closed: a server
+/// claiming between the probe and the unlink keeps its seat (the claim is
+/// what is authoritative for serving), and the directory going missing in
+/// the window surfaces as an `Io` error rather than silent success.
+/// Memory is untouched throughout — rewriting it to the focused row after
+/// `Ok` is the caller's ordered job (AD-7).
+pub fn remove_instance_in(root: &Path, name: &str) -> Result<(), RemoveError> {
+    let clean = validate_name(name).map_err(|reason| {
+        log::warn!("refusing to remove instance {name:?}: {reason}");
+        RemoveError::Invalid(reason)
+    })?;
+    let dir = root.join(format!("{INSTANCE_PREFIX}{clean}"));
+    // Resolve once and never follow a symlink: `symlink_metadata` does not
+    // traverse the final component, so a symlinked instance dir is seen as
+    // a symlink here and refused below. A missing path falls through —
+    // the probe reads it as free and the unlink reports `NotFound`.
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            log::warn!(
+                "refusing to remove instance {clean:?}: {} is a symlink, not an instance directory",
+                dir.display()
+            );
+            return Err(RemoveError::Invalid(format!(
+                "'{clean}' is not an instance directory"
+            )));
+        }
+        Ok(meta) if !meta.file_type().is_dir() => {
+            log::warn!(
+                "refusing to remove instance {clean:?}: {} is not a directory",
+                dir.display()
+            );
+            return Err(RemoveError::Invalid(format!(
+                "'{clean}' is not an instance directory"
+            )));
+        }
+        _ => {}
+    }
+    match holder_pid_in(&dir) {
+        SeatState::Live { pid } => {
+            log::warn!(
+                "refusing to remove live instance {clean:?} at {} (holder pid {})",
+                dir.display(),
+                pid.map_or("unknown".to_string(), |p| p.to_string())
+            );
+            return Err(RemoveError::Live { pid });
+        }
+        SeatState::Unknown => {
+            log::warn!(
+                "refusing to remove instance {clean:?} at {}: liveness probe unavailable",
+                dir.display()
+            );
+            return Err(RemoveError::Unknown(format!(
+                "could not probe the server seat for '{clean}'"
+            )));
+        }
+        SeatState::Free => {}
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {
+            log::info!("removed instance {clean:?} at {}", dir.display());
+            Ok(())
+        }
+        Err(e) => {
+            log::warn!(
+                "could not remove instance {clean:?} at {}: {e}",
+                dir.display()
+            );
+            Err(RemoveError::Io(e))
+        }
+    }
+}
+
+/// Remove the instance `name` under the live root.
+pub fn remove_instance(name: &str) -> Result<(), RemoveError> {
+    // Validate before resolving the root: an invalid name is a refusal,
+    // never a path, even when no root resolves.
+    if let Err(reason) = validate_name(name) {
+        log::warn!("refusing to remove instance {name:?}: {reason}");
+        return Err(RemoveError::Invalid(reason));
+    }
+    let Some(root) = default_root() else {
+        log::warn!("could not remove instance {name:?}: no instance root");
+        return Err(RemoveError::Unknown("no instance root".to_string()));
+    };
+    remove_instance_in(&root, name)
 }
 
 #[cfg(test)]
@@ -341,5 +574,197 @@ mod tests {
         std::fs::write(dir.join(MEMORY_FILE), "../x\n").unwrap();
         assert_eq!(read_last_in(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memory_guard_rejects_garbage_and_leaves_the_file_alone() {
+        let dir = std::env::temp_dir().join(format!("tty7-mem-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_last_in(&dir, "alice").unwrap();
+        for bad in ["", "-x", "../x", "a/b", "Alice", "a_b"] {
+            assert!(
+                write_last_in(&dir, bad).is_err(),
+                "{bad:?} must not pass the memory guard"
+            );
+            // The remembered value is untouched: still alice, not garbage.
+            assert_eq!(read_last_in(&dir).as_deref(), Some("alice"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(MEMORY_FILE)).unwrap(),
+            "alice\n"
+        );
+        // The sentinel stays writable: it is a memory value, not an instance.
+        write_last_in(&dir, DEFAULT_SENTINEL).unwrap();
+        assert_eq!(read_last_in(&dir).as_deref(), Some(DEFAULT_SENTINEL));
+        // Garbage against a fresh directory fails before any fs mutation:
+        // nothing is created.
+        let fresh = std::env::temp_dir().join(format!("tty7-mem-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fresh);
+        assert!(write_last_in(&fresh, "../x").is_err());
+        assert!(!fresh.exists(), "a refused write must not create anything");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&fresh);
+    }
+
+    #[test]
+    fn removing_a_free_instance_unlinks_it() {
+        let root = std::env::temp_dir().join(format!("tty7-rm-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("tty7-gone");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("state.json"), "{}").unwrap();
+        // No seat file at all: never had a holder, so free.
+        assert_eq!(holder_pid_in(&dir), SeatState::Free);
+        assert!(remove_instance_in(&root, "gone").is_ok());
+        assert!(!dir.exists(), "a free instance must be unlinked");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn removing_a_missing_instance_reports_io_not_found() {
+        let root = std::env::temp_dir().join(format!("tty7-rm-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let before: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        let err = remove_instance_in(&root, "ghost").unwrap_err();
+        assert!(
+            matches!(err, RemoveError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
+            "a missing instance must surface NotFound, got {err:?}"
+        );
+        let after: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(before, after, "nothing may be created by a failed remove");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn removing_invalid_sentinel_or_symlinked_names_touches_nothing() {
+        let root = std::env::temp_dir().join(format!("tty7-rm-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tty7-keep")).unwrap();
+        std::fs::write(root.join("tty7-keep").join("state.json"), "{}").unwrap();
+        for bad in ["", "default", "-x", "../x", "a/b", "Alice"] {
+            assert!(
+                matches!(remove_instance_in(&root, bad), Err(RemoveError::Invalid(_))),
+                "{bad:?} must be refused as invalid"
+            );
+        }
+        assert!(
+            root.join("tty7-keep").is_dir(),
+            "a refused remove must touch nothing"
+        );
+        assert_eq!(list_in(&root), vec!["keep".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_symlinked_instance_dir_is_refused_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("tty7-rm-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let target = std::env::temp_dir().join(format!("tty7-rm-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("precious"), "do not delete").unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        symlink(&target, root.join("tty7-link")).unwrap();
+        assert!(
+            matches!(
+                remove_instance_in(&root, "link"),
+                Err(RemoveError::Invalid(_))
+            ),
+            "a symlinked instance dir must be refused"
+        );
+        // Neither the link nor its target was followed or unlinked.
+        assert!(
+            std::fs::symlink_metadata(root.join("tty7-link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("precious")).unwrap(),
+            "do not delete"
+        );
+        // The probe itself never follows either: the lock resolves under
+        // the link path, and with no seat file there it reads free — the
+        // refusal above comes from the symlink check, not the probe.
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_live_instance_is_refused_and_keeps_the_dir() {
+        use std::os::unix::io::AsRawFd as _;
+
+        let root = std::env::temp_dir().join(format!("tty7-rm-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("tty7-busy");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("state.json"), "{}").unwrap();
+        // A live server: pid recorded, seat held LOCK_EX.
+        let pid = std::process::id();
+        std::fs::write(dir.join("daemon.lock"), format!("{pid}\n")).unwrap();
+        let held = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(dir.join("daemon.lock"))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "the test must hold the seat for the probe to see"
+        );
+        assert_eq!(holder_pid_in(&dir), SeatState::Live { pid: Some(pid) });
+        match remove_instance_in(&root, "busy") {
+            Err(RemoveError::Live { pid: seen }) => assert_eq!(seen, Some(pid)),
+            other => panic!("a live seat must refuse with Live, got {other:?}"),
+        }
+        assert!(dir.is_dir(), "a refused remove must keep the directory");
+        assert!(dir.join("state.json").exists());
+        drop(held);
+        // Once the seat is released the same directory removes cleanly.
+        assert!(remove_instance_in(&root, "busy").is_ok());
+        assert!(!dir.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_reports_unknown_when_the_lock_cannot_be_put_to_the_kernel() {
+        // `dir` is a regular file, so `<dir>/daemon.lock` cannot be opened:
+        // ENOTDIR is not NotFound, so the probe must not read it as free.
+        let root = std::env::temp_dir().join(format!("tty7-rm-unknown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file_as_dir = root.join("not-a-dir");
+        std::fs::write(&file_as_dir, "file, not dir").unwrap();
+        assert_eq!(holder_pid_in(&file_as_dir), SeatState::Unknown);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn probe_is_unknown_where_no_primitive_exists() {
+        let root = std::env::temp_dir().join("tty7-rm-unknown");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tty7-busy")).unwrap();
+        assert_eq!(holder_pid_in(&root.join("tty7-busy")), SeatState::Unknown);
+        assert!(matches!(
+            remove_instance_in(&root, "busy"),
+            Err(RemoveError::Unknown(_))
+        ));
+        assert!(root.join("tty7-busy").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
