@@ -200,6 +200,17 @@ impl InstancePicker {
     }
 
     fn finish(&mut self, choice: Option<PickerSelection>, cx: &mut Context<Self>) {
+        // Enter reaches here twice (Input PressEnter + the Enter keybind):
+        // the second call must not quit twice. A failed Windows relaunch
+        // leaves `result` unset so the user can retry.
+        if self
+            .result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return;
+        }
         #[cfg(windows)]
         if let Some(choice) = &choice {
             // `platform.run` never returns on Windows — it ends in
@@ -371,52 +382,55 @@ pub fn run_picker(passthrough: &[OsString]) -> Option<PickerSelection> {
 
     // Locale of the default config: the picker runs before Config loads.
     let language = crate::core::config::Config::load().gui_language.clone();
-    let application = gpui_platform::application().with_assets(crate::ui::assets::Assets);
-    // Owned before the spawn: the async block outlives this frame.
+    // LastWindowClosed everywhere: the OS close button (X) must end the
+    // launch with `None` instead of leaving `application.run` parked with
+    // zero windows (macOS Default is Explicit and would hang there).
+    let application = gpui_platform::application()
+        .with_assets(crate::ui::assets::Assets)
+        .with_quit_mode(gpui::QuitMode::LastWindowClosed);
     let passthrough = passthrough.to_vec();
     application.run(move |cx| {
-        cx.spawn(async move |cx| {
-            let _ = cx.update(|cx| {
-                gpui_component::init(cx);
-                crate::register_bundled_fonts(cx);
-                set_locale(&language);
-                cx.bind_keys([
-                    KeyBinding::new("enter", ConfirmInstance, None),
-                    KeyBinding::new("escape", CancelInstance, None),
-                    KeyBinding::new("up", PickerUp, None),
-                    KeyBinding::new("down", PickerDown, None),
-                ]);
-                let options = WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                        None,
-                        size(px(400.), px(430.)),
-                        cx,
-                    ))),
-                    app_id: Some("tty7".to_owned()),
-                    ..Default::default()
-                };
-                let result = outcome.clone();
-                let passthrough = passthrough.clone();
-                let opened = cx.open_window(options, |window, cx| {
-                    let view = cx.new(|cx| {
-                        InstancePicker::new(
-                            state.clone(),
-                            passthrough.clone(),
-                            result.clone(),
-                            window,
-                            cx,
-                        )
-                    });
-                    let handle = view.read(cx).input.read(cx).focus_handle(cx);
-                    window.focus(&handle, cx);
-                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
-                });
-                if opened.is_err() {
-                    *outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(None);
-                }
+        gpui_component::init(cx);
+        crate::register_bundled_fonts(cx);
+        set_locale(&language);
+        cx.bind_keys([
+            KeyBinding::new("enter", ConfirmInstance, None),
+            KeyBinding::new("escape", CancelInstance, None),
+            KeyBinding::new("up", PickerUp, None),
+            KeyBinding::new("down", PickerDown, None),
+        ]);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(400.), px(430.)),
+                cx,
+            ))),
+            app_id: Some("tty7".to_owned()),
+            ..Default::default()
+        };
+        // Synchronous open like `main`: opening via `cx.spawn(async { cx.update })`
+        // leaves a windowless gap where the foreground executor may never
+        // deliver the future and the launch idles with no UI.
+        let result = outcome.clone();
+        let opened = cx.open_window(options, |window, cx| {
+            let view = cx.new(|cx| {
+                InstancePicker::new(
+                    state.clone(),
+                    passthrough.clone(),
+                    result.clone(),
+                    window,
+                    cx,
+                )
             });
-        })
-        .detach();
+            let handle = view.read(cx).input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            cx.new(|cx| gpui_component::Root::new(view, window, cx))
+        });
+        if let Err(e) = opened {
+            log::error!("instance picker failed to open a window: {e:#}");
+            *outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(None);
+            cx.quit();
+        }
     });
     result
         .lock()
