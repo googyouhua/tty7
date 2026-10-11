@@ -40,3 +40,6 @@
   summary: mouse_grid_line 快照验证/回退分支缺单测（函数本体需 TerminalView gpui harness）。
   evidence: view.rs:11698 有 TestAppContext harness，但 mouse 路径无一使用；fold_epoch/回退逻辑仅由 live-Term 映射单测间接覆盖。
   revisit_when: 同 P5/P6，harness 落地后补 mouse 事件级用例。
+- source_plan: none
+  summary: Host call on UI thread panic（host/mod.rs:54，需经 HostOps 路由）
+  evidence: 远端 192.168.1.25 /tmp/tty7-app.log：thread 'main' panicked at crates/tty7-core/src/host/mod.rs:54:5；与折叠末块吞输入 prompt 行同批提出，用户选先修折叠，本条下轮单开 plan
