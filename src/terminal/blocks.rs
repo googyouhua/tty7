@@ -478,14 +478,24 @@ impl BlockTracker {
 
     /// Whether `abs` is the start row of another block sharing this exact
     /// boundary row: `abs == end_abs` of span `seq` and also `start_abs` of
-    /// a different span. Strict interiors (`abs < end_abs`) are not exempt,
-    /// so nested starts inside an outer fold stay hidden.
+    /// a different closed span, or of a pending (`B` seen, `D` not yet)
+    /// command. Strict interiors (`abs < end_abs`) are not exempt, so nested
+    /// starts inside an outer fold stay hidden. The pending case is the live
+    /// input row: the next prompt redraws on the previous `D` row, and that
+    /// row belongs to the running command, not to the folded span above it.
     fn is_next_block_start(&self, seq: u64, abs: i64, end_abs: i64) -> bool {
-        abs == end_abs
-            && self
-                .spans
-                .iter()
-                .any(|o| o.seq != seq && o.start_abs == abs)
+        if abs != end_abs {
+            return false;
+        }
+        if self
+            .spans
+            .iter()
+            .any(|o| o.seq != seq && o.start_abs == abs)
+        {
+            return true;
+        }
+        self.outer.is_some_and(|slot| slot.start_abs == abs)
+            || self.nested.is_some_and(|slot| slot.start_abs == abs)
     }
 
     /// Whether `abs` is hidden inside a folded span (past its first line).
@@ -1973,6 +1983,23 @@ mod tests {
         assert!(map.contains(&110), "next prompt paints");
         assert_eq!(tracker.next_visible_row(100), Some(110));
         assert_eq!(tracker.next_visible_row(109), Some(110));
+    }
+
+    /// The last folded span shares its `D` row with the pending next prompt:
+    /// the live input row is only an open `B` slot, never a closed span, but
+    /// it must still stay visible.
+    #[test]
+    fn folded_last_leaves_pending_input_row_visible() {
+        let mut tracker = BlockTracker::default();
+        tracker.spans.push(span(1, 100, 110));
+        tracker.note_b(110);
+        tracker.set_folded(1, true);
+        assert!(!tracker.hidden_abs_in(110), "live input stays");
+        assert!(tracker.hidden_abs_in(109));
+        let map = tracker.map_visible(112, 12);
+        assert!(map.contains(&100), "summary paints");
+        assert!(map.contains(&110), "input paints");
+        assert_eq!(tracker.next_visible_row(100), Some(110));
     }
 
     /// The jump helper tops out at the span's start: the window bottom past
