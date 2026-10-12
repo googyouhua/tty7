@@ -1747,6 +1747,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::InstanceBadgeWelcome => "Hi {name}",
         L10nKey::InstancePickerInvalid => "Usernames use [a-z0-9-].",
         L10nKey::InstancePickerRelaunchFailed => "Could not start tty7 — try again.",
+        L10nKey::InstancePickerNoMatch => "No matching instances.",
+        L10nKey::InstancePickerMatchCount => "{count} matches",
+        L10nKey::InstancePickerPosition => "{position} of {total}",
         L10nKey::SwitcherStartingServer => "Starting tty7's server…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "Downloading tty7's server… {done} / {total}"
@@ -2425,6 +2428,9 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMatchCount, "zero") => "No matches",
         (L10nKey::SettingsMatchCount, "one") => "1 match",
         (L10nKey::SettingsMatchCount, "other") => "{count} matches",
+        (L10nKey::InstancePickerMatchCount, "zero") => "No matches",
+        (L10nKey::InstancePickerMatchCount, "one") => "1 match",
+        (L10nKey::InstancePickerMatchCount, "other") => "{count} matches",
         (L10nKey::PanelSearchResultCount, "zero") => "No results",
         (L10nKey::PanelSearchResultCount, "one") => "1 result",
         (L10nKey::PanelSearchResultCount, "other") => "{count} results",

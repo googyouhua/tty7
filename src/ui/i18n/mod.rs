@@ -1473,6 +1473,9 @@ l10n_keys! {
     InstanceBadgeWelcome,
     InstancePickerInvalid,
     InstancePickerRelaunchFailed,
+    InstancePickerNoMatch,
+    InstancePickerMatchCount,
+    InstancePickerPosition,
     SwitcherStartingServer,
     SwitcherDownloadingServerWithTotal,
     SwitcherDownloadingServerNoTotal,
@@ -2323,6 +2326,7 @@ mod tests {
             L10nKey::GitHubSkippedCount,
             L10nKey::GitHubShowHiddenComments,
             L10nKey::GitHubShowAllReviewers,
+            L10nKey::InstancePickerMatchCount,
         ];
         for key in plural_keys {
             for branch in ["zero", "one", "few", "many", "other"] {

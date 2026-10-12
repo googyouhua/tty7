@@ -1810,6 +1810,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerRelaunchFailed => {
             "tty7 を起動できませんでした。もう一度お試しください。"
         }
+        L10nKey::InstancePickerNoMatch => "一致するインスタンスがありません。",
+        L10nKey::InstancePickerMatchCount => "{count} 件",
+        L10nKey::InstancePickerPosition => "{total} 件中第 {position} 件",
         L10nKey::SwitcherStartingServer => "tty7 のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "tty7 のサーバーをダウンロード中… {done} / {total}"
@@ -2500,6 +2503,9 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMatchCount, "zero") => "0 件",
         (L10nKey::SettingsMatchCount, "one") => "1 件",
         (L10nKey::SettingsMatchCount, "other") => "{count} 件",
+        (L10nKey::InstancePickerMatchCount, "zero") => "0 件",
+        (L10nKey::InstancePickerMatchCount, "one") => "1 件",
+        (L10nKey::InstancePickerMatchCount, "other") => "{count} 件",
         (L10nKey::PanelSearchResultCount, "zero") => "0 件",
         (L10nKey::PanelSearchResultCount, "one") => "1 件",
         (L10nKey::PanelSearchResultCount, "other") => "{count} 件",
