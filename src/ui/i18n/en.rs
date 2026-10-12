@@ -1750,6 +1750,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::InstancePickerNoMatch => "No matching instances.",
         L10nKey::InstancePickerMatchCount => "{count} matches",
         L10nKey::InstancePickerPosition => "{position} of {total}",
+        L10nKey::InstancePickerCreate => "Create and enter",
         L10nKey::SwitcherStartingServer => "Starting tty7's server…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "Downloading tty7's server… {done} / {total}"

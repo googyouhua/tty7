@@ -10,7 +10,9 @@
 //! - launched bare: the picker lists the default instance plus every
 //!   `tty7-<name>` already on disk, with a filter field that narrows the
 //!   dropdown to substring matches. The highlight alone is entered: typing
-//!   a name that matches nothing never creates it. The
+//!   a name that matches nothing never creates it — creation happens only
+//!   through the explicit create button, which enables solely for a valid,
+//!   unlisted name. The
 //!   path is derived, never typed: `${ROOT}/tty7-<username>`.
 //! - the last choice is preselected and remembered in the default
 //!   directory's memory file; the picker waits for a confirm and never
@@ -35,7 +37,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{h_flex, v_flex};
+use gpui_component::{Disableable as _, h_flex, v_flex};
 use tty7_core::core::instance::{self, DEFAULT_SENTINEL};
 
 use crate::ui::i18n::{L10nKey, set_locale, t, t_fmt, t_plural};
@@ -253,6 +255,23 @@ impl PickerState {
         }
     }
 
+    /// The explicit create candidate: the trimmed query when it is a
+    /// valid, unlisted instance name, otherwise `None`. Validity comes
+    /// only from [`instance::validate_name`]; unlisted means absent from
+    /// the snapshot rows. The view enables the create button exactly on
+    /// `Some`, and the click path revalidates through this same method.
+    pub fn create_candidate(&self, query: &str) -> Option<String> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let clean = instance::validate_name(trimmed).ok()?;
+        if self.rows.iter().any(|r| r.name == clean) {
+            return None;
+        }
+        Some(clean)
+    }
+
     /// Confirm the highlighted row. The typed filter never wins and never
     /// creates: a valid but unlisted name is not entered here (the explicit
     /// create path owns that). Validity itself still comes only from
@@ -366,6 +385,20 @@ impl InstancePicker {
         }
         let choice = self.state.confirm();
         self.finish(Some(choice), window, cx);
+    }
+
+    /// Explicit creation: the button enables only on
+    /// [`PickerState::create_candidate`]; the click revalidates through the
+    /// same method and enters the new instance. Directory creation and memory
+    /// write happen downstream in `apply_selection`, so this stays a pure
+    /// selection like every other confirm path.
+    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).value().to_string();
+        let Some(name) = self.state.create_candidate(&typed) else {
+            cx.notify();
+            return;
+        };
+        self.finish(Some(PickerSelection::Named(name)), window, cx);
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -553,6 +586,20 @@ impl Render for InstancePicker {
                         .text_size(px(12.))
                         .text_color(gpui::rgb(0xC0392B))
                         .child(t(L10nKey::InstancePickerInvalid)),
+                )
+            })
+            .when(filtering, |column| {
+                // The explicit create path: enabled only for a valid,
+                // unlisted name; otherwise a disabled affordance that
+                // explains nothing beyond its label.
+                let typed = input.read(cx).value().to_string();
+                let candidate = self.state.create_candidate(&typed);
+                column.child(
+                    Button::new("instance-picker-create")
+                        .label(t(L10nKey::InstancePickerCreate))
+                        .primary()
+                        .disabled(candidate.is_none())
+                        .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
                 )
             })
             .when(relaunch_failed, |column| {
@@ -856,6 +903,36 @@ mod tests {
         assert_eq!(state.esc_layer(), EscLayer::CloseDropdown);
         assert!(!state.is_dropdown_open());
         assert_eq!(state.esc_layer(), EscLayer::CancelWindow);
+    }
+
+    #[test]
+    fn create_candidate_accepts_only_valid_unlisted_names() {
+        let names = vec![
+            ("alice".to_string(), None),
+            ("bob".to_string(), None),
+        ];
+        let state = PickerState::new(names, None);
+        // Fresh and valid: the button enables.
+        assert_eq!(
+            state.create_candidate("carol"),
+            Some("carol".to_string())
+        );
+        assert_eq!(
+            state.create_candidate("  carol-2  "),
+            Some("carol-2".to_string())
+        );
+        // Listed, empty, or invalid: no candidate, button stays disabled.
+        assert_eq!(state.create_candidate("alice"), None);
+        assert_eq!(state.create_candidate("bob"), None);
+        assert_eq!(state.create_candidate(""), None);
+        assert_eq!(state.create_candidate("   "), None);
+        for bad in ["Bob!", "default", "-x", "../x", "a/b"] {
+            assert_eq!(
+                state.create_candidate(bad),
+                None,
+                "{bad:?} must never be a create candidate"
+            );
+        }
     }
 
     #[test]

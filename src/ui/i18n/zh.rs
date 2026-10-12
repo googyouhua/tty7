@@ -1621,6 +1621,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerNoMatch => "没有匹配的实例。",
         L10nKey::InstancePickerMatchCount => "{count} 个结果",
         L10nKey::InstancePickerPosition => "共 {total} 个，第 {position} 个",
+        L10nKey::InstancePickerCreate => "新建并进入",
         L10nKey::SwitcherStartingServer => "正在启动 tty7 server…",
         L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty7 server… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty7 server… {done}",

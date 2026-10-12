@@ -1476,6 +1476,7 @@ l10n_keys! {
     InstancePickerNoMatch,
     InstancePickerMatchCount,
     InstancePickerPosition,
+    InstancePickerCreate,
     SwitcherStartingServer,
     SwitcherDownloadingServerWithTotal,
     SwitcherDownloadingServerNoTotal,

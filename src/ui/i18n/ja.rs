@@ -1813,6 +1813,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerNoMatch => "一致するインスタンスがありません。",
         L10nKey::InstancePickerMatchCount => "{count} 件",
         L10nKey::InstancePickerPosition => "{total} 件中第 {position} 件",
+        L10nKey::InstancePickerCreate => "新規作成して入る",
         L10nKey::SwitcherStartingServer => "tty7 のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "tty7 のサーバーをダウンロード中… {done} / {total}"

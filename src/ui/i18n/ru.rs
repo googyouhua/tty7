@@ -1983,6 +1983,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerNoMatch => "Нет подходящих инстансов.",
         L10nKey::InstancePickerMatchCount => "Совпадений: {count}",
         L10nKey::InstancePickerPosition => "{position} из {total}",
+        L10nKey::InstancePickerCreate => "Создать и войти",
         L10nKey::SwitcherStartingServer => "Запуск сервера tty7…",
         L10nKey::SwitcherDownloadingServerWithTotal => "Загрузка сервера tty7… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "Загрузка сервера tty7… {done}",
