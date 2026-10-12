@@ -80,3 +80,10 @@ context: []
 - `cargo test -p tty7-core core::instance` -- expected: green, including force-channel cases (verified 15/15)
 - `cargo check --bin tty7-app` -- expected: clean (verified)
 - `cargo test --bin tty7-app instance_picker` -- expected: green, but BLOCKED by the pre-existing test-target breakage (recorded in deferred-work.md)
+
+## GUI Walkthrough (192.168.1.25, sandbox HOME+root, 2026-10-12)
+
+- Post-build GUI bug, fixed here: first × click panicked (`no state of type Surfaces exists`) — the delete modal renders through dialog chrome whose presets globals only the main window registers. Fix: `cx.set_global(Config::load())` + `theme::apply_theme(None, cx)` in `run_picker` (headless apply lands globals; main re-applies for its window). Local check clean; remote rebuild + modal opens verified.
+- Screenshot-verified by agent: pristine (Default pinned, recency order, judy preselect, × on named rows only, capped viewport), filter `b` (Default+bob, first-match highlight, `1 match`), no-match + enabled Create, live modal (full report, no confirm), free modal (red Remove), Esc-cancel (focus + invoking-row restore).
+- User-verified on screen: create flow (`b` → Create and enter → dir+memory+main window), free delete confirm (carol gone), select-enter (alice, daemon up), create-button enablement rule.
+- Open question answered by user behavior: typing a filter-matching-but-unlisted name (`b`) keeps Create enabled (valid + unlisted per spec); user created `b` deliberately.

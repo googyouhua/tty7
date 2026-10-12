@@ -1142,6 +1142,14 @@ pub fn run_picker(passthrough: &[OsString]) -> Option<PickerSelection> {
     let passthrough = passthrough.to_vec();
     application.run(move |cx| {
         gpui_component::init(cx);
+        // The delete modal renders through the dialog chrome, which reads
+        // the presets globals (Surfaces et al.): without a theme applied
+        // the first × click panics on the missing global. Main applies its
+        // theme per window; the picker has no window yet, so apply headless
+        // (window None skips native appearance, globals still land). Main
+        // re-applies for its own window afterwards.
+        cx.set_global(crate::core::config::Config::load());
+        crate::ui::theme::apply_theme(None, cx);
         crate::register_bundled_fonts(cx);
         set_locale(&language);
         cx.bind_keys([
