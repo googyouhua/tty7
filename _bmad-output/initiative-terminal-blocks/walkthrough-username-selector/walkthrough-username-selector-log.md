@@ -144,3 +144,10 @@ Session: ses_ecfb570b9ffehdihmow1t8GPYf · Timestamp: 2026-10-12T00:00:00Z
 - Result: Slice 4 accepted; Block 4 Periphery now current.
 - Evidence: walkthrough-username-selector.md Slice 4 checked, Periphery marked current
 - Open: Present Periphery.
+
+## Post-review rebase onto main (2026-10-12, user-directed)
+
+- `dev/username-selector` rebased `--onto origin/main` (was carrying sync-branch history already merged via #26).
+- One picker conflict resolved with the epic side (main's picker predates the two picker fixes; the epic file includes them — verified zero content drift).
+- Rebased tip tree is byte-identical to pre-rebase tip for all epic files. cargo check clean, core 15/15 green. NOTE: the bin test-target E0252 breakage reproduces on the main base too — it is a main-branch issue, not epic fallout.
+- Force-pushed: 9 commits, origin/main..HEAD clean.
