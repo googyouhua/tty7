@@ -457,9 +457,8 @@ impl InstancePicker {
                     // was narrowed by, before and after cancel.
                     if this.state.pending_delete().is_some() {
                         let applied = this.state.query().to_string();
-                        this.input.update(cx, |input, cx| {
-                            input.set_value(applied, window, cx)
-                        });
+                        this.input
+                            .update(cx, |input, cx| input.set_value(applied, window, cx));
                         cx.notify();
                         return;
                     }
@@ -630,8 +629,11 @@ impl InstancePicker {
         };
         let Some(dir) = instance::dir_for(&name) else {
             self.state.fail_delete(
-                t_fmt(L10nKey::InstancePickerDeleteNoDir, &[("name", name.as_str())])
-                    .to_string(),
+                t_fmt(
+                    L10nKey::InstancePickerDeleteNoDir,
+                    &[("name", name.as_str())],
+                )
+                .to_string(),
             );
             cx.notify();
             return;
@@ -811,8 +813,8 @@ impl Render for InstancePicker {
                             // Named rows only: the Default row has no
                             // directory to delete, so it never gets a ×.
                             let deletable = self.state.is_deletable(index);
-                            let delete_name = (index != 0)
-                                .then(|| self.state.rows[index - 1].name.clone());
+                            let delete_name =
+                                (index != 0).then(|| self.state.rows[index - 1].name.clone());
                             div()
                                 .id(("instance-picker-row", index))
                                 .role(gpui::Role::ListBoxOption)
