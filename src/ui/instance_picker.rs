@@ -109,12 +109,44 @@ pub struct PickerRow {
     mtime: Option<SystemTime>,
 }
 
+/// The pending delete-confirm modal: one deep at most, over the picker.
+///
+/// `name` is the invoking row (and the only row the modal can act on);
+/// `armed` turns true on the first confirm of an unevaluable probe, and the
+/// second confirm then proceeds through the core force channel; `error` is
+/// the retryable failure line, set when the core op returns `Err` (the row
+/// and the memory stay untouched while it is set).
+#[derive(Debug, Clone)]
+pub struct PendingDelete {
+    name: String,
+    armed: bool,
+    error: Option<String>,
+}
+
+impl PendingDelete {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
 /// The selectable rows: the default instance first, then existing names
 /// with their snapshot mtimes for recency display.
 ///
 /// The picker is a combobox: the input filters these rows (case-insensitive
 /// substring; the Default row always stays on top) and the highlight moves
 /// over the visible rows only, wrapping at the ends.
+///
+/// The delete-confirm modal hangs off the same state: at most one pending
+/// delete, and while it is set the picker behind is inert (the view routes
+/// Enter/arrows to the modal and the scrim swallows clicks).
 #[derive(Debug, Clone)]
 pub struct PickerState {
     rows: Vec<PickerRow>,
@@ -126,11 +158,13 @@ pub struct PickerState {
     /// the highlight here instead of dropping it on Default.
     preselect: usize,
     dropdown_open: bool,
+    pending_delete: Option<PendingDelete>,
 }
 
 /// What the next Esc press should do: layers close topmost-first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscLayer {
+    CloseDeleteModal,
     CloseDropdown,
     CancelWindow,
 }
@@ -155,6 +189,7 @@ impl PickerState {
             cursor,
             preselect: cursor,
             dropdown_open: true,
+            pending_delete: None,
         }
     }
 
@@ -194,6 +229,11 @@ impl PickerState {
         !self.query.trim().is_empty()
     }
 
+    /// The raw filter text the list is currently narrowed by.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
     /// Re-filter on the latest input text. The highlight resets to the
     /// first named match — the always-visible Default row never steals it
     /// from a real match — or to the Default row when nothing matches.
@@ -219,9 +259,14 @@ impl PickerState {
         self.dropdown_open = false;
     }
 
-    /// Esc closes the open dropdown first (text and highlight are kept by
-    /// the caller); only a second press with it closed cancels the window.
+    /// Esc closes the open delete modal first (highlight returns to the
+    /// invoking row), then the dropdown (text and highlight are kept by
+    /// the caller); only a third press with both closed cancels the window.
     pub fn esc_layer(&mut self) -> EscLayer {
+        if self.pending_delete.is_some() {
+            self.cancel_delete();
+            return EscLayer::CloseDeleteModal;
+        }
         if self.dropdown_open {
             self.close_dropdown();
             EscLayer::CloseDropdown
@@ -279,6 +324,101 @@ impl PickerState {
     pub fn confirm(&self) -> PickerSelection {
         self.current()
     }
+
+    /// Whether the global row `index` carries a delete affordance: every
+    /// named row does, the Default row (0, no directory to delete) never
+    /// does. The view renders the × exactly on this rule.
+    pub fn is_deletable(&self, index: usize) -> bool {
+        index != 0 && index <= self.rows.len()
+    }
+
+    pub fn pending_delete(&self) -> Option<&PendingDelete> {
+        self.pending_delete.as_ref()
+    }
+
+    /// Open the delete modal for the global row `index`. Returns false and
+    /// touches nothing when the row is not deletable (Default, out of
+    /// range) — the × that would call this is never rendered there, so
+    /// false is a caller bug, not a user error. Opening moves the highlight
+    /// to the invoking row and starts unarmed with no error line.
+    pub fn open_delete(&mut self, index: usize) -> bool {
+        if !self.is_deletable(index) {
+            return false;
+        }
+        let name = self.rows[index - 1].name.clone();
+        if let Some(position) = self.visible().iter().position(|&g| g == index) {
+            self.cursor = position;
+        }
+        self.pending_delete = Some(PendingDelete {
+            name,
+            armed: false,
+            error: None,
+        });
+        true
+    }
+
+    /// Arm the pending modal after its first confirm over an unevaluable
+    /// probe. The second confirm then proceeds through the core force
+    /// channel; a single confirm only arms and removes nothing.
+    pub fn arm_delete(&mut self) {
+        if let Some(pending) = self.pending_delete.as_mut() {
+            pending.armed = true;
+        }
+    }
+
+    /// Record a failed core remove: the modal stays open with the retryable
+    /// error line, and the row and the memory stay untouched by
+    /// construction — this writes only the line.
+    pub fn fail_delete(&mut self, message: String) {
+        if let Some(pending) = self.pending_delete.as_mut() {
+            pending.error = Some(message);
+        }
+    }
+
+    /// Close the modal without removing anything: the highlight returns to
+    /// the invoking row (or its visible position, when the filter still
+    /// shows it) and nothing is written anywhere.
+    pub fn cancel_delete(&mut self) {
+        if let Some(pending) = self.pending_delete.take() {
+            if let Some(position) = self.visible().iter().position(|&g| {
+                g != 0 && self.rows.get(g - 1).is_some_and(|r| r.name == pending.name)
+            }) {
+                self.cursor = position;
+            }
+        }
+        self.clamp_cursor();
+    }
+
+    /// Finish a confirmed delete whose core op returned `Ok`: drop the
+    /// invoking row, close the modal, and fall the highlight to the next
+    /// row (or the previous one when the last row went). Returns the
+    /// focused selection so the caller can rewrite memory to it strictly
+    /// after `Ok` — never a deleted name, `DEFAULT_SENTINEL` when focus
+    /// lands on Default.
+    ///
+    /// Call this only after the core op succeeds; on `Err` use
+    /// [`PickerState::fail_delete`] instead so the row survives.
+    pub fn complete_delete(&mut self) -> PickerSelection {
+        if let Some(pending) = self.pending_delete.take() {
+            if let Some(global) = self.rows.iter().position(|r| r.name == pending.name) {
+                self.rows.remove(global);
+                let removed = global + 1;
+                // The preselect tracked a live row: rows after the gap slide
+                // down one, and a preselect that pointed at the deleted row
+                // now points at whatever slid into its place (clamped to the
+                // previous row when the last one went).
+                if self.preselect > removed {
+                    self.preselect -= 1;
+                }
+                self.preselect = self.preselect.min(self.rows.len());
+            }
+        }
+        // The cursor sat on the invoking row (see `open_delete`), so holding
+        // the visible position lands on the next row; clamping covers the
+        // deleted-last case.
+        self.clamp_cursor();
+        self.current()
+    }
 }
 
 pub struct InstancePicker {
@@ -309,6 +449,20 @@ impl InstancePicker {
             |this: &mut Self, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { .. } => this.confirm(window, cx),
                 InputEvent::Change => {
+                    // The picker behind an open delete modal is inert:
+                    // keystrokes still land in the focused input, so put
+                    // the displayed text back to the applied query instead
+                    // of re-filtering (set_value emits no Change, so this
+                    // cannot loop). The box then shows only what the list
+                    // was narrowed by, before and after cancel.
+                    if this.state.pending_delete().is_some() {
+                        let applied = this.state.query().to_string();
+                        this.input.update(cx, |input, cx| {
+                            input.set_value(applied, window, cx)
+                        });
+                        cx.notify();
+                        return;
+                    }
                     // Input is filter: every keystroke re-narrows the
                     // dropdown, resets the highlight, and reopens it.
                     let value = this.input.read(cx).value().to_string();
@@ -373,6 +527,13 @@ impl InstancePicker {
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // With the delete modal up, Enter belongs to it — the launch must
+        // not confirm underneath (this also covers the Input PressEnter
+        // path, which bypasses the keybind action below).
+        if self.state.pending_delete().is_some() {
+            self.confirm_delete(window, cx);
+            return;
+        }
         // Enter confirms the highlighted row only. A non-empty filter that
         // fails `validate_name` keeps the window open with the invalid line;
         // a valid but unlisted name simply confirms the highlight — it is
@@ -393,6 +554,10 @@ impl InstancePicker {
     /// write happen downstream in `apply_selection`, so this stays a pure
     /// selection like every other confirm path.
     fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The picker behind the modal is inert: no creating over it.
+        if self.state.pending_delete().is_some() {
+            return;
+        }
         let typed = self.input.read(cx).value().to_string();
         let Some(name) = self.state.create_candidate(&typed) else {
             cx.notify();
@@ -402,13 +567,112 @@ impl InstancePicker {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Esc layers: first close the dropdown (text and highlight kept),
-        // then cancel the launch.
-        if self.state.esc_layer() == EscLayer::CloseDropdown {
-            cx.notify();
-            return;
+        // Esc layers: first the delete modal (highlight back on the invoking
+        // row), then the dropdown (text and highlight kept), then the
+        // launch itself.
+        match self.state.esc_layer() {
+            EscLayer::CloseDeleteModal => {
+                self.focus_input(window, cx);
+                cx.notify();
+                return;
+            }
+            EscLayer::CloseDropdown => {
+                cx.notify();
+                return;
+            }
+            EscLayer::CancelWindow => {}
         }
         self.finish(None, window, cx);
+    }
+
+    /// Keyboard focus back to the filter input (the modal's focus returns
+    /// there on every close path; the highlight is owned by `PickerState`).
+    fn focus_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+
+    /// Open the delete modal for the global row `index` (the × click).
+    /// The click must not select or confirm the row — the caller stops
+    /// propagation first (the tab-strip close-button precedent).
+    fn open_delete(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.open_delete(index) {
+            // The modal renders over the picker; keep keyboard focus where
+            // typing already goes so Esc/Enter reach the modal paths below.
+            self.focus_input(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Close the delete modal with nothing removed and nothing written,
+    /// highlight back on the invoking row.
+    fn cancel_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.cancel_delete();
+        self.focus_input(window, cx);
+        cx.notify();
+    }
+
+    /// Run the modal's confirm path for the pending row:
+    ///
+    /// - live seat (advisory probe): no confirm action exists — Enter is
+    ///   inert here, exactly like the missing button.
+    /// - unevaluable probe: the first confirm arms, the second proceeds
+    ///   through the core force channel.
+    /// - free seat: the core op runs unforced.
+    ///
+    /// On `Ok` the row drops, memory is rewritten to the focused row, and
+    /// the highlight falls to the next row; on `Err` the modal stays open
+    /// with the error line and the row and the memory are untouched.
+    fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, armed) = match self.state.pending_delete() {
+            Some(pending) => (pending.name().to_string(), pending.is_armed()),
+            None => return,
+        };
+        let Some(dir) = instance::dir_for(&name) else {
+            self.state.fail_delete(
+                t_fmt(L10nKey::InstancePickerDeleteNoDir, &[("name", name.as_str())])
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        };
+        match instance::holder_pid_in(&dir) {
+            instance::SeatState::Live { .. } => {
+                // No confirm action: the report is the whole modal.
+            }
+            instance::SeatState::Unknown if !armed => {
+                self.state.arm_delete();
+                cx.notify();
+            }
+            seat => {
+                let force = seat == instance::SeatState::Unknown;
+                match instance::remove_instance(&name, force) {
+                    Ok(()) => {
+                        let focused = self.state.complete_delete();
+                        // Strictly after `Ok`, to the focused row (AD-7):
+                        // never a deleted name.
+                        let _ = instance::write_last(focused.memory_name());
+                        self.focus_input(window, cx);
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        self.state.fail_delete(e.to_string());
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Advisory pre-confirm probe behind the modal report: the directory
+    /// for the pending name plus its seat. The in-op probe inside
+    /// `remove_instance` stays authoritative; this one only decides which
+    /// report the modal renders.
+    fn delete_probe(&self) -> Option<(PathBuf, instance::SeatState)> {
+        let name = self.state.pending_delete()?.name().to_string();
+        let dir = instance::dir_for(&name)?;
+        let seat = instance::holder_pid_in(&dir);
+        Some((dir, seat))
     }
 
     fn row_label(&self, index: usize) -> SharedString {
@@ -474,20 +738,27 @@ impl Render for InstancePicker {
         };
         let relaunch_failed = self.relaunch_failed;
         let input = self.input.clone();
-        v_flex()
+        let column = v_flex()
             .on_action(
                 cx.listener(|this, _: &ConfirmInstance, window, cx| this.confirm(window, cx)),
             )
             .on_action(cx.listener(|this, _: &CancelInstance, window, cx| this.cancel(window, cx)))
             // The combobox owns the arrows: they always move the highlight,
             // even with the caret sitting in filtered text. A closed
-            // dropdown reopens on either key.
+            // dropdown reopens on either key. With the delete modal up the
+            // picker behind is inert: both keys are swallowed.
             .on_action(cx.listener(|this, _: &PickerUp, _window, cx| {
+                if this.state.pending_delete().is_some() {
+                    return;
+                }
                 this.state.open_dropdown();
                 this.state.move_up();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &PickerDown, _window, cx| {
+                if this.state.pending_delete().is_some() {
+                    return;
+                }
                 this.state.open_dropdown();
                 this.state.move_down();
                 cx.notify();
@@ -512,6 +783,11 @@ impl Render for InstancePicker {
                     .id("instance-picker-filter")
                     .w_full()
                     .on_click(cx.listener(|this, _, _, cx| {
+                        // Behind the modal the picker is inert: no
+                        // reopening the dropdown under the overlay.
+                        if this.state.pending_delete().is_some() {
+                            return;
+                        }
                         this.state.open_dropdown();
                         cx.notify();
                     }))
@@ -531,8 +807,12 @@ impl Render for InstancePicker {
                             let selected = position == cursor;
                             let label = self.row_label(index);
                             let meta = self.row_meta(index);
-                            let option_label =
-                                self.row_accessible_label(index, position, total);
+                            let option_label = self.row_accessible_label(index, position, total);
+                            // Named rows only: the Default row has no
+                            // directory to delete, so it never gets a ×.
+                            let deletable = self.state.is_deletable(index);
+                            let delete_name = (index != 0)
+                                .then(|| self.state.rows[index - 1].name.clone());
                             div()
                                 .id(("instance-picker-row", index))
                                 .role(gpui::Role::ListBoxOption)
@@ -549,6 +829,11 @@ impl Render for InstancePicker {
                                     row.bg(gpui::rgb(0x2E7D5B)).text_color(gpui::white())
                                 })
                                 .on_click(cx.listener(move |this, _, window, cx| {
+                                    // Inert behind the modal (the scrim
+                                    // normally swallows this first).
+                                    if this.state.pending_delete().is_some() {
+                                        return;
+                                    }
                                     // A click selects the row outright: stale
                                     // invalid filter text vetoes Enter and
                                     // creation, never a direct selection.
@@ -557,21 +842,54 @@ impl Render for InstancePicker {
                                     this.finish(Some(choice), window, cx);
                                 }))
                                 .child(label)
-                                .children(meta.map(|m| {
-                                    div().text_size(px(12.)).child(m)
-                                }))
+                                .children(meta.map(|m| div().text_size(px(12.)).child(m)))
+                                .when(deletable, |row| {
+                                    row.child(
+                                        div()
+                                            .id(("instance-picker-delete", index))
+                                            .role(gpui::Role::Button)
+                                            .aria_label(t_fmt(
+                                                L10nKey::InstancePickerDeleteRow,
+                                                &[(
+                                                    "name",
+                                                    delete_name.as_deref().unwrap_or_default(),
+                                                )],
+                                            ))
+                                            // A larger hit target than the
+                                            // glyph, per the touch floor.
+                                            .px(px(8.))
+                                            .py(px(4.))
+                                            .rounded(px(6.))
+                                            .cursor_pointer()
+                                            .text_size(px(14.))
+                                            .child("×")
+                                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                // The × opens the modal
+                                                // only: holding the press
+                                                // back keeps it from
+                                                // reaching the row
+                                                // behind, which would
+                                                // confirm it (the
+                                                // tab-strip close-button
+                                                // precedent).
+                                                cx.stop_propagation();
+                                                this.open_delete(index, window, cx);
+                                            })),
+                                    )
+                                })
                         })),
                     &self.list_scroll,
                 ))
             })
             .when(dropdown_open && filtering && match_count > 0, |column| {
-                column.child(
-                    div().text_size(px(12.)).child(t_plural(
-                        L10nKey::InstancePickerMatchCount,
-                        match_count,
-                        &[],
-                    )),
-                )
+                column.child(div().text_size(px(12.)).child(t_plural(
+                    L10nKey::InstancePickerMatchCount,
+                    match_count,
+                    &[],
+                )))
             })
             .when(dropdown_open && filtering && match_count == 0, |column| {
                 column.child(
@@ -627,7 +945,172 @@ impl Render for InstancePicker {
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     ),
             )
-            .track_focus(&self.focus)
+            .track_focus(&self.focus);
+        // The delete modal stacks one deep over the picker (never a modal
+        // over the modal): an in-view scrim + card overlay, leaving the
+        // window size untouched.
+        let modal = self
+            .state
+            .pending_delete()
+            .cloned()
+            .map(|pending| self.render_delete_modal(&pending, cx));
+        div().relative().w_full().child(column).children(modal)
+    }
+}
+
+impl InstancePicker {
+    /// The delete-confirm modal: an in-view overlay (scrim + dialog card,
+    /// the ssh-prompt sheet precedent). Scrim, Esc, and Cancel close it
+    /// with nothing removed and nothing written; Confirm runs
+    /// [`InstancePicker::confirm_delete`]. Live seats get the actionable
+    /// report with no confirm action; unknown probes need the double
+    /// confirm; failures surface as a retryable error line with the modal
+    /// staying open.
+    fn render_delete_modal(
+        &self,
+        pending: &PendingDelete,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let name = pending.name().to_string();
+        let armed = pending.is_armed();
+        let error = pending.error().map(str::to_string);
+        let title = t_fmt(
+            L10nKey::InstancePickerDeleteTitle,
+            &[("name", name.as_str())],
+        );
+        let rungs = crate::ui::dialog::popover_rungs(cx);
+
+        // Advisory only: the in-op probe inside `remove_instance` is what
+        // refuses or unlinks. `None` means the directory stopped resolving
+        // mid-modal — then there is no way through at all.
+        let probe = self.delete_probe();
+        let seat = probe.as_ref().map(|(_, seat)| *seat);
+        let confirmable = matches!(
+            seat,
+            Some(instance::SeatState::Free) | Some(instance::SeatState::Unknown)
+        );
+
+        let mut body = crate::ui::dialog::body();
+        match (&probe, seat) {
+            (Some((dir, instance::SeatState::Live { pid })), _) => {
+                let dir = dir.display().to_string();
+                // "?" is locale-neutral: no locale has a word for an
+                // unrecorded pid, and the flock outcome (held) is what is
+                // authoritative here, not the number.
+                let pid = pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let stop = format!("tty7 --as {name} server stop");
+                let rm = format!(
+                    "rm -rf {}",
+                    tty7_core::core::shell_quote::quote_for_shell(&dir, None)
+                );
+                body = body.child(div().text_size(px(12.)).child(t_fmt(
+                    L10nKey::InstancePickerDeleteLiveReport,
+                    &[
+                        ("dir", dir.as_str()),
+                        ("pid", pid.as_str()),
+                        ("stop", stop.as_str()),
+                        ("rm", rm.as_str()),
+                    ],
+                )));
+            }
+            (Some((dir, instance::SeatState::Unknown)), _) => {
+                let _ = dir;
+                body = body.child(div().text_size(px(12.)).child(t_fmt(
+                    L10nKey::InstancePickerDeleteUnknownBody,
+                    &[("name", name.as_str())],
+                )));
+            }
+            (Some((dir, instance::SeatState::Free)), _) => {
+                let dir = dir.display().to_string();
+                body = body.child(div().text_size(px(12.)).child(t_fmt(
+                    L10nKey::InstancePickerDeleteBody,
+                    &[("dir", dir.as_str())],
+                )));
+            }
+            (None, _) => {
+                body = body.child(div().text_size(px(12.)).child(t_fmt(
+                    L10nKey::InstancePickerDeleteNoDir,
+                    &[("name", name.as_str())],
+                )));
+            }
+        }
+        // The retryable failure line: the modal stays open, the row stays,
+        // and memory is untouched (see `confirm_delete`).
+        if let Some(message) = error {
+            body = body.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(gpui::rgb(0xC0392B))
+                    .child(t_fmt(
+                        L10nKey::InstancePickerDeleteError,
+                        &[("error", message.as_str())],
+                    )),
+            );
+        }
+
+        let mut footer = crate::ui::dialog::footer(cx).child(crate::ui::dialog::button(
+            "instance-picker-delete-cancel",
+            t(L10nKey::InstancePickerDeleteCancel),
+            crate::ui::dialog::Tone::Secondary,
+            true,
+            rungs,
+            cx,
+            cx.listener(|this, _, window, cx| this.cancel_delete(window, cx)),
+        ));
+        if confirmable {
+            // The first unknown confirm only arms (primary); the armed
+            // re-confirm and the free confirm remove permanently (danger).
+            let (id, label, tone) = match (seat, armed) {
+                (Some(instance::SeatState::Unknown), false) => (
+                    "instance-picker-delete-confirm",
+                    t(L10nKey::InstancePickerDeleteConfirm).to_string(),
+                    crate::ui::dialog::Tone::Primary,
+                ),
+                (Some(instance::SeatState::Unknown), true) => (
+                    "instance-picker-delete-confirm-again",
+                    t(L10nKey::InstancePickerDeleteConfirmAgain).to_string(),
+                    crate::ui::dialog::Tone::Danger,
+                ),
+                _ => (
+                    "instance-picker-delete-confirm",
+                    t(L10nKey::InstancePickerDeleteConfirm).to_string(),
+                    crate::ui::dialog::Tone::Danger,
+                ),
+            };
+            footer = footer.child(crate::ui::dialog::button(
+                id,
+                label,
+                tone,
+                true,
+                rungs,
+                cx,
+                cx.listener(|this, _, window, cx| this.confirm_delete(window, cx)),
+            ));
+        }
+
+        let card = crate::ui::dialog::card("instance-picker-delete-card", title.clone(), 340., cx)
+            .child(crate::ui::dialog::header(title, cx))
+            .child(body)
+            .child(footer);
+        div()
+            .absolute()
+            .inset_0()
+            .bg(crate::ui::presets::scrim_fill(cx))
+            // The scrim backs out (the worktree-prompt precedent); the card
+            // occludes, so clicks on it never reach here.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.cancel_delete(window, cx)),
+            )
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .p(px(16.))
+            .child(card)
+            .into_any_element()
     }
 }
 
@@ -737,10 +1220,7 @@ mod tests {
 
     #[test]
     fn cursor_starts_on_the_remembered_row() {
-        let names = vec![
-            ("bob".to_string(), None),
-            ("alice".to_string(), None),
-        ];
+        let names = vec![("bob".to_string(), None), ("alice".to_string(), None)];
         assert_eq!(
             PickerState::new(names.clone(), Some("alice")).current(),
             PickerSelection::Named("alice".to_string())
@@ -802,10 +1282,7 @@ mod tests {
 
     #[test]
     fn clearing_the_filter_restores_the_remembered_highlight() {
-        let names = vec![
-            ("alice".to_string(), None),
-            ("bob".to_string(), None),
-        ];
+        let names = vec![("alice".to_string(), None), ("bob".to_string(), None)];
         let mut state = PickerState::new(names, Some("bob"));
         assert_eq!(state.current(), PickerSelection::Named("bob".to_string()));
         state.set_query("x");
@@ -861,10 +1338,7 @@ mod tests {
         // Wrapping runs over every visible row, Default on top included.
         assert_eq!(state.current(), PickerSelection::Default);
         state.move_up();
-        assert_eq!(
-            state.current(),
-            PickerSelection::Named("libby".to_string())
-        );
+        assert_eq!(state.current(), PickerSelection::Named("libby".to_string()));
         state.move_down();
         assert_eq!(state.current(), PickerSelection::Default);
         state.move_down();
@@ -876,10 +1350,7 @@ mod tests {
         let names = vec![("alice".to_string(), None), ("bob".to_string(), None)];
         let mut state = PickerState::new(names, None);
         state.set_query("b");
-        assert_eq!(
-            state.confirm(),
-            PickerSelection::Named("bob".to_string())
-        );
+        assert_eq!(state.confirm(), PickerSelection::Named("bob".to_string()));
         // A valid but unlisted name is not entered: with nothing matching,
         // the highlight sits on Default and that is what confirms.
         state.set_query("carol");
@@ -906,17 +1377,171 @@ mod tests {
     }
 
     #[test]
-    fn create_candidate_accepts_only_valid_unlisted_names() {
+    fn delete_modal_opens_unarmed_on_the_invoking_row() {
+        let names = vec![("alice".to_string(), None), ("bob".to_string(), None)];
+        let mut state = PickerState::new(names, None);
+        assert_eq!(state.current(), PickerSelection::Default);
+        assert!(state.open_delete(2));
+        let pending = state.pending_delete().expect("modal must be pending");
+        assert_eq!(pending.name(), "bob");
+        assert!(!pending.is_armed());
+        assert_eq!(pending.error(), None);
+        // The highlight moved to the invoking row with it.
+        assert_eq!(state.current(), PickerSelection::Named("bob".to_string()));
+    }
+
+    #[test]
+    fn delete_modal_never_opens_on_default_or_air() {
+        let names = vec![("alice".to_string(), None)];
+        let mut state = PickerState::new(names, None);
+        assert!(!state.is_deletable(0), "the Default row has no directory");
+        assert!(state.is_deletable(1));
+        assert!(!state.is_deletable(2), "out of range is not deletable");
+        assert!(!state.is_deletable(99));
+        assert!(!state.open_delete(0));
+        assert!(!state.open_delete(99));
+        assert!(state.pending_delete().is_none());
+        assert_eq!(state.current(), PickerSelection::Default);
+    }
+
+    #[test]
+    fn esc_closes_the_delete_modal_before_the_dropdown() {
+        let names = vec![("alice".to_string(), None), ("bob".to_string(), None)];
+        let mut state = PickerState::new(names, Some("alice"));
+        assert!(state.open_delete(2));
+        assert!(state.is_dropdown_open());
+        // Modal first: it closes, the highlight is back on the invoking
+        // row, and the dropdown stays exactly as it was.
+        assert_eq!(state.esc_layer(), EscLayer::CloseDeleteModal);
+        assert!(state.pending_delete().is_none());
+        assert_eq!(state.current(), PickerSelection::Named("bob".to_string()));
+        assert!(state.is_dropdown_open());
+        assert_eq!(state.esc_layer(), EscLayer::CloseDropdown);
+        assert_eq!(state.esc_layer(), EscLayer::CancelWindow);
+    }
+
+    #[test]
+    fn unknown_first_confirm_only_arms() {
+        let names = vec![("alice".to_string(), None)];
+        let mut state = PickerState::new(names, None);
+        assert!(state.open_delete(1));
+        assert!(!state.pending_delete().unwrap().is_armed());
+        state.arm_delete();
+        assert!(state.pending_delete().unwrap().is_armed());
+        // Arming removes nothing: the row is still there.
+        assert_eq!(state.rows.len(), 1);
+    }
+
+    #[test]
+    fn failed_delete_keeps_the_row_and_the_memory_value() {
+        let names = vec![("alice".to_string(), None), ("bob".to_string(), None)];
+        let mut state = PickerState::new(names, Some("bob"));
+        assert!(state.open_delete(2));
+        state.arm_delete();
+        state.fail_delete(
+            "instance is live (server pid 123, advisory); stop that instance's server first"
+                .to_string(),
+        );
+        // The modal stays open with the retryable line…
+        let pending = state.pending_delete().expect("modal must stay open");
+        assert!(pending.is_armed());
+        assert!(pending.error().is_some());
+        // …the row stays, and the focused memory value is untouched.
+        assert_eq!(state.rows.len(), 2);
+        assert_eq!(state.current(), PickerSelection::Named("bob".to_string()));
+        assert_eq!(
+            state.current().memory_name(),
+            "bob",
+            "memory would still name the live row, never a deletion"
+        );
+    }
+
+    #[test]
+    fn complete_delete_falls_to_next_and_names_live_memory() {
         let names = vec![
             ("alice".to_string(), None),
             ("bob".to_string(), None),
+            ("cara".to_string(), None),
         ];
+        let mut state = PickerState::new(names, Some("alice"));
+        assert!(state.open_delete(1));
+        let focused = state.complete_delete();
+        // The row is gone, the modal with it, and the highlight sits on the
+        // next row — whose value memory must take.
+        assert_eq!(focused, PickerSelection::Named("bob".to_string()));
+        assert_eq!(state.current(), focused);
+        assert_eq!(focused.memory_name(), "bob");
+        assert!(state.pending_delete().is_none());
+        assert_eq!(state.visible(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn complete_delete_at_the_end_falls_to_previous() {
+        let names = vec![("alice".to_string(), None), ("bob".to_string(), None)];
+        let mut state = PickerState::new(names, Some("bob"));
+        assert!(state.open_delete(2));
+        let focused = state.complete_delete();
+        assert_eq!(focused, PickerSelection::Named("alice".to_string()));
+        assert_eq!(state.current(), focused);
+        assert_eq!(focused.memory_name(), "alice");
+    }
+
+    #[test]
+    fn complete_delete_of_the_last_named_row_lands_on_default() {
+        let names = vec![("alice".to_string(), None)];
+        let mut state = PickerState::new(names, Some("alice"));
+        assert!(state.open_delete(1));
+        let focused = state.complete_delete();
+        // Nothing dangles: focus is Default and memory takes the sentinel.
+        assert_eq!(focused, PickerSelection::Default);
+        assert_eq!(focused.memory_name(), DEFAULT_SENTINEL);
+        assert_eq!(state.visible(), vec![0]);
+    }
+
+    #[test]
+    fn cancel_delete_returns_to_the_invoking_row_and_writes_nothing() {
+        let names = vec![("alice".to_string(), None), ("bob".to_string(), None)];
+        let mut state = PickerState::new(names, None);
+        assert!(state.open_delete(1));
+        // The highlight drifts (arrows are inert behind the modal in the
+        // view, but the state restores regardless); cancelling puts it back
+        // on the invoking row with the row intact.
+        state.move_down();
+        state.cancel_delete();
+        assert!(state.pending_delete().is_none());
+        assert_eq!(state.current(), PickerSelection::Named("alice".to_string()));
+        assert_eq!(state.rows.len(), 2);
+    }
+
+    #[test]
+    fn delete_modal_tracks_the_invoking_row_under_a_filter() {
+        let names = vec![
+            ("alice".to_string(), None),
+            ("bob".to_string(), None),
+            ("libby".to_string(), None),
+        ];
+        let mut state = PickerState::new(names, None);
+        state.set_query("b");
+        assert_eq!(state.visible(), vec![0, 2, 3]);
+        // libby is global row 3; opening its modal highlights it.
+        assert!(state.open_delete(3));
+        assert_eq!(state.current(), PickerSelection::Named("libby".to_string()));
+        // Completing removes libby while the filter still holds: the
+        // highlight stays valid and names a live row.
+        let focused = state.complete_delete();
+        assert_eq!(state.rows.len(), 2);
+        assert!(matches!(
+            focused,
+            PickerSelection::Named(_) | PickerSelection::Default
+        ));
+    }
+
+    #[test]
+    fn create_candidate_accepts_only_valid_unlisted_names() {
+        let names = vec![("alice".to_string(), None), ("bob".to_string(), None)];
         let state = PickerState::new(names, None);
         // Fresh and valid: the button enables.
-        assert_eq!(
-            state.create_candidate("carol"),
-            Some("carol".to_string())
-        );
+        assert_eq!(state.create_candidate("carol"), Some("carol".to_string()));
         assert_eq!(
             state.create_candidate("  carol-2  "),
             Some("carol-2".to_string())
@@ -950,10 +1575,7 @@ mod tests {
         use std::time::Duration;
         let t = UNIX_EPOCH + Duration::from_secs(1_000);
         let mut state = PickerState::new(
-            vec![
-                ("alice".to_string(), Some(t)),
-                ("bob".to_string(), None),
-            ],
+            vec![("alice".to_string(), Some(t)), ("bob".to_string(), None)],
             None,
         );
         state.set_query("a");
@@ -962,10 +1584,7 @@ mod tests {
         // mtimes survive behind the visible rows.
         assert_eq!(state.rows[0].mtime, Some(t));
         assert_eq!(state.rows[1].mtime, None);
-        assert_eq!(
-            state.current(),
-            PickerSelection::Named("alice".to_string())
-        );
+        assert_eq!(state.current(), PickerSelection::Named("alice".to_string()));
     }
 
     #[test]

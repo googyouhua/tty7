@@ -1622,6 +1622,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerMatchCount => "{count} 个结果",
         L10nKey::InstancePickerPosition => "共 {total} 个，第 {position} 个",
         L10nKey::InstancePickerCreate => "新建并进入",
+        L10nKey::InstancePickerDeleteTitle => "要移除“{name}”吗？",
+        L10nKey::InstancePickerDeleteBody => "{dir} 下的所有会话与状态都将被删除，此操作无法撤销。",
+        L10nKey::InstancePickerDeleteConfirm => "移除",
+        L10nKey::InstancePickerDeleteCancel => "取消",
+        L10nKey::InstancePickerDeleteLiveReport => {
+            "{dir} 仍在运行（server pid {pid}，仅供参考）。请先停止该实例的服务：{stop}，之后再用 {rm} 删除。"
+        }
+        L10nKey::InstancePickerDeleteUnknownBody => {
+            "无法确认“{name}”的服务状态。再确认一次将继续删除。"
+        }
+        L10nKey::InstancePickerDeleteConfirmAgain => "仍要移除",
+        L10nKey::InstancePickerDeleteError => "移除失败：{error}",
+        L10nKey::InstancePickerDeleteNoDir => "找不到 '{name}' 的目录。",
+        L10nKey::InstancePickerDeleteRow => "删除 {name}",
         L10nKey::SwitcherStartingServer => "正在启动 tty7 server…",
         L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty7 server… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty7 server… {done}",

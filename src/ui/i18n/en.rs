@@ -1751,6 +1751,22 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::InstancePickerMatchCount => "{count} matches",
         L10nKey::InstancePickerPosition => "{position} of {total}",
         L10nKey::InstancePickerCreate => "Create and enter",
+        L10nKey::InstancePickerDeleteTitle => "Remove “{name}”?",
+        L10nKey::InstancePickerDeleteBody => {
+            "All sessions and state under {dir} will be removed. This cannot be undone."
+        }
+        L10nKey::InstancePickerDeleteConfirm => "Remove",
+        L10nKey::InstancePickerDeleteCancel => "Cancel",
+        L10nKey::InstancePickerDeleteLiveReport => {
+            "{dir} is live (server pid {pid}, advisory). Stop that instance's server first: {stop} — then remove with: {rm}"
+        }
+        L10nKey::InstancePickerDeleteUnknownBody => {
+            "The server seat for “{name}” could not be checked. Confirm again to remove it anyway."
+        }
+        L10nKey::InstancePickerDeleteConfirmAgain => "Remove anyway",
+        L10nKey::InstancePickerDeleteError => "Could not remove: {error}",
+        L10nKey::InstancePickerDeleteNoDir => "No directory resolves for '{name}'.",
+        L10nKey::InstancePickerDeleteRow => "Delete {name}",
         L10nKey::SwitcherStartingServer => "Starting tty7's server…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "Downloading tty7's server… {done} / {total}"

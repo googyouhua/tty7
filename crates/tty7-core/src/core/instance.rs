@@ -296,8 +296,9 @@ pub fn holder_pid_in(dir: &Path) -> SeatState {
 }
 
 /// Why [`remove_instance_in`] refused or failed to remove an instance.
-/// `Live` and `Unknown` never unlink; the picker (entry 5) renders the
-/// liveness report for `Live` and a second confirm for `Unknown`.
+/// `Live` and `Unknown` never unlink without the force channel; the picker
+/// (entry 5) renders the liveness report for `Live` and a second confirm
+/// for `Unknown` (which then retries with `force = true`).
 #[derive(Debug)]
 pub enum RemoveError {
     /// The name is invalid or the sentinel, or the instance path is a
@@ -353,8 +354,14 @@ impl From<std::io::Error> for RemoveError {
 ///
 /// - Invalid names and the `default` sentinel are refused before any path
 ///   is built; a symlinked `tty7-<name>` is refused without following it.
-/// - A live seat ([`SeatState::Live`]) or an unevaluable probe
-///   ([`SeatState::Unknown`]) refuses without unlinking.
+///   `force` never bypasses either: there is no directory a forced remove
+///   could safely mean.
+/// - A live seat ([`SeatState::Live`]) refuses without unlinking, forced or
+///   not: the holder is authoritative for liveness, and only the user stops
+///   it (no kill action anywhere).
+/// - An unevaluable probe ([`SeatState::Unknown`]) refuses without unlinking
+///   unless `force` is set — the picker's second explicit confirm — in which
+///   case the unlink proceeds past the unknown seat.
 /// - Otherwise the whole `tty7-<name>` directory is removed with
 ///   `remove_dir_all` (permanent, no trash).
 ///
@@ -364,7 +371,7 @@ impl From<std::io::Error> for RemoveError {
 /// the window surfaces as an `Io` error rather than silent success.
 /// Memory is untouched throughout — rewriting it to the focused row after
 /// `Ok` is the caller's ordered job (AD-7).
-pub fn remove_instance_in(root: &Path, name: &str) -> Result<(), RemoveError> {
+pub fn remove_instance_in(root: &Path, name: &str, force: bool) -> Result<(), RemoveError> {
     let clean = validate_name(name).map_err(|reason| {
         log::warn!("refusing to remove instance {name:?}: {reason}");
         RemoveError::Invalid(reason)
@@ -404,7 +411,7 @@ pub fn remove_instance_in(root: &Path, name: &str) -> Result<(), RemoveError> {
             );
             return Err(RemoveError::Live { pid });
         }
-        SeatState::Unknown => {
+        SeatState::Unknown if !force => {
             log::warn!(
                 "refusing to remove instance {clean:?} at {}: liveness probe unavailable",
                 dir.display()
@@ -412,6 +419,12 @@ pub fn remove_instance_in(root: &Path, name: &str) -> Result<(), RemoveError> {
             return Err(RemoveError::Unknown(format!(
                 "could not probe the server seat for '{clean}'"
             )));
+        }
+        SeatState::Unknown => {
+            log::info!(
+                "removing instance {clean:?} at {} with an unevaluable probe (second confirm)",
+                dir.display()
+            );
         }
         SeatState::Free => {}
     }
@@ -430,8 +443,10 @@ pub fn remove_instance_in(root: &Path, name: &str) -> Result<(), RemoveError> {
     }
 }
 
-/// Remove the instance `name` under the live root.
-pub fn remove_instance(name: &str) -> Result<(), RemoveError> {
+/// Remove the instance `name` under the live root. `force` proceeds past an
+/// unevaluable liveness probe only (the picker's second explicit confirm);
+/// live seats and invalid names are still refused.
+pub fn remove_instance(name: &str, force: bool) -> Result<(), RemoveError> {
     // Validate before resolving the root: an invalid name is a refusal,
     // never a path, even when no root resolves.
     if let Err(reason) = validate_name(name) {
@@ -442,7 +457,7 @@ pub fn remove_instance(name: &str) -> Result<(), RemoveError> {
         log::warn!("could not remove instance {name:?}: no instance root");
         return Err(RemoveError::Unknown("no instance root".to_string()));
     };
-    remove_instance_in(&root, name)
+    remove_instance_in(&root, name, force)
 }
 
 #[cfg(test)]
@@ -615,8 +630,12 @@ mod tests {
         std::fs::write(dir.join("state.json"), "{}").unwrap();
         // No seat file at all: never had a holder, so free.
         assert_eq!(holder_pid_in(&dir), SeatState::Free);
-        assert!(remove_instance_in(&root, "gone").is_ok());
+        assert!(remove_instance_in(&root, "gone", false).is_ok());
         assert!(!dir.exists(), "a free instance must be unlinked");
+        // Forcing a free seat is a no-op: the same unlink runs.
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(remove_instance_in(&root, "gone", true).is_ok());
+        assert!(!dir.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -630,7 +649,7 @@ mod tests {
             .flatten()
             .map(|e| e.file_name())
             .collect();
-        let err = remove_instance_in(&root, "ghost").unwrap_err();
+        let err = remove_instance_in(&root, "ghost", false).unwrap_err();
         assert!(
             matches!(err, RemoveError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
             "a missing instance must surface NotFound, got {err:?}"
@@ -652,8 +671,20 @@ mod tests {
         std::fs::write(root.join("tty7-keep").join("state.json"), "{}").unwrap();
         for bad in ["", "default", "-x", "../x", "a/b", "Alice"] {
             assert!(
-                matches!(remove_instance_in(&root, bad), Err(RemoveError::Invalid(_))),
+                matches!(
+                    remove_instance_in(&root, bad, false),
+                    Err(RemoveError::Invalid(_))
+                ),
                 "{bad:?} must be refused as invalid"
+            );
+            // Force never bypasses validity: there is no directory a forced
+            // remove of a bad name could safely mean.
+            assert!(
+                matches!(
+                    remove_instance_in(&root, bad, true),
+                    Err(RemoveError::Invalid(_))
+                ),
+                "forced {bad:?} must still be refused as invalid"
             );
         }
         assert!(
@@ -679,10 +710,18 @@ mod tests {
         symlink(&target, root.join("tty7-link")).unwrap();
         assert!(
             matches!(
-                remove_instance_in(&root, "link"),
+                remove_instance_in(&root, "link", false),
                 Err(RemoveError::Invalid(_))
             ),
             "a symlinked instance dir must be refused"
+        );
+        // Forcing never follows a symlink either.
+        assert!(
+            matches!(
+                remove_instance_in(&root, "link", true),
+                Err(RemoveError::Invalid(_))
+            ),
+            "a forced remove must still refuse a symlink"
         );
         // Neither the link nor its target was followed or unlinked.
         assert!(
@@ -726,17 +765,54 @@ mod tests {
             "the test must hold the seat for the probe to see"
         );
         assert_eq!(holder_pid_in(&dir), SeatState::Live { pid: Some(pid) });
-        match remove_instance_in(&root, "busy") {
+        match remove_instance_in(&root, "busy", false) {
             Err(RemoveError::Live { pid: seen }) => assert_eq!(seen, Some(pid)),
             other => panic!("a live seat must refuse with Live, got {other:?}"),
         }
         assert!(dir.is_dir(), "a refused remove must keep the directory");
         assert!(dir.join("state.json").exists());
+        // Force never bypasses a live seat: only the user stops the server.
+        match remove_instance_in(&root, "busy", true) {
+            Err(RemoveError::Live { pid: seen }) => assert_eq!(seen, Some(pid)),
+            other => panic!("a forced remove must still refuse a live seat, got {other:?}"),
+        }
+        assert!(dir.is_dir(), "a forced remove must keep a live directory");
         drop(held);
         // Once the seat is released the same directory removes cleanly.
-        assert!(remove_instance_in(&root, "busy").is_ok());
+        assert!(remove_instance_in(&root, "busy", false).is_ok());
         assert!(!dir.exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_proceeds_past_an_unknown_probe_but_live_still_refuses() {
+        // `root` is a regular file, so `<root>/tty7-<name>/daemon.lock`
+        // cannot be opened (ENOTDIR, never NotFound): the probe reads
+        // Unknown however the remove is forced. This runs as any user —
+        // permission tricks would not survive root — and touches nothing:
+        // both attempts fail before any unlink could mean anything.
+        let root = std::env::temp_dir().join(format!("tty7-rm-force-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::write(&root, "file, not dir").unwrap();
+        let dir = root.join("tty7-busy");
+        assert_eq!(holder_pid_in(&dir), SeatState::Unknown);
+        match remove_instance_in(&root, "busy", false) {
+            Err(RemoveError::Unknown(_)) => {}
+            other => panic!("an unforced unknown probe must refuse, got {other:?}"),
+        }
+        // Forced, the op proceeds past the unknown seat and fails at the
+        // unlink instead — the probe refusal is what force lifts, nothing
+        // else.
+        match remove_instance_in(&root, "busy", true) {
+            Err(RemoveError::Io(_)) => {}
+            other => panic!("a forced unknown probe must reach the unlink, got {other:?}"),
+        }
+        assert!(
+            std::fs::read_to_string(&root).unwrap() == "file, not dir",
+            "a forced unknown remove must touch nothing but its own unlink"
+        );
+        let _ = std::fs::remove_file(&root);
     }
 
     #[cfg(unix)]
@@ -761,10 +837,14 @@ mod tests {
         std::fs::create_dir_all(root.join("tty7-busy")).unwrap();
         assert_eq!(holder_pid_in(&root.join("tty7-busy")), SeatState::Unknown);
         assert!(matches!(
-            remove_instance_in(&root, "busy"),
+            remove_instance_in(&root, "busy", false),
             Err(RemoveError::Unknown(_))
         ));
         assert!(root.join("tty7-busy").is_dir());
+        // The second confirm proceeds past the unknown seat: without a probe
+        // primitive the forced unlink is the only way through.
+        assert!(remove_instance_in(&root, "busy", true).is_ok());
+        assert!(!root.join("tty7-busy").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
