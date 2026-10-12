@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>key-picker — username-selector combobox + delete modal</title>
+<style>
+/* Governs: DESIGN.md Components (combobox-input, dropdown-viewport, dropdown-row-selected, row-delete, create-button, delete-modal), Layout & Spacing; EXPERIENCE.md Component Patterns, State Patterns, Flow 1. Spine wins on conflict. */
+body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#2b2f36;color:#1a1b1f;margin:0;padding:24px;display:flex;gap:24px;flex-wrap:wrap}
+.card{width:400px;background:#fff;border-radius:8px;padding:20px;display:flex;flex-direction:column;gap:12px}
+h1{font-size:15px;font-weight:700;margin:0}
+.hint{font-size:12px;color:#555;margin:0}
+.combo{border:1px solid #ccc;border-radius:6px;padding:8px 10px;font-size:14px;color:#333}
+.viewport{border:1px solid #e2e2e2;border-radius:6px;overflow:hidden}
+.row{display:flex;align-items:center;padding:7px 10px;font-size:14px;border-radius:6px}
+.row.sel{background:#2E7D5B;color:#fff}
+.row .meta{margin-left:auto;font-size:12px;opacity:.75;margin-right:8px}
+.row .x{border:0;background:transparent;color:inherit;font-size:14px;cursor:pointer;padding:2px 8px}
+.row.dim{color:#333}
+.invalid{font-size:12px;color:#C0392B}
+.create{background:#2E7D5B;color:#fff;border:0;border-radius:6px;padding:8px;font-size:14px}
+.create:disabled{opacity:.45}
+.footer{display:flex;justify-content:flex-end;gap:8px}
+.footer .ghost{border:0;background:transparent;color:#333;padding:8px 12px}
+.footer .primary{background:#2E7D5B;color:#fff;border:0;border-radius:6px;padding:8px 14px}
+.modal{width:400px;background:#fff;border-radius:8px;padding:20px;display:flex;flex-direction:column;gap:12px}
+.modal h2{font-size:15px;margin:0}
+.modal p{font-size:13px;color:#444}
+.cap{font-size:12px;color:#aaa;width:100%}
+</style>
+</head>
+<body>
+<p class="cap">左：过滤中（输入 b，高亮 bob）；右：删除确认 modal。真实字符串以 spine 为准。</p>
+<div class="card">
+<h1>谁在使用 tty7？</h1>
+<p class="hint">用用户名隔开每个人的会话。</p>
+<div class="combo">b ▌</div>
+<div class="viewport">
+<div class="row sel"><span>bob</span><span class="meta">2天前</span><button class="x">×</button></div>
+<div class="row dim"><span>bob-2</span><span class="meta">上周</span><button class="x">×</button></div>
+<div class="row dim"><span>libby</span><span class="meta">3周前</span><button class="x">×</button></div>
+<div class="row dim"><span>默认实例</span><span class="meta"></span></div>
+</div>
+<button class="create" disabled>新建用户“b”（名称过短，仅演示）</button>
+<div class="footer"><button class="ghost">关闭</button><button class="primary">进入</button></div>
+</div>
+<div class="modal">
+<h2>删除 ghost？</h2>
+<p>将删除 <b>tty7-ghost</b> 下的全部会话与状态，此操作不可恢复。</p>
+<div class="footer"><button class="ghost">取消</button><button class="primary" style="background:#C0392B">确认删除</button></div>
+</div>
+</body>
+</html>
