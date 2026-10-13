@@ -103,6 +103,8 @@ impl BranchList {
 }
 
 impl ReviewState {
+    /// Test-only constructor: live code uses `default()`.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -124,6 +126,8 @@ impl ReviewState {
             .is_some()
     }
 
+    /// Test-only readers: live code reaches drafts through other methods.
+    #[cfg(test)]
     pub fn drafts_for_source(&self, source_tag: &str) -> Vec<&ReviewDraft> {
         let mut out: Vec<&ReviewDraft> = self
             .drafts
@@ -134,6 +138,7 @@ impl ReviewState {
         out
     }
 
+    #[cfg(test)]
     pub fn draft_count_for_source(&self, source_tag: &str) -> usize {
         self.drafts
             .values()

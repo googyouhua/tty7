@@ -1473,6 +1473,20 @@ l10n_keys! {
     InstanceBadgeWelcome,
     InstancePickerInvalid,
     InstancePickerRelaunchFailed,
+    InstancePickerNoMatch,
+    InstancePickerMatchCount,
+    InstancePickerPosition,
+    InstancePickerCreate,
+    InstancePickerDeleteTitle,
+    InstancePickerDeleteBody,
+    InstancePickerDeleteConfirm,
+    InstancePickerDeleteCancel,
+    InstancePickerDeleteLiveReport,
+    InstancePickerDeleteUnknownBody,
+    InstancePickerDeleteConfirmAgain,
+    InstancePickerDeleteError,
+    InstancePickerDeleteNoDir,
+    InstancePickerDeleteRow,
     SwitcherStartingServer,
     SwitcherDownloadingServerWithTotal,
     SwitcherDownloadingServerNoTotal,
@@ -2022,15 +2036,6 @@ pub fn t_plural(key: L10nKey, count: usize, args: &[(&str, &str)]) -> String {
     )
 }
 
-/// Select a named branch of a translation and fill placeholders.
-pub fn t_select(key: L10nKey, branch: &'static str, args: &[(&str, &str)]) -> String {
-    apply_template(
-        translate_variant(current_locale_index(), key, branch),
-        args,
-        None,
-    )
-}
-
 fn apply_template(template: &'static str, args: &[(&str, &str)], count: Option<usize>) -> String {
     let mut text = template.to_string();
     if let Some(n) = count {
@@ -2323,6 +2328,7 @@ mod tests {
             L10nKey::GitHubSkippedCount,
             L10nKey::GitHubShowHiddenComments,
             L10nKey::GitHubShowAllReviewers,
+            L10nKey::InstancePickerMatchCount,
         ];
         for key in plural_keys {
             for branch in ["zero", "one", "few", "many", "other"] {

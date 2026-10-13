@@ -31,6 +31,8 @@ impl Registry {
     /// Reusing a number would be worse than skipping one: a client that
     /// reconnects after a handoff is still holding the old ids, and an `Attach`
     /// for one of them has to find the pane it means or nothing at all.
+    /// Live callers are unix-only (handoff adoption).
+    #[cfg(unix)]
     fn claim_ids_past(&self, next: u64) {
         self.next_id.fetch_max(next, Ordering::Relaxed);
     }
@@ -614,7 +616,9 @@ fn hand_over(_registry: &Registry, _exe: &std::path::Path) -> anyhow::Error {
     )
 }
 
-/// What a pane does to the registry when its shell dies.
+/// What a pane does to the registry when its shell dies. Live caller is
+/// unix-only (handoff adoption).
+#[cfg(unix)]
 fn reaper(registry: Arc<Registry>, id: u64) -> impl FnOnce() + Send + 'static {
     move || {
         std::thread::Builder::new()

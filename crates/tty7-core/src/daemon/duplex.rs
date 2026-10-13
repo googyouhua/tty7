@@ -1,5 +1,7 @@
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
 
 use crate::daemon::control::LinkShutdown;
 
@@ -172,7 +174,9 @@ fn redirect_to_null(fd: libc::c_int) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use std::io::{Read as _, Write as _};
 
     #[cfg(unix)]

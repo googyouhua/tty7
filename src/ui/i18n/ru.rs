@@ -1980,6 +1980,26 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstanceBadgeWelcome => "Привет, {name}",
         L10nKey::InstancePickerInvalid => "Имена — только [a-z0-9-].",
         L10nKey::InstancePickerRelaunchFailed => "Не удалось запустить tty7 — попробуйте ещё раз.",
+        L10nKey::InstancePickerNoMatch => "Нет подходящих инстансов.",
+        L10nKey::InstancePickerMatchCount => "Совпадений: {count}",
+        L10nKey::InstancePickerPosition => "{position} из {total}",
+        L10nKey::InstancePickerCreate => "Создать и войти",
+        L10nKey::InstancePickerDeleteTitle => "Удалить «{name}»?",
+        L10nKey::InstancePickerDeleteBody => {
+            "Все сеансы и состояние в {dir} будут удалены. Это действие необратимо."
+        }
+        L10nKey::InstancePickerDeleteConfirm => "Удалить",
+        L10nKey::InstancePickerDeleteCancel => "Отмена",
+        L10nKey::InstancePickerDeleteLiveReport => {
+            "{dir} активен (pid сервера {pid}, не проверен). Сначала остановите сервер этого инстанса: {stop}, затем удалите: {rm}."
+        }
+        L10nKey::InstancePickerDeleteUnknownBody => {
+            "Не удалось проверить состояние сервера «{name}». Подтвердите ещё раз, чтобы всё равно удалить."
+        }
+        L10nKey::InstancePickerDeleteConfirmAgain => "Всё равно удалить",
+        L10nKey::InstancePickerDeleteError => "Не удалось удалить: {error}",
+        L10nKey::InstancePickerDeleteNoDir => "Каталог для '{name}' не найден.",
+        L10nKey::InstancePickerDeleteRow => "Удалить {name}",
         L10nKey::SwitcherStartingServer => "Запуск сервера tty7…",
         L10nKey::SwitcherDownloadingServerWithTotal => "Загрузка сервера tty7… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "Загрузка сервера tty7… {done}",
@@ -2526,6 +2546,11 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMatchCount, "few") => "{count} совпадения",
         (L10nKey::SettingsMatchCount, "many") => "{count} совпадений",
         (L10nKey::SettingsMatchCount, "other") => "{count} совпадений",
+        (L10nKey::InstancePickerMatchCount, "zero") => "Нет совпадений",
+        (L10nKey::InstancePickerMatchCount, "one") => "{count} совпадение",
+        (L10nKey::InstancePickerMatchCount, "few") => "{count} совпадения",
+        (L10nKey::InstancePickerMatchCount, "many") => "{count} совпадений",
+        (L10nKey::InstancePickerMatchCount, "other") => "{count} совпадений",
         (L10nKey::PanelSearchResultCount, "zero") => "Нет результатов",
         (L10nKey::PanelSearchResultCount, "one") => "{count} результат",
         (L10nKey::PanelSearchResultCount, "few") => "{count} результата",

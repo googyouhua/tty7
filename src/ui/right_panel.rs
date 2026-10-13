@@ -218,7 +218,7 @@ pub(crate) fn action_strip(row: &gpui::SharedString, backing: u32) -> gpui::Div 
 /// twin of Source Control's inline branch rows, not a dialog: a text input
 /// works the same on Windows and Linux, where the system path picker either
 /// does nothing or offers a folder choice that answers a different question.
-struct CwdEdit {
+pub(crate) struct CwdEdit {
     pane_id: u64,
     input: gpui::Entity<gpui_component::input::InputState>,
 }
@@ -2128,10 +2128,7 @@ impl Tty7App {
                     // could not be asked, which is not the same as an empty
                     // answer — see `Host::pane_procs`.
                     let procs = match &host {
-                        Some(host) => {
-                            use crate::ui::host_ops::Host as _;
-                            host.pane_procs(pane_id)
-                        }
+                        Some(host) => host.pane_procs(pane_id),
                         None => Some(crate::terminal::RemoteTerminal::query_procs(pane_id)),
                     };
                     let managed = route.map(|r| r.list()).unwrap_or_default();

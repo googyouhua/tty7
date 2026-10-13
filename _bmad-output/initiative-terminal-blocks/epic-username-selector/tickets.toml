@@ -1,0 +1,79 @@
+# tickets.toml — a container's agreed children. tickets.py reads it.
+# The order of the tables is the build order: move a table to reorder. `id` names a child for good and is never reused; it is not an order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "mtime recency tracer"
+description = "Snapshots (name, mtime) pairs once per open in the instance module, orders mtime-descending with name-ascending tie-break, omits meta when the filesystem cannot supply it, and renders the relative-time row meta in the picker. Tracer: thinnest core-to-UI path."
+verify = "A multi-user box shows relative times newest-first and stable; cargo test covers ordering, tie-break, and omit."
+covers = ["CAP-6"]
+after = []
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 2
+type = "story"
+title = "core delete op plus probe plus memory guard"
+description = "Adds remove_instance and remove_instance_in (validate, authoritative probe, unlink; refuses symlinked dirs and the default sentinel), the dir-scoped tri-state holder probe in the instance module, shape validation inside write_last_in, unit tests, and logging (warn on refused or failed removes, info on success)."
+verify = "cargo test is green including live-seat refusal, unknown-state, invalid, sentinel, and symlink cases."
+covers = ["CAP-4"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "combobox filter plus select plus keyboard plus preselect"
+description = "Input-is-filter combobox over instance::validate_name (never re-encoded), capped viewport, highlight with wrap, Enter confirms the highlighted row only with memory rewritten via apply_selection, Esc layering, click select, open-time preselect with Default fallback on missing or invalid or deleted memory, and InstancePicker keys for combobox, no-match, and counts in en, zh, ja, and ru."
+verify = "Typing narrows with highlight reset; Enter confirms and writes memory; corrupt or deleted memory preselects Default; all new strings present in four locales."
+covers = ["CAP-1", "CAP-2", "CAP-5", "CAP-7"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "explicit create button"
+description = "Create button enabled only for valid unlisted names via instance::validate_name (never re-encoded), invalid line otherwise; click creates tty7-<name>, enters it, and it is preselected next launch; and InstancePicker keys for create and invalid in en, zh, ja, and ru."
+verify = "A valid new name enables the button and the created user is preselected next launch; Enter alone never creates; all new strings present in four locales."
+covers = ["CAP-3"]
+after = [3]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "delete modal plus report plus fallback"
+description = "Per-row delete affordance on named rows only, never on Default; modal with the liveness report (stop and rm commands, advisory pid, no kill action) including the second confirm on unknown probe state; failure persistence with no row removal and no memory rewrite; memory rewritten to the focused row after Ok; focus trap with return; live announcements; InstancePicker keys for modal, report, and delete-error in en, zh, ja, and ru; and logging per the architecture conventions."
+verify = "A live server refuses with the report; a free server deletes with focus falling to the next row; a failed delete keeps row and memory; all new strings present in four locales."
+covers = ["CAP-4", "CAP-5", "CAP-7"]
+after = [2, 3, 4]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only from review findings deferred during the epic; takes no pushed-out scope."
+verify = "Deferred cleanups landed and tests are still green."
+covers = []
+after = [1, 2, 3, 4, 5]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 7
+type = "story"
+title = "end-to-end picker suite"
+description = "Closing suite across the epic following the spec success signal: scripted bare-launch filter, select, create, and guarded-delete walkthrough."
+verify = "The scripted walkthrough passes on a multi-user box."
+covers = []
+after = [1, 2, 3, 4, 5, 6]
+hitl = false
+risk = "low"

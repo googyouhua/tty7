@@ -2635,6 +2635,7 @@ mod tests {
 
     /// Does this box carry util-linux `script`? The bastion fallback is built
     /// on its `-c`; BSD script (macOS) has no `-c` and must skip the test.
+    #[cfg(unix)]
     fn util_linux_script() -> bool {
         std::process::Command::new("script")
             .args(["-qc", "true", "/dev/null"])
@@ -3036,6 +3037,7 @@ mod tests {
     }
 
     /// The OSC 0 title the shell settled on, as `user@host:dir`.
+    #[cfg(unix)]
     fn reported_title(text: &str) -> String {
         text.split("\u{1b}]")
             .filter_map(|s| s.strip_prefix("0;"))
