@@ -21,8 +21,6 @@ pub enum Stage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OneKeyAction {
-    /// Keep interacting (filter/cursor changed).
-    Pending,
     /// Cancelled — caller must send zero bytes.
     Cancelled,
     /// Ready to fill with these bytes.
@@ -72,6 +70,8 @@ impl OneKeyPicker {
         self.chosen = None;
     }
 
+    /// Test-only driver: live code pushes filter text directly.
+    #[cfg(test)]
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
         self.cursor = 0;
@@ -136,12 +136,10 @@ impl OneKeyPicker {
         }
     }
 
+    /// Test-only shortcut: live code stages cancellation through handle_key.
+    #[cfg(test)]
     pub fn cancel() -> OneKeyAction {
         OneKeyAction::Cancelled
-    }
-
-    pub fn entry_count(&self) -> usize {
-        self.entries.len()
     }
 
     /// Drive one keystroke while the picker owns the pane's keys, modeled on

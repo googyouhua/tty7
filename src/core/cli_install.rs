@@ -47,12 +47,15 @@ pub enum Outcome {
     /// Freshly linked (or copied, under AppImage) into a directory on PATH.
     Installed(PathBuf),
     /// Installed somewhere the user's PATH does not currently cover.
+    /// Constructed unix-only (Windows install paths always qualify).
+    #[cfg(unix)]
     InstalledOffPath(PathBuf),
     /// Installed, but an earlier PATH entry holds a different `tty7` that keeps
     /// winning the lookup.
     InstalledShadowed { ours: PathBuf, winner: PathBuf },
     /// Every directory we would write to is already taken by someone else's
-    /// `tty7`, and none of them is ours to move.
+    /// `tty7`, and none of them is ours to move. Constructed unix-only.
+    #[cfg(unix)]
     Occupied(PathBuf),
     /// Nowhere to write.
     Failed(String),
@@ -81,6 +84,7 @@ pub fn install(enabled: bool) -> Outcome {
         }
         Outcome::AlreadyInstalled(p) => log::debug!("tty7 CLI already on PATH at {}", p.display()),
         Outcome::Installed(p) => log::info!("put the tty7 CLI on PATH at {}", p.display()),
+        #[cfg(unix)]
         Outcome::InstalledOffPath(p) => log::warn!(
             "installed the tty7 CLI at {}, which is not on your PATH — add it to use `tty7` \
              outside a tty7 pane",
@@ -92,6 +96,7 @@ pub fn install(enabled: bool) -> Outcome {
             ours.display(),
             winner.display()
         ),
+        #[cfg(unix)]
         Outcome::Occupied(p) => log::info!(
             "leaving the existing `tty7` at {} alone; the bundled CLI was not installed",
             p.display()
@@ -140,7 +145,11 @@ fn install_inner(enabled: bool) -> Outcome {
     // never has a reason to say `Occupied` — but an existing one earlier on
     // PATH still beats it, and "installed" alone would be a lie.
     let ours = match &outcome {
-        Outcome::AlreadyInstalled(p) | Outcome::Installed(p) | Outcome::InstalledOffPath(p) => {
+        Outcome::AlreadyInstalled(p) | Outcome::Installed(p) => {
+            p.clone()
+        }
+        #[cfg(unix)]
+        Outcome::InstalledOffPath(p) => {
             p.clone()
         }
         _ => return outcome,

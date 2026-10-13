@@ -368,7 +368,7 @@ impl Tty7App {
 
     fn review_open_row(
         &mut self,
-        repo: &RepoKey,
+        _repo: &RepoKey,
         base: &str,
         head: &str,
         valid: bool,

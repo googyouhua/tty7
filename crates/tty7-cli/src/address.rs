@@ -1,5 +1,4 @@
 use anyhow::{Result, anyhow, bail};
-use std::path::PathBuf;
 use tty7_core::core::session::WorkspaceId;
 
 pub const ENV_PANE: &str = "TTY7_PANE";
@@ -17,6 +16,7 @@ pub const OUTSIDE_SHELL: &str = "not inside a tty7 shell — pass an explicit %p
 /// to `$HOME/.config`, so instances are `~/.config/tty7-<name>` beside the
 /// default `~/.config/tty7`. Shared with the GUI picker through
 /// `tty7_core::core::instance`.
+#[cfg(test)]
 pub const ENV_INSTANCE_ROOT: &str = tty7_core::core::instance::ENV_INSTANCE_ROOT;
 
 /// A per-user instance name for `--as`: lowercase letters, digits, hyphens.
@@ -33,7 +33,12 @@ pub fn parse_instance_name(s: &str) -> Result<String, String> {
 /// filesystem: `${TTY7_AS_ROOT:-$HOME/.config}/tty7-<name>`. Pure so tests
 /// can pin both inputs; the root rule is shared with
 /// `tty7_core::core::instance::root_with`.
-pub fn instance_dir(name: &str, root: Option<&str>, home: Option<&str>) -> Result<PathBuf> {
+#[cfg(test)]
+pub fn instance_dir(
+    name: &str,
+    root: Option<&str>,
+    home: Option<&str>,
+) -> Result<std::path::PathBuf> {
     let root = tty7_core::core::instance::root_with(root, home)
         .ok_or_else(|| anyhow!("$HOME is unset and {ENV_INSTANCE_ROOT} is not set"))?;
     Ok(root.join(format!("tty7-{name}")))
@@ -172,6 +177,7 @@ pub fn workspace_or_context(explicit: Option<&str>, ctx: &Context) -> Result<Wor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn shell_context() -> Context {
         Context {

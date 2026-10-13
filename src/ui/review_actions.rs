@@ -189,24 +189,6 @@ impl Tty7App {
         Ok(())
     }
 
-    /// Send the overlay's current selection plus comment to a NEW agent tab.
-    ///
-    /// Opens the most recently used agent in a new tab and delivers the
-    /// prompt once the agent reports itself running (30s budget). Running
-    /// agents are never touched.
-    pub(crate) fn review_send_to_new_agent(
-        &mut self,
-        comment: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), &'static str> {
-        let Some((path, lines, prompt, comment_len, label)) = self.review_selection_prompt(comment)
-        else {
-            return Err("no-selection");
-        };
-        self.deliver_review_to_new_agent(&path, &lines, &prompt, comment_len, &label, window, cx)
-    }
-
     /// Jump to a draft's file: reopen its source overlay focused on the
     /// draft's path. Git-backed sources re-probe; a `Patch` source rebuilds
     /// the saved single-file snapshot instead. Returns false when the draft
@@ -323,90 +305,6 @@ impl Tty7App {
             .update_draft_comment(&key.0, &key.1, &key.2, comment);
         self.review.end_edit();
         cx.notify();
-    }
-
-    /// Send the Review tab editor text with its draft's diff to a new agent.
-    pub(crate) fn review_send_edit(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), &'static str> {
-        let (Some(key), Some(box_entity)) = (self.review.editing_key(), self.review.edit_box())
-        else {
-            return Err("no-selection");
-        };
-        let comment = box_entity.read(cx).value().trim().to_string();
-        let draft = self.review.draft(&key.0, &key.1, &key.2).cloned();
-        let Some(draft) = draft else {
-            return Err("no-selection");
-        };
-        if draft.diff.trim().is_empty() {
-            return Err("no-selection");
-        }
-        let prompt = crate::core::agent_prompt::build_review_attach_prompt(
-            &draft.path,
-            &draft.lines,
-            &draft.diff,
-            &comment,
-            Some(&draft.source_label),
-        )
-        .ok_or("no-selection")?;
-        self.review
-            .update_draft_comment(&key.0, &key.1, &key.2, comment.clone());
-        let r = self.deliver_review_to_new_agent(
-            &draft.path,
-            &draft.lines,
-            &prompt,
-            comment.len(),
-            &draft.source_label,
-            window,
-            cx,
-        );
-        if r.is_ok() {
-            self.review.end_edit();
-        }
-        r
-    }
-
-    /// Deliver already-built review content to a NEW agent tab. Shared by the
-    /// overlay selection flow and the Review tab draft editor.
-    ///
-    /// Keeps the previous default: the most recently used offered agent.
-    pub(crate) fn deliver_review_to_new_agent(
-        &mut self,
-        path: &str,
-        lines: &str,
-        prompt: &str,
-        comment_len: usize,
-        source_label: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), &'static str> {
-        let Some(target) = self.review_default_target(cx) else {
-            let remote =
-                crate::core::session::WorkspaceStore::remote_ref(cx, self.workspace).is_some();
-            crate::terminal::notify_desktop(
-                Some("tty7"),
-                t(if remote {
-                    L10nKey::AppNoAgentSeenHere
-                } else {
-                    L10nKey::AppNoAgentOnPath
-                }),
-            );
-            return Err("no-agent-offered");
-        };
-        // The default target is agent-only when no role exists; with roles
-        // present it may be a role — both flow through the same waiter.
-        self.deliver_review_to_target(
-            &target,
-            path,
-            lines,
-            prompt,
-            comment_len,
-            source_label,
-            window,
-            cx,
-        )
     }
 
     /// Every target the "Send to new agent" menu offers, roles first: added

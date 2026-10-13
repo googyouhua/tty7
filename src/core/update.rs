@@ -2078,6 +2078,8 @@ struct PackageOffer {
 }
 
 impl PackageOffer {
+    /// Test constructor; live constructors are macOS/Linux-only.
+    #[cfg(any(test, unix))]
     fn plain(name: String) -> Self {
         Self {
             name,

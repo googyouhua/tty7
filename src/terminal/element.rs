@@ -1857,20 +1857,27 @@ pub(super) struct GridSnapshot {
     /// its generation still matches and recomputes (writing the fresh mapping
     /// back to the slot) when it does not, so grid, gutter and clicks share
     /// the one mapping of the frame.
+    ///
+    /// The three fields below are written by live paint but only asserted in
+    /// tests (`fold_epoch` was write-only everywhere and is gone): silence
+    /// the write-only note in non-test builds without changing the shape
+    /// tests assert against.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fold_map: Option<Vec<i64>>,
     /// Span count plus sorted folded seqs from the same lock scope as
     /// `fold_map` (see [`BlockTracker::fold_epoch`](super::blocks::BlockTracker::fold_epoch)):
     /// paint requires full equality with the render slot before reusing its
     /// rows, so a fold/unfold between render and paint recomputes live
     /// instead of painting through a stale map.
-    pub(super) fold_epoch: (usize, Vec<u64>),
     /// The viewport's top absolute row the mapping was built against (the
     /// identity window's top when `fold_map` is `None`), so a retained
     /// repaint can resolve through the painted rows without re-locking.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fold_top: i64,
     /// The gutter's markers for `fold_map`, one entry per painted row —
     /// `(seq, folded, failed)` for the closed span starting there, if any.
     /// Resolved in the same lock scope as the grid, read back lock-free.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) gutter_markers: Vec<Option<(u64, bool, bool)>>,
 }
 
@@ -1991,7 +1998,6 @@ impl TerminalElement {
                 let slot = slot.as_ref().expect("checked above");
                 fold_map = slot.fold_map.clone();
                 fold_top = slot.fold_top;
-                fold_epoch = slot.fold_epoch.clone();
                 gutter_markers = slot.gutter_markers.clone();
             } else {
                 fold_map = tracker.as_deref().and_then(|tracker| {
@@ -2204,7 +2210,6 @@ impl TerminalElement {
             display_offset,
             history_size,
             fold_map,
-            fold_epoch,
             fold_top,
             gutter_markers,
         })

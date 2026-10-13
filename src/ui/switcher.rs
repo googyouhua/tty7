@@ -4465,7 +4465,6 @@ mod gpui_tests {
     enum Spot {
         Workspaces,
         Tabs,
-        Search,
     }
 
     /// Where that part of the card lands on screen. The card is centred and
@@ -4484,7 +4483,6 @@ mod gpui_tests {
         let (dx, dy) = match spot {
             // The search row is the first thing in the card; both columns
             // start below it.
-            Spot::Search => (100., 20.),
             Spot::Workspaces => (20., super::SEARCH_H + super::COLUMN_PAD + 16.),
             // Past the tab column's own header row, onto its first tab.
             Spot::Tabs => (

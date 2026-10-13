@@ -655,7 +655,7 @@ pub(crate) enum PortRoute {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum LoopbackPlan {
+pub(crate) enum LoopbackPlan {
     Direct,
     NoForwardNeeded,
     ForwardOnPane(u64),
@@ -2419,6 +2419,8 @@ impl TerminalView {
     }
 
     /// What the user typed over the tracked directory, if anything.
+    /// Test-only reader: live code reads the field directly.
+    #[cfg(test)]
     pub fn manual_cwd(&self) -> Option<&std::path::Path> {
         self.manual_cwd.as_deref()
     }
@@ -3575,7 +3577,7 @@ impl TerminalView {
         let bytes = match &self.onekey_picker {
             Some(p) => match p.fill(fill) {
                 super::onekey::OneKeyAction::Fill(b) => b,
-                super::onekey::OneKeyAction::Cancelled | super::onekey::OneKeyAction::Pending => {
+                super::onekey::OneKeyAction::Cancelled => {
                     return;
                 }
             },
@@ -10161,7 +10163,7 @@ mod tests {
         assert!(!out.contains(" …"), "{out:?}");
     }
     use super::{
-        BlockTracker, description_budget, drag_scroll_step, elide, encode_mouse,
+        BlockTracker, before_input, description_budget, drag_scroll_step, elide, encode_mouse,
         expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
         focus_report_bytes, highlight_runs, input_cells, input_char_positions,
         input_overflow_shift, input_overlay_rows, input_start, menu_layout, paste_bytes,
@@ -10178,14 +10180,6 @@ mod tests {
         TitleSettle, files_cwd, local_path_for_pane, remote_paste_spec, settle_title,
         stages_clipboard_image, staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro,
         wsl_share_path,
-    };
-    use super::{
-        before_input, description_budget, drag_scroll_step, elide, encode_mouse,
-        expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
-        focus_report_bytes, highlight_runs, input_cells, input_char_positions,
-        input_overflow_shift, input_overlay_rows, input_start, menu_layout, paste_bytes,
-        select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
-        trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -16172,12 +16166,11 @@ mod gpui_tests {
                         break;
                     }
                 }
-                let (history, floor, grid_bottom) = {
+                let (history, floor) = {
                     let term = view.terminal.term.lock();
                     (
                         term.grid().history_size() as i64,
                         term.grid().history_size() as i64 + term.topmost_line().0 as i64,
-                        term.grid().history_size() as i64 + term.bottommost_line().0 as i64,
                     )
                 };
                 assert!(
@@ -16225,7 +16218,6 @@ mod gpui_tests {
                     let term = view.terminal.term.lock();
                     let store = view.terminal.block_tracker();
                     let tracker = store.lock().unwrap();
-                    let bottom = (history - want + rows as i64 - 1).min(grid_bottom);
                     let mut map = visible_map(&term, &tracker, rows).expect("fold in window");
                     map.retain(|&a| a >= floor);
                     assert_eq!(map.first(), Some(&anchor), "anchor still tops");
@@ -16284,12 +16276,11 @@ mod gpui_tests {
                         break;
                     }
                 }
-                let (history, floor, grid_bottom) = {
+                let (history, floor) = {
                     let term = view.terminal.term.lock();
                     (
                         term.grid().history_size() as i64,
                         term.grid().history_size() as i64 + term.topmost_line().0 as i64,
-                        term.grid().history_size() as i64 + term.bottommost_line().0 as i64,
                     )
                 };
                 assert!(
@@ -16327,7 +16318,6 @@ mod gpui_tests {
                     let term = view.terminal.term.lock();
                     let store = view.terminal.block_tracker();
                     let tracker = store.lock().unwrap();
-                    let bottom = (history - want + rows as i64 - 1).min(grid_bottom);
                     let mut map = visible_map(&term, &tracker, rows).expect("fold in window");
                     map.retain(|&a| a >= floor);
                     assert_eq!(map.first(), Some(&start), "summary row tops");

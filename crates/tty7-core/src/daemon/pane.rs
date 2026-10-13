@@ -3298,6 +3298,8 @@ impl ReplayRing {
     /// A ring carried across a handoff, with the pane's modes folded back
     /// from it: `head` is the carried [`Self::head_modes`], and the pane's
     /// modes are that plus every byte the ring still holds.
+    /// Live callers are unix-only; tests call it everywhere.
+    #[cfg(any(test, unix))]
     fn adopted(
         segments: Vec<crate::daemon::scrollback::Segment>,
         size: WinSize,
@@ -3311,7 +3313,9 @@ impl ReplayRing {
         (ring, modes)
     }
 
-    /// The geometry new output would be recorded at.
+    /// The geometry new output would be recorded at. Live callers are
+    /// unix-only, so this vanishes on Windows builds.
+    #[cfg(unix)]
     fn tail_size(&self) -> WinSize {
         self.segments
             .back()
