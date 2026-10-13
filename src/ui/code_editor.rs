@@ -10,6 +10,7 @@ use gpui::{
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState, Position, RopeExt as _, TabSize};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_component::text::TextViewState;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -121,6 +122,11 @@ pub(crate) struct OpenFile {
     pub(crate) conflict: Option<DiskConflict>,
     pub(crate) preview: bool,
     pub(crate) wrap: bool,
+    /// Rendered-Markdown selection state. Ours rather than the view's
+    /// managed one, so the right-click menu can copy the selection and
+    /// select all without going through focus and action dispatch.
+    /// `Some` exactly when the buffer is Markdown.
+    preview_state: Option<Entity<TextViewState>>,
     /// The rendered-Markdown pane's own scroll. Per file, so switching away
     /// and back lands where you were reading — and so the pane can carry the
     /// scrollbar every other scrolling surface in tty7 has. The editor itself
@@ -1353,6 +1359,8 @@ impl Tty7App {
             )
         };
         let saved = Fingerprint::of_str(&text);
+        let preview_state = (language == "markdown")
+            .then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor(language)
@@ -1398,6 +1406,7 @@ impl Tty7App {
             reload_seq: 0,
             conflict: None,
             preview,
+            preview_state,
             wrap,
             preview_scroll: gpui::ScrollHandle::new(),
             gutter: git_gutter,
@@ -1418,8 +1427,23 @@ impl Tty7App {
         let len = text.len();
         let same_text = len == f.saved.len && Fingerprint::of_chunks(len, text.chunks()) == f.saved;
         let dirty = !same_text || f.format != f.saved_format;
+        // The preview pane reads from its own selection state rather than
+        // the input, so keep the two texts together while preview shows.
+        // `set_text` returns early when nothing changed. Edits made in
+        // source mode sync on the switch back (see
+        // `toggle_document_preview`).
+        let sync_preview = f.preview && f.preview_state.is_some();
         if let Some(f) = self.buffer_mut(id) {
             f.dirty = dirty;
+        }
+        if sync_preview {
+            let rendered = state.text().to_string();
+            if let Some(st) = self
+                .buffer(id)
+                .and_then(|f| f.preview_state.clone())
+            {
+                st.update(cx, |s, cx| s.set_text(&rendered, cx));
+            }
         }
         self.lsp_buffer_edited(id, cx);
         self.editor_gutter_note_edit(id, cx);
@@ -1580,6 +1604,14 @@ impl Tty7App {
         }
         f.preview = !f.preview;
         let preview = f.preview;
+        // Source-mode edits skip the preview state (see `editor_note_edit`),
+        // so a switch back to preview re-syncs the rendered text first.
+        if preview {
+            let rendered = f.input.read(cx).text().to_string();
+            if let Some(st) = f.preview_state.clone() {
+                st.update(cx, |s, cx| s.set_text(&rendered, cx));
+            }
+        }
         self.update_config(cx, |cfg| cfg.editor_markdown_preview = preview);
         cx.notify();
     }
@@ -2013,6 +2045,31 @@ impl Tty7App {
     }
 
     /// Writes a buffer to a new path and points it there from then on.
+    /// Keeps `preview_state` true to its invariant (`Some` exactly when the
+    /// buffer is Markdown) across path changes — Save As and moves re-point
+    /// a buffer without recreating it.
+    fn editor_sync_preview_state(&mut self, id: BufferId, cx: &mut Context<Self>) {
+        let Some(f) = self.buffer(id) else {
+            return;
+        };
+        if f.language() != "markdown" {
+            if let Some(f) = self.buffer_mut(id) {
+                f.preview_state = None;
+            }
+            return;
+        }
+        let rendered = f.input.read(cx).text().to_string();
+        match self.buffer_mut(id).and_then(|f| f.preview_state.clone()) {
+            Some(st) => st.update(cx, |s, cx| s.set_text(&rendered, cx)),
+            None => {
+                let st = cx.new(|cx| TextViewState::markdown(&rendered, cx));
+                if let Some(f) = self.buffer_mut(id) {
+                    f.preview_state = Some(st);
+                }
+            }
+        }
+    }
+
     fn editor_save_to(
         &mut self,
         id: BufferId,
@@ -2047,6 +2104,7 @@ impl Tty7App {
             f.input
                 .update(cx, |st, cx| st.set_highlighter(language, cx));
         }
+        self.editor_sync_preview_state(id, cx);
         self.editor_rebuild_watcher(cx);
         // Written as a save to a file already known to be the one intended:
         // the native panel has asked about replacing an existing file, and
@@ -2400,6 +2458,58 @@ impl Tty7App {
         this.editor_file_menu_items(menu, id, app, cx)
     }
 
+    /// Right-click on rendered Markdown: copy the selection as rendered
+    /// text, or select all of it. Resolved through the buffer's own
+    /// selection state — the preview has no input to dispatch through.
+    fn editor_preview_menu(
+        menu: PopupMenu,
+        app: &gpui::WeakEntity<Self>,
+        id: BufferId,
+        _window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> PopupMenu {
+        let Some((state, source_empty)) = app.upgrade().and_then(|this| {
+            let this = this.read(cx);
+            let f = this.buffer(id)?;
+            let empty = f.input.read(cx).text().to_string().trim().is_empty();
+            Some((f.preview_state.clone()?, empty))
+        }) else {
+            return menu;
+        };
+        let selected_empty = state.read(cx).selected_text().trim().is_empty();
+        let app_copy = app.clone();
+        let app_all = app.clone();
+        menu.min_w(px(220.)).item(
+            PopupMenuItem::new(t(L10nKey::AppMenuCopy))
+                .disabled(selected_empty)
+                .on_click(move |_, _window, cx| {
+                    let text = app_copy
+                        .upgrade()
+                        .and_then(|this| {
+                            this.read(cx)
+                                .buffer(id)
+                                .and_then(|f| f.preview_state.clone())
+                        })
+                        .map(|st| st.read(cx).selected_text().trim().to_string())
+                        .unwrap_or_default();
+                    if text.is_empty() {
+                        return;
+                    }
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }),
+        ).item(
+            PopupMenuItem::new(t(L10nKey::AppMenuSelectAll))
+                .disabled(source_empty)
+                .on_click(move |_, _window, cx| {
+                    let _ = app_all.update(cx, |this, cx| {
+                        if let Some(st) = this.buffer(id).and_then(|f| f.preview_state.clone()) {
+                            st.update(cx, |s, cx| s.select_all(cx));
+                        }
+                    });
+                }),
+        )
+    }
+
     /// Right-click on a file in the header's strip.
     fn editor_tab_menu(
         menu: PopupMenu,
@@ -2737,6 +2847,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let mut moved = false;
+        let mut moved_ids = Vec::new();
         for f in self.editor.buffers.iter_mut() {
             if f.untitled.is_some() || f.host.id() != host {
                 continue;
@@ -2752,7 +2863,11 @@ impl Tty7App {
             let language = language_for_path(&f.path);
             f.input
                 .update(cx, |st, cx| st.set_highlighter(language, cx));
+            moved_ids.push(f.id());
             moved = true;
+        }
+        for id in moved_ids {
+            self.editor_sync_preview_state(id, cx);
         }
         if moved {
             self.editor_rebuild_watcher(cx);
@@ -3277,8 +3392,25 @@ impl Tty7App {
         match id.and_then(|id| self.buffer(id)) {
             None => self.render_editor_empty(cx).into_any_element(),
             Some(f) if f.preview => {
-                let markdown = f.input.read(cx).text().to_string();
                 let scroll = f.preview_scroll.clone();
+                let buf = f.id();
+                let app = cx.entity().downgrade();
+                let body = match f.preview_state.clone() {
+                    Some(state) => gpui_component::text::TextView::new(&state)
+                        .selectable(true)
+                        .style(crate::ui::theme::markdown_style(cx)),
+                    // A previewing buffer is always Markdown and carries the
+                    // state above; the managed view below cannot copy and is
+                    // only a fallback so a missing state cannot blank the pane.
+                    None => {
+                        let markdown = f.input.read(cx).text().to_string();
+                        gpui_component::text::TextView::markdown(
+                            ("editor-md-preview-body", slot),
+                            markdown,
+                        )
+                        .style(crate::ui::theme::markdown_style(cx))
+                    }
+                };
                 // The bar's wrapper takes its height from `flex_1`, so it needs
                 // a column with a definite height to grow inside — hand it one
                 // rather than dropping it straight into the overlay, or the
@@ -3295,13 +3427,10 @@ impl Tty7App {
                             .track_scroll(&scroll)
                             .px_4()
                             .py_3()
-                            .child(
-                                gpui_component::text::TextView::markdown(
-                                    ("editor-md-preview-body", slot),
-                                    markdown,
-                                )
-                                .style(crate::ui::theme::markdown_style(cx)),
-                            ),
+                            .child(body)
+                            .context_menu(move |menu, window, cx| {
+                                Self::editor_preview_menu(menu, &app, buf, window, cx)
+                            }),
                         &scroll,
                     ))
                     .into_any_element()
