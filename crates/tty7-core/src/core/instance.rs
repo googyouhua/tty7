@@ -628,12 +628,22 @@ mod tests {
         let dir = root.join("tty7-gone");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("state.json"), "{}").unwrap();
-        // No seat file at all: never had a holder, so free.
-        assert_eq!(holder_pid_in(&dir), SeatState::Free);
-        assert!(remove_instance_in(&root, "gone", false).is_ok());
-        assert!(!dir.exists(), "a free instance must be unlinked");
-        // Forcing a free seat is a no-op: the same unlink runs.
-        std::fs::create_dir_all(&dir).unwrap();
+        // No seat file at all: never had a holder, so free — except where
+        // no probe primitive exists (non-unix reads Unknown by design).
+        if cfg!(unix) {
+            assert_eq!(holder_pid_in(&dir), SeatState::Free);
+            assert!(remove_instance_in(&root, "gone", false).is_ok());
+            assert!(!dir.exists(), "a free instance must be unlinked");
+            // Forcing a free seat is a no-op: the same unlink runs.
+            std::fs::create_dir_all(&dir).unwrap();
+        } else {
+            assert_eq!(holder_pid_in(&dir), SeatState::Unknown);
+            assert!(matches!(
+                remove_instance_in(&root, "gone", false),
+                Err(RemoveError::Unknown(_))
+            ));
+            assert!(dir.is_dir(), "an unevaluable probe must not unlink");
+        }
         assert!(remove_instance_in(&root, "gone", true).is_ok());
         assert!(!dir.exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -649,11 +659,20 @@ mod tests {
             .flatten()
             .map(|e| e.file_name())
             .collect();
-        let err = remove_instance_in(&root, "ghost", false).unwrap_err();
-        assert!(
-            matches!(err, RemoveError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
-            "a missing instance must surface NotFound, got {err:?}"
-        );
+        // Unix resolves the missing dir to Free-then-NotFound; without a
+        // probe primitive the seat is unevaluable before the unlink runs.
+        if cfg!(unix) {
+            let err = remove_instance_in(&root, "ghost", false).unwrap_err();
+            assert!(
+                matches!(err, RemoveError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
+                "a missing instance must surface NotFound, got {err:?}"
+            );
+        } else {
+            assert!(matches!(
+                remove_instance_in(&root, "ghost", false),
+                Err(RemoveError::Unknown(_))
+            ));
+        }
         let after: Vec<_> = std::fs::read_dir(&root)
             .unwrap()
             .flatten()

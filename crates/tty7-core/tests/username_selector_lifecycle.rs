@@ -112,7 +112,19 @@ fn username_selector_end_to_end_lifecycle() {
     assert_eq!(read_last().as_deref(), Some("carol"));
 
     // Guarded delete, free seat: dir gone, memory falls back to bob.
-    remove_instance("carol", false).unwrap();
+    // Without a probe primitive (non-unix) the seat is unevaluable, so the
+    // flow takes the product's double-confirm path: refuse unforced, remove
+    // forced — same directory outcome, same memory rewrite after.
+    if cfg!(unix) {
+        remove_instance("carol", false).unwrap();
+    } else {
+        assert!(matches!(
+            remove_instance("carol", false),
+            Err(RemoveError::Unknown(_))
+        ));
+        assert!(root.join("tty7-carol").is_dir());
+        remove_instance("carol", true).unwrap();
+    }
     assert!(!root.join("tty7-carol").exists());
     write_last("bob").unwrap();
     assert_eq!(read_last().as_deref(), Some("bob"));
