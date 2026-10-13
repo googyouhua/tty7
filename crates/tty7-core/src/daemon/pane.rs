@@ -6674,16 +6674,17 @@ mod tests {
     }
 
     /// Perf gate A-track (daemon): an 11 MB `cat`-like feed with block marks
-    /// paired must cost <=10% over the same feed without marks (5-run
-    /// average). Deterministic and CI-runnable; the gate reads the increment's
+    /// paired must cost <=10% over the same feed without marks (median of 9
+    /// runs). Deterministic and CI-runnable; the gate reads the increment's
     /// share of the total feed time, which is the only part a user could
-    /// perceive. Prints the averages and the share — the numbers, not just a
-    /// pass, are the evidence.
+    /// perceive. Median — not mean — so one cold allocator or noisy neighbor
+    /// iteration cannot spend the budget alone. Prints the medians and the
+    /// share — the numbers, not just a pass, are the evidence.
     #[test]
     fn perf_gate_block_pairing_overhead_within_ten_percent() {
         const TOTAL: usize = 11 * 1024 * 1024;
         const CHUNK: usize = 64 * 1024;
-        const RUNS: usize = 5;
+        const RUNS: usize = 9;
         const COMMANDS: usize = 200;
 
         const LINE: &[u8] =
@@ -6731,32 +6732,35 @@ mod tests {
         // Warm up once so a cold allocator does not bill the first timed run.
         feed_once(&text[..CHUNK]);
 
-        let mut plain_sum = std::time::Duration::ZERO;
-        let mut marked_sum = std::time::Duration::ZERO;
+        let mut plain_runs = Vec::with_capacity(RUNS);
+        let mut marked_runs = Vec::with_capacity(RUNS);
         let mut paired = 0;
         for _ in 0..RUNS {
             let (dt, _) = feed_once(&text);
-            plain_sum += dt;
+            plain_runs.push(dt);
             let (dt, blocks) = feed_once(&marked);
-            marked_sum += dt;
+            marked_runs.push(dt);
             paired = blocks;
         }
         assert_eq!(
             paired, COMMANDS,
             "the marked feed must actually pair every command"
         );
-        let plain = plain_sum.as_secs_f64() / RUNS as f64;
-        let marked_avg = marked_sum.as_secs_f64() / RUNS as f64;
+        plain_runs.sort();
+        marked_runs.sort();
+        let plain = plain_runs[RUNS / 2].as_secs_f64();
+        let marked_avg = marked_runs[RUNS / 2].as_secs_f64();
         let share = (marked_avg - plain) / marked_avg;
         println!(
-            "perf_gate daemon 11MB feed ({RUNS}-run avg): plain {plain:.3}s, \
+            "perf_gate daemon 11MB feed ({RUNS}-run median): plain {plain:.3}s, \
              marked {marked_avg:.3}s, increment {:.3}s ({:.2}% of feed total)",
             marked_avg - plain,
             share * 100.0,
         );
         assert!(
             (0.0..=0.10).contains(&share),
-            "block pairing took {share:.2}% of the feed time (plain {plain:.3}s, marked {marked_avg:.3}s)"
+            "block pairing took {:.2}% of the feed time (plain {plain:.3}s, marked {marked_avg:.3}s)",
+            share * 100.0,
         );
     }
 
