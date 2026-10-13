@@ -145,13 +145,9 @@ fn install_inner(enabled: bool) -> Outcome {
     // never has a reason to say `Occupied` — but an existing one earlier on
     // PATH still beats it, and "installed" alone would be a lie.
     let ours = match &outcome {
-        Outcome::AlreadyInstalled(p) | Outcome::Installed(p) => {
-            p.clone()
-        }
+        Outcome::AlreadyInstalled(p) | Outcome::Installed(p) => p.clone(),
         #[cfg(unix)]
-        Outcome::InstalledOffPath(p) => {
-            p.clone()
-        }
+        Outcome::InstalledOffPath(p) => p.clone(),
         _ => return outcome,
     };
     match first_cli_on(&user_path) {

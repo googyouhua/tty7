@@ -66,4 +66,6 @@ The second import block looks like a bad merge duplicate — but it is NOT a pur
   - FIX otherwise: E0252 = UNION of both import blocks; `LoopbackPlan`/`CwdEdit` → `pub(crate)`; `app.rs` remove `mut`; `panel_review.rs` `repo` → `_repo`; `edns_z_flag.rs` migrate `with_nameserver(addr, Udp)` → `add_nameserver_config(NameserverConfig::udp(ip).with_port(port))` (pinned iroh 1.3.0).
   - GATE to match caller cfgs (never delete): `responder_lock`, `util_linux_script`, `reported_title`, `STATUS`, `address.rs` items → `#[cfg(unix)]` or move into test module as appropriate.
 - Parked (in Linux output but NOT in the CI set — follow-up, out of scope): `key`/`label`/`placeholder` methods, `sender`, `replace_entry_with`, `registrations`, `quoted_open_command`, `application_path`, `Location`, `DIRECTORY_KEY`, `BACKGROUND_KEY`, `Registration`, `windows_background_appearance`, `supported_backdrops_for`, `height`.
-- Suggested branch: `dev/ci-lint-gate` off `origin/main` (independent of the epic branch).
+- Branch note: built on `dev/ci-lint-gate` but LANDED on `dev/username-selector`
+  via cherry-pick (the epic PR needed it for CI); `dev/ci-lint-gate` was left
+  at `origin/main` unpushed and can be dropped.
