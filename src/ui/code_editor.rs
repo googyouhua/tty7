@@ -2055,6 +2055,9 @@ impl Tty7App {
         if f.language() != "markdown" {
             if let Some(f) = self.buffer_mut(id) {
                 f.preview_state = None;
+                // Leaving Markdown also leaves preview: a source file must
+                // come back as source, not as a stale rendered pane.
+                f.preview = false;
             }
             return;
         }
@@ -2458,6 +2461,26 @@ impl Tty7App {
         this.editor_file_menu_items(menu, id, app, cx)
     }
 
+    /// What preview Copy would write: the buffer's current rendered
+    /// selection, trimmed. A standalone seam — menu item structs are not
+    /// introspectable across crates, so this is what tests pin. Read at
+    /// menu-build time, never in `on_click`, where the click's own capture
+    /// phase has already cleared the selection.
+    fn editor_preview_copy_text(
+        app: &gpui::WeakEntity<Self>,
+        id: BufferId,
+        cx: &gpui::App,
+    ) -> String {
+        app.upgrade()
+            .and_then(|this| {
+                this.read(cx)
+                    .buffer(id)
+                    .and_then(|f| f.preview_state.clone())
+            })
+            .map(|st| st.read(cx).selected_text().trim().to_string())
+            .unwrap_or_default()
+    }
+
     /// Right-click on rendered Markdown: copy the selection as rendered
     /// text, or select all of it. Resolved through the buffer's own
     /// selection state — the preview has no input to dispatch through.
@@ -2468,7 +2491,7 @@ impl Tty7App {
         _window: &mut Window,
         cx: &mut gpui::App,
     ) -> PopupMenu {
-        let Some((state, source_empty)) = app.upgrade().and_then(|this| {
+        let Some((_, source_empty)) = app.upgrade().and_then(|this| {
             let this = this.read(cx);
             let f = this.buffer(id)?;
             let empty = f.input.read(cx).text().to_string().trim().is_empty();
@@ -2480,7 +2503,7 @@ impl Tty7App {
         // item clears every selectable view's selection in its capture
         // phase, so reading it in `on_click` would see nothing and leave a
         // stale clipboard behind.
-        let selected = state.read(cx).selected_text().trim().to_string();
+        let selected = Self::editor_preview_copy_text(app, id, cx);
         let selected_empty = selected.is_empty();
         let app_all = app.clone();
         menu.min_w(px(220.)).item(
@@ -4331,5 +4354,184 @@ mod close_gpui_tests {
             app.editor_close_active_if_focused(window, cx)
         }));
         assert_eq!(panel(&app, &mut vcx), (true, 0));
+    }
+}
+
+#[cfg(test)]
+mod preview_gpui_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::nav::gpui_tests::open_rs;
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::editor_text::{EditorConfig, TextFormat};
+
+    const MD: &str = "# Hello\n\nSecond\n";
+
+    fn open_md(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, path: &str) -> BufferId {
+        let path = PathBuf::from(path);
+        app.update_in(vcx, |app, window, cx| {
+            let host = app.active_host(cx).expect("a host");
+            let tab = app.tabs.get(app.active).map(|t| t.tree_id.get());
+            let tab = tab.expect("a tab");
+            let indent = crate::ui::editor_text::detect_indent("", "markdown");
+            let id = app.editor_new_buffer(
+                host,
+                path,
+                None,
+                MD.to_string(),
+                TextFormat::default(),
+                EditorConfig::default(),
+                indent,
+                None,
+                window,
+                cx,
+            );
+            app.editor_show_in_tab(tab, id, true, window, cx);
+            id
+        })
+    }
+
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+    }
+
+    fn show_preview(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, id: BufferId) {
+        app.update_in(vcx, |app, _, _| {
+            app.buffer_mut(id).expect("buffer").preview = true;
+        });
+        settle(vcx);
+    }
+
+    /// Rendered text of the preview state, read through select-all the way
+    /// the menu's Select All resolves it.
+    fn rendered(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, id: BufferId) -> String {
+        app.update_in(vcx, |app, _, cx| {
+            let st = app
+                .buffer(id)
+                .expect("buffer")
+                .preview_state
+                .clone()
+                .expect("markdown has preview state");
+            st.update(cx, |s, cx| s.select_all(cx));
+            st.read(cx).selected_text()
+        })
+    }
+
+    fn edit(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, id: BufferId, text: &str) {
+        app.update_in(vcx, |app, window, cx| {
+            let input = app.buffer(id).expect("buffer").input.clone();
+            replace_buffer_text(&input, text, window, cx);
+            app.editor_note_edit(id, cx);
+        });
+        settle(vcx);
+    }
+
+    #[gpui::test]
+    fn preview_state_created_for_markdown_only(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let md = open_md(&app, &mut vcx, "/preview/a.md");
+        let rs = open_rs(&app, &mut vcx, "/preview/a.rs");
+        settle(&mut vcx);
+        app.read_with(&vcx, |app, _| {
+            assert!(app.buffer(md).unwrap().preview_state.is_some());
+            assert!(app.buffer(rs).unwrap().preview_state.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn preview_syncs_edits_and_toggle(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let id = open_md(&app, &mut vcx, "/preview/a.md");
+        show_preview(&app, &mut vcx, id);
+        assert!(rendered(&app, &mut vcx, id).contains("Hello"));
+        edit(&app, &mut vcx, id, "# Changed\n");
+        let text = rendered(&app, &mut vcx, id);
+        assert!(
+            text.contains("Changed") && !text.contains("Hello"),
+            "edits while previewing sync: {text:?}"
+        );
+        // Source-mode edits wait for the switch back to preview.
+        app.update_in(&mut vcx, |app, _, _| {
+            app.buffer_mut(id).expect("buffer").preview = false;
+        });
+        edit(&app, &mut vcx, id, "# Third\n");
+        let text = rendered(&app, &mut vcx, id);
+        assert!(
+            text.contains("Changed") && !text.contains("Third"),
+            "source-mode edits do not sync early: {text:?}"
+        );
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.toggle_document_preview(cx);
+        });
+        settle(&mut vcx);
+        let text = rendered(&app, &mut vcx, id);
+        assert!(
+            text.contains("Third"),
+            "switching back to preview re-syncs: {text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn leaving_markdown_exits_preview(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let id = open_md(&app, &mut vcx, "/preview/a.md");
+        show_preview(&app, &mut vcx, id);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.buffer_mut(id).expect("buffer").path = PathBuf::from("/preview/a.txt");
+            app.editor_sync_preview_state(id, cx);
+        });
+        app.read_with(&vcx, |app, _| {
+            let f = app.buffer(id).expect("buffer");
+            assert!(f.preview_state.is_none());
+            assert!(!f.preview, "a source file comes back as source");
+        });
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.buffer_mut(id).expect("buffer").path = PathBuf::from("/preview/a.md");
+            app.editor_sync_preview_state(id, cx);
+        });
+        settle(&mut vcx);
+        app.read_with(&vcx, |app, _| {
+            assert!(app.buffer(id).unwrap().preview_state.is_some());
+        });
+        assert!(rendered(&app, &mut vcx, id).contains("Hello"));
+    }
+
+    #[gpui::test]
+    fn preview_copy_text_reads_the_rendered_selection(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let id = open_md(&app, &mut vcx, "/preview/a.md");
+        show_preview(&app, &mut vcx, id);
+        settle(&mut vcx);
+        let weak = app.downgrade();
+        app.update_in(&mut vcx, |app, _, cx| {
+            let st = app
+                .buffer(id)
+                .expect("buffer")
+                .preview_state
+                .clone()
+                .expect("markdown has preview state");
+            st.update(cx, |s, cx| s.select_all(cx));
+        });
+        settle(&mut vcx);
+        let copy = app.read_with(&vcx, |_, cx| Tty7App::editor_preview_copy_text(&weak, id, cx));
+        assert!(
+            copy.contains("Hello") && copy.contains("Second") && !copy.contains('#'),
+            "copy carries de-marked rendered text: {copy:?}"
+        );
+        app.update_in(&mut vcx, |app, _, cx| {
+            let st = app
+                .buffer(id)
+                .expect("buffer")
+                .preview_state
+                .clone()
+                .expect("markdown has preview state");
+            st.update(cx, |s, cx| s.clear_selection(cx));
+        });
+        settle(&mut vcx);
+        let cleared = app.read_with(&vcx, |_, cx| Tty7App::editor_preview_copy_text(&weak, id, cx));
+        assert_eq!(cleared, "", "no selection copies nothing");
     }
 }
