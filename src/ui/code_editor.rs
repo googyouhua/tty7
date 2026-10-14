@@ -3652,6 +3652,15 @@ fn preview_link_render(
                         .tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                         })
+                        // Own the press the way Button/Input do (see
+                        // `window_selection.rs`): without this the
+                        // window-level selection controller anchors a
+                        // drag-selection on mouse-down, and its committed
+                        // remains are still highlighted when navigating
+                        // back to this file.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            gpui_component::GlobalState::suppress_text_selection(cx);
+                        })
                         .on_click(move |_, window, cx| {
                             // What the text view's own link handler does
                             // first: finish any preview selection in flight
@@ -3679,6 +3688,9 @@ fn preview_link_render(
                         .text_color(cx.theme().link)
                         .underline()
                         .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            gpui_component::GlobalState::suppress_text_selection(cx);
+                        })
                         .on_click(move |_, window, cx| {
                             window.end_text_selection(cx);
                             cx.stop_propagation();
