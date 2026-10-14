@@ -249,7 +249,18 @@ mod tests {
         assert_eq!(scheme_of("C:/docs/other.md"), None);
         assert_eq!(scheme_of("C:\\docs\\other.md"), None);
         // …so they resolve instead of reading as external targets.
-        assert!(resolve_markdown_link(&base(), "C:/docs/other.md").is_some());
+        // `std::path` reads them per platform: absolute on Windows, a
+        // colon-bearing relative name anywhere else (both honest).
+        #[cfg(windows)]
+        assert_eq!(
+            resolve_markdown_link(&base(), "C:/docs/other.md"),
+            Some(PathBuf::from("C:/docs/other.md"))
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            resolve_markdown_link(&base(), "C:/docs/other.md"),
+            Some(PathBuf::from("/repo/docs/C:/docs/other.md"))
+        );
         assert!(resolve_markdown_link(&base(), "C:\\docs\\other.md").is_some());
     }
 
