@@ -52,3 +52,22 @@ deferred: []
 
 **Manual checks (if no CLI):**
 - GUI打开.md进Preview：拖选高亮，右键见复制/全选；复制粘贴得渲染纯文本无标记；无选中右键复制置灰；全选后复制得全文；⌘C/Ctrl+C与右键一致
+
+## Code Review
+
+### 2026-10-14
+
+**Code review complete.** 0 `decision-needed`, 3 `patch`, 1 `defer`, 6 rejected. Findings written to `_bmad-output/backlog/story-md-preview-copy-plan.md`.
+
+- [ ] [Review][Patch] 改扩展名离开 Markdown 时退出预览态 [`src/ui/code_editor.rs:editor_sync_preview_state`] — `preview_state` 清掉但 `preview` 保留，非 md 文件继续显示渲染窗格
+- [ ] [Review][Patch] 预览文本同步补 gpui 单测 [`src/ui/code_editor.rs`] — 打开/编辑/切回/Save-As 断言 `preview_state` 文本
+- [ ] [Review][Patch] 预览右键菜单补 gpui 单测 [`src/ui/code_editor.rs`] — 快照复制、置灰谓词、Select-All 接线
+- [x] [Review][Defer] 快捷键复制与右键一致性的人工确认 [`src/ui/code_editor.rs`] — deferred: 上游绑定存在但未在真机验证，需在 25 机选中后按 Ctrl+C 比对
+
+Rejected:
+- `false` 改名/Save-As/重载导致预览 stale（`editor_reload_from_disk:3018` 显式调 `editor_note_edit`；其余路径经 toggle 回切同步覆盖）
+- `false` 空菜单弹窗（`ContextMenu` 对零 item 菜单直接跳过渲染，有终端侧注释为证）
+- `false` 复制 trim 去掉缩进是缺陷（ticket Decision 定死首尾 trim，与上游 ⌘C 语义一致）
+- `false` 菜单打开期间选中可变致快照过期（modal 菜单打开时无法改选中）
+- `low` 右键菜单两次全量 `to_string` 分配（单次点击级开销，可忽略；修法徒增复杂度）
+- `low` 源码非空但渲染为空时全选可用（已在 triage 否决：需非公开 accessor 才能修）
