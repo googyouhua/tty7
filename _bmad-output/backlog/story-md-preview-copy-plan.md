@@ -33,6 +33,7 @@ deferred: []
 - Oneshot路由：单文件约60行改动（结构字段+创建+文本同步+渲染菜单+菜单构造），无新依赖、无schema、无跨模块契约。
 - 实现（2026-10-13）：仅改 `src/ui/code_editor.rs`。`OpenFile` 新增 `preview_state: Option<Entity<TextViewState>>`（Markdown 才 Some）；`editor_new_buffer` 创建；`editor_note_edit` 在 preview 可见时同步（`set_text` 相同即返）；`toggle_document_preview` 切回预览时先同步（覆盖源码态编辑期）；渲染改用 `TextView::new(&state).selectable(true)` + 外层 `context_menu`（复制/全选，复用 `AppMenuCopy`/`AppMenuSelectAll` 文案键，无 i18n 新增）。复制读 `selected_text().trim()`（与上游 Copy 语义一致），无选中/空源分别置灰；空写剪贴板直接返回。
 - 未新增单测：菜单接线属 GUI wiring（本仓同类菜单亦无单测先例），由 `cargo check` + 既有 `code_editor` 81 项 + `i18n` 8 项全过 + 手工 GUI 验收覆盖。
+- 跟进修复（2026-10-14，25 机真机验收）：右键复制粘出旧剪贴板内容。根因：点菜单项的左键在 capture 阶段先清全部可选选中，`on_click` 时再读已为空而直接返回。改为菜单构建时快照选中文本进闭包（commit `fix(editor): 预览右键复制在菜单打开时快照选中`）。25 机复验通过。
 - 文件：`src/ui/code_editor.rs`。
 
 ## Plan Change Log
