@@ -1359,8 +1359,8 @@ impl Tty7App {
             )
         };
         let saved = Fingerprint::of_str(&text);
-        let preview_state = (language == "markdown")
-            .then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
+        let preview_state =
+            (language == "markdown").then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor(language)
@@ -1438,10 +1438,7 @@ impl Tty7App {
         }
         if sync_preview {
             let rendered = state.text().to_string();
-            if let Some(st) = self
-                .buffer(id)
-                .and_then(|f| f.preview_state.clone())
-            {
+            if let Some(st) = self.buffer(id).and_then(|f| f.preview_state.clone()) {
                 st.update(cx, |s, cx| s.set_text(&rendered, cx));
             }
         }
@@ -2506,26 +2503,29 @@ impl Tty7App {
         let selected = Self::editor_preview_copy_text(app, id, cx);
         let selected_empty = selected.is_empty();
         let app_all = app.clone();
-        menu.min_w(px(220.)).item(
-            PopupMenuItem::new(t(L10nKey::AppMenuCopy))
-                .disabled(selected_empty)
-                .on_click(move |_, _window, cx| {
-                    if selected.is_empty() {
-                        return;
-                    }
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(selected.clone()));
-                }),
-        ).item(
-            PopupMenuItem::new(t(L10nKey::AppMenuSelectAll))
-                .disabled(source_empty)
-                .on_click(move |_, _window, cx| {
-                    let _ = app_all.update(cx, |this, cx| {
-                        if let Some(st) = this.buffer(id).and_then(|f| f.preview_state.clone()) {
-                            st.update(cx, |s, cx| s.select_all(cx));
+        menu.min_w(px(220.))
+            .item(
+                PopupMenuItem::new(t(L10nKey::AppMenuCopy))
+                    .disabled(selected_empty)
+                    .on_click(move |_, _window, cx| {
+                        if selected.is_empty() {
+                            return;
                         }
-                    });
-                }),
-        )
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(selected.clone()));
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(t(L10nKey::AppMenuSelectAll))
+                    .disabled(source_empty)
+                    .on_click(move |_, _window, cx| {
+                        let _ = app_all.update(cx, |this, cx| {
+                            if let Some(st) = this.buffer(id).and_then(|f| f.preview_state.clone())
+                            {
+                                st.update(cx, |s, cx| s.select_all(cx));
+                            }
+                        });
+                    }),
+            )
     }
 
     /// Right-click on a file in the header's strip.
@@ -4516,7 +4516,9 @@ mod preview_gpui_tests {
             st.update(cx, |s, cx| s.select_all(cx));
         });
         settle(&mut vcx);
-        let copy = app.read_with(&vcx, |_, cx| Tty7App::editor_preview_copy_text(&weak, id, cx));
+        let copy = app.read_with(&vcx, |_, cx| {
+            Tty7App::editor_preview_copy_text(&weak, id, cx)
+        });
         assert!(
             copy.contains("Hello") && copy.contains("Second") && !copy.contains('#'),
             "copy carries de-marked rendered text: {copy:?}"
@@ -4531,7 +4533,9 @@ mod preview_gpui_tests {
             st.update(cx, |s, cx| s.clear_selection(cx));
         });
         settle(&mut vcx);
-        let cleared = app.read_with(&vcx, |_, cx| Tty7App::editor_preview_copy_text(&weak, id, cx));
+        let cleared = app.read_with(&vcx, |_, cx| {
+            Tty7App::editor_preview_copy_text(&weak, id, cx)
+        });
         assert_eq!(cleared, "", "no selection copies nothing");
     }
 }
