@@ -59,10 +59,10 @@ deferred: []
 
 **Code review complete.** 0 `decision-needed`, 3 `patch`, 1 `defer`, 6 rejected. Findings written to `_bmad-output/backlog/story-md-preview-copy-plan.md`.
 
-- [ ] [Review][Patch] 改扩展名离开 Markdown 时退出预览态 [`src/ui/code_editor.rs:editor_sync_preview_state`] — `preview_state` 清掉但 `preview` 保留，非 md 文件继续显示渲染窗格
-- [ ] [Review][Patch] 预览文本同步补 gpui 单测 [`src/ui/code_editor.rs`] — 打开/编辑/切回/Save-As 断言 `preview_state` 文本
-- [ ] [Review][Patch] 预览右键菜单补 gpui 单测 [`src/ui/code_editor.rs`] — 快照复制、置灰谓词、Select-All 接线
-- [x] [Review][Defer] 快捷键复制与右键一致性的人工确认 [`src/ui/code_editor.rs`] — deferred: 上游绑定存在但未在真机验证，需在 25 机选中后按 Ctrl+C 比对
+- [x] [Review][Patch] 改扩展名离开 Markdown 时退出预览态 [`src/ui/code_editor.rs:editor_sync_preview_state`] — `preview_state` 清掉但 `preview` 保留，非 md 文件继续显示渲染窗格（已修：清 state 时同步 `preview=false`，含反向验证）
+- [x] [Review][Patch] 预览文本同步补 gpui 单测 [`src/ui/code_editor.rs`] — 打开/编辑/切回/Save-As 断言 `preview_state` 文本（已补 `preview_gpui_tests` 4 项）
+- [x] [Review][Patch] 预览右键菜单补 gpui 单测 [`src/ui/code_editor.rs`] — 快照复制、置灰谓词、Select-All 接线（已补：经 `editor_preview_copy_text` 缝隙覆盖快照语义）
+- [x] [Review][Defer] 快捷键复制与右键一致性的人工确认 [`src/ui/code_editor.rs`] — deferred: 上游绑定存在但未在真机验证，需在 25 机选中后按 Ctrl+C 比对（2026-10-14 用户在 25 机验证通过）
 
 Rejected:
 - `false` 改名/Save-As/重载导致预览 stale（`editor_reload_from_disk:3018` 显式调 `editor_note_edit`；其余路径经 toggle 回切同步覆盖）
