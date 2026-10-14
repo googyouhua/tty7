@@ -4040,6 +4040,12 @@ impl Tty7App {
             .rounded(px(4.))
             .hover(|s| s.bg(cx.theme().muted))
             .child(Icon::new(IconName::Close).xsmall().text_color(muted))
+            // Own the press (see `window_selection.rs`): a press on chrome
+            // must never anchor a window text selection, or its remains
+            // surface as a stray highlight when the layout shifts under it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                gpui_component::GlobalState::suppress_text_selection(cx);
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.editor_close_file(pos, window, cx);
@@ -4123,6 +4129,11 @@ impl Tty7App {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.editor_activate(pos, window, cx);
             }))
+            // Same press-ownership as the close button above: activating
+            // from the strip must not anchor a text selection either.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                gpui_component::GlobalState::suppress_text_selection(cx);
+            })
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, _, window, cx| {
