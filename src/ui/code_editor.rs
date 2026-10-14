@@ -2476,26 +2476,21 @@ impl Tty7App {
         }) else {
             return menu;
         };
-        let selected_empty = state.read(cx).selected_text().trim().is_empty();
-        let app_copy = app.clone();
+        // Snapshot the selection now: the left press that clicks a menu
+        // item clears every selectable view's selection in its capture
+        // phase, so reading it in `on_click` would see nothing and leave a
+        // stale clipboard behind.
+        let selected = state.read(cx).selected_text().trim().to_string();
+        let selected_empty = selected.is_empty();
         let app_all = app.clone();
         menu.min_w(px(220.)).item(
             PopupMenuItem::new(t(L10nKey::AppMenuCopy))
                 .disabled(selected_empty)
                 .on_click(move |_, _window, cx| {
-                    let text = app_copy
-                        .upgrade()
-                        .and_then(|this| {
-                            this.read(cx)
-                                .buffer(id)
-                                .and_then(|f| f.preview_state.clone())
-                        })
-                        .map(|st| st.read(cx).selected_text().trim().to_string())
-                        .unwrap_or_default();
-                    if text.is_empty() {
+                    if selected.is_empty() {
                         return;
                     }
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(selected.clone()));
                 }),
         ).item(
             PopupMenuItem::new(t(L10nKey::AppMenuSelectAll))
