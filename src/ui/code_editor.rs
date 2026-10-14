@@ -10,7 +10,7 @@ use gpui::{
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState, Position, RopeExt as _, TabSize};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
-use gpui_component::text::TextViewState;
+use gpui_component::text::{MarkdownExtensions, MarkdownNode, TextViewState};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -24,6 +24,7 @@ use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 mod gutter;
+mod markdown_link;
 mod nav;
 pub(crate) mod outline;
 mod problems;
@@ -127,6 +128,12 @@ pub(crate) struct OpenFile {
     /// select all without going through focus and action dispatch.
     /// `Some` exactly when the buffer is Markdown.
     preview_state: Option<Entity<TextViewState>>,
+    /// The preview's link takeover (see `preview_link_support`), built once
+    /// per file rather than per frame: the text view re-parses whenever the
+    /// extensions change, and a fresh registry every frame would both
+    /// re-parse every frame and wipe the preview's selection.
+    /// `Some` exactly when the buffer is Markdown.
+    preview_links: Option<PreviewLinkSupport>,
     /// The rendered-Markdown pane's own scroll. Per file, so switching away
     /// and back lands where you were reading — and so the pane can carry the
     /// scrollbar every other scrolling surface in tty7 has. The editor itself
@@ -1096,6 +1103,45 @@ impl Tty7App {
         self.file_tree_reveal_path(path, cx);
     }
 
+    /// Follows a link clicked in a Markdown preview.
+    ///
+    /// A path the preview's own file names opens the way file links elsewhere
+    /// do — a directory in the tree, a file in the editor (or on the desktop
+    /// when it is not text). Anything the resolver does not read as local
+    /// goes to the OS exactly as before.
+    pub(crate) fn open_markdown_link(
+        &mut self,
+        host: &SharedHost,
+        base: &Path,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match markdown_link::classify_markdown_link(host.id().is_local(), base, url) {
+            markdown_link::MarkdownLinkAction::OpenLocal(path) => {
+                let is_dir = std::fs::metadata(&path).is_ok_and(|m| m.is_dir());
+                self.open_linked_file(&path, None, None, is_dir, window, cx);
+            }
+            markdown_link::MarkdownLinkAction::OpenExternal(target) => {
+                cx.open_url(&target);
+            }
+            markdown_link::MarkdownLinkAction::InvalidFileUrl(raw) => {
+                let error =
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file URL");
+                window.push_notification(
+                    crate::ui::host_ops::failure(
+                        t_fmt(
+                            L10nKey::LinkFileOpenFailed,
+                            &[("path", raw.as_str()), ("error", &error.to_string())],
+                        ),
+                        &error,
+                    ),
+                    cx,
+                );
+            }
+        }
+    }
+
     /// [`Self::open_file_in_editor`], landing the cursor on a line the caller
     /// already knows — what a `src/main.rs:120:3` in the grid was pointing at.
     pub(crate) fn open_file_in_editor_at(
@@ -1361,6 +1407,9 @@ impl Tty7App {
         let saved = Fingerprint::of_str(&text);
         let preview_state =
             (language == "markdown").then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
+        let preview_links = (language == "markdown").then(|| {
+            preview_link_support(&cx.entity().downgrade(), &host, &path, host.id().is_local())
+        });
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor(language)
@@ -1407,6 +1456,7 @@ impl Tty7App {
             conflict: None,
             preview,
             preview_state,
+            preview_links,
             wrap,
             preview_scroll: gpui::ScrollHandle::new(),
             gutter: git_gutter,
@@ -2052,6 +2102,7 @@ impl Tty7App {
         if f.language() != "markdown" {
             if let Some(f) = self.buffer_mut(id) {
                 f.preview_state = None;
+                f.preview_links = None;
                 // Leaving Markdown also leaves preview: a source file must
                 // come back as source, not as a stale rendered pane.
                 f.preview = false;
@@ -2066,6 +2117,26 @@ impl Tty7App {
                 if let Some(f) = self.buffer_mut(id) {
                     f.preview_state = Some(st);
                 }
+            }
+        }
+        // Relative links resolve against this file: a buffer Save As or a
+        // rename re-points gets a fresh takeover, built once here rather
+        // than per frame in the render path.
+        let stale = self
+            .buffer(id)
+            .is_some_and(|f| f.preview_links.as_ref().is_none_or(|s| s.base != f.path));
+        if stale {
+            let Some(f) = self.buffer(id) else {
+                return;
+            };
+            let support = preview_link_support(
+                &cx.entity().downgrade(),
+                &f.host.clone(),
+                &f.path.clone(),
+                f.host.id().is_local(),
+            );
+            if let Some(f) = self.buffer_mut(id) {
+                f.preview_links = Some(support);
             }
         }
     }
@@ -3302,6 +3373,304 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// The custom block a preview paragraph holding local-file links becomes.
+///
+/// The text view hands every link click to the OS, with no hook of its own
+/// and no inline-level custom rendering, so a paragraph naming at least one
+/// local file is taken over whole: its runs are stored here and drawn by
+/// [`preview_link_render`], where a local run opens in the editor and any
+/// other run keeps the old open-in-browser behaviour.
+const PREVIEW_LOCAL_LINK_BLOCK: &str = "tty7-md-local-link";
+
+/// One run inside an overridden preview paragraph: plain text, or a link
+/// whose `path` is `Some` when the resolver read it as a local file.
+#[derive(Clone, Debug)]
+enum PreviewLinkSegment {
+    Text(String),
+    Link {
+        label: String,
+        url: String,
+        path: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct PreviewLinkBlock {
+    segments: Vec<PreviewLinkSegment>,
+}
+
+/// The link takeover for one previewed file, carried by its buffer.
+///
+/// Built once and handed to the text view every frame: the view re-parses
+/// its Markdown whenever the extensions' revision changes, and a fresh
+/// registry every frame would both re-parse every frame and wipe the
+/// preview's selection (copy reads it a frame later). Rebuilt only when the
+/// buffer is re-pointed — Save As and renames funnel through
+/// `editor_sync_preview_state`, which is where the base is refreshed.
+#[derive(Clone)]
+struct PreviewLinkSupport {
+    base: PathBuf,
+    extensions: MarkdownExtensions,
+}
+
+/// Builds the takeover for the preview of the file at `base` on `host`.
+fn preview_link_support(
+    app: &gpui::WeakEntity<Tty7App>,
+    host: &SharedHost,
+    base: &Path,
+    host_is_local: bool,
+) -> PreviewLinkSupport {
+    let base = base.to_path_buf();
+    let parser_base = base.clone();
+    let render_app = app.clone();
+    let render_host = host.clone();
+    let render_base = base.clone();
+    let extensions = MarkdownExtensions::default()
+        .block_parser(move |node, parse_cx| {
+            preview_link_parse(host_is_local, &parser_base, node, parse_cx)
+        })
+        .block_renderer(PREVIEW_LOCAL_LINK_BLOCK, move |node, window, cx| {
+            preview_link_render(&render_app, &render_host, &render_base, node, window, cx)
+        });
+    PreviewLinkSupport { base, extensions }
+}
+
+/// Takes over preview paragraphs holding local-file links. `base` is the
+/// file the preview is of: what relative links resolve against. Off the
+/// local machine there are no local files to name, so remote previews keep
+/// the default rendering untouched.
+fn preview_link_parse(
+    host_is_local: bool,
+    base: &Path,
+    node: &gpui_component::text::markdown_ast::Node,
+    parse_cx: &gpui_component::text::MarkdownParseContext<'_>,
+) -> Option<MarkdownNode> {
+    if !host_is_local {
+        return None;
+    }
+    use gpui_component::text::markdown_ast::Node as Md;
+    let children = match node {
+        Md::Paragraph(paragraph) => &paragraph.children,
+        _ => return None,
+    };
+    // Reference links resolve through definitions elsewhere in the
+    // document, which a block parser cannot see, and images have their
+    // own loading path: those paragraphs keep the default rendering.
+    if children.iter().any(preview_link_unhandled)
+        || !children.iter().any(|c| preview_link_has_local(base, c))
+    {
+        return None;
+    }
+    let mut segments = Vec::new();
+    for child in children {
+        preview_link_collect(base, child, &mut segments);
+    }
+    // The rendered runs, kept as plain text so copy still reads them.
+    let plain: String = segments
+        .iter()
+        .map(|s| match s {
+            PreviewLinkSegment::Text(text) => text.as_str(),
+            PreviewLinkSegment::Link { label, .. } => label.as_str(),
+        })
+        .collect();
+    Some(
+        MarkdownNode::new(PREVIEW_LOCAL_LINK_BLOCK, PreviewLinkBlock { segments })
+            .text(plain)
+            .markdown(parse_cx.node_source(node).unwrap_or_default()),
+    )
+}
+
+/// Whether `node` needs rendering the link takeover cannot do: an image (its
+/// own loading path), a reference link (its target lives in a definition
+/// block elsewhere), or inline HTML.
+fn preview_link_unhandled(node: &gpui_component::text::markdown_ast::Node) -> bool {
+    use gpui_component::text::markdown_ast::Node as Md;
+    match node {
+        Md::Image(_) | Md::ImageReference(_) | Md::LinkReference(_) | Md::Html(_) => true,
+        Md::Emphasis(emphasis) => emphasis.children.iter().any(preview_link_unhandled),
+        Md::Strong(strong) => strong.children.iter().any(preview_link_unhandled),
+        Md::Delete(delete) => delete.children.iter().any(preview_link_unhandled),
+        Md::Link(link) => link.children.iter().any(preview_link_unhandled),
+        _ => false,
+    }
+}
+
+/// Whether `node` holds an inline link the resolver reads as a local file.
+fn preview_link_has_local(base: &Path, node: &gpui_component::text::markdown_ast::Node) -> bool {
+    use gpui_component::text::markdown_ast::Node as Md;
+    match node {
+        Md::Link(link) => {
+            markdown_link::resolve_markdown_link(base, &link.url).is_some()
+                || link
+                    .children
+                    .iter()
+                    .any(|c| preview_link_has_local(base, c))
+        }
+        Md::Emphasis(emphasis) => emphasis
+            .children
+            .iter()
+            .any(|c| preview_link_has_local(base, c)),
+        Md::Strong(strong) => strong
+            .children
+            .iter()
+            .any(|c| preview_link_has_local(base, c)),
+        Md::Delete(delete) => delete
+            .children
+            .iter()
+            .any(|c| preview_link_has_local(base, c)),
+        _ => false,
+    }
+}
+
+/// Flattens `node` into `out`, resolving the links it holds. Marks other
+/// than links (emphasis, inline code) do not survive the takeover; what
+/// matters — the words and where each link goes — does.
+fn preview_link_collect(
+    base: &Path,
+    node: &gpui_component::text::markdown_ast::Node,
+    out: &mut Vec<PreviewLinkSegment>,
+) {
+    use gpui_component::text::markdown_ast::Node as Md;
+    match node {
+        Md::Text(text) => preview_link_text(out, text.value.clone()),
+        Md::Emphasis(emphasis) => {
+            for child in &emphasis.children {
+                preview_link_collect(base, child, out);
+            }
+        }
+        Md::Strong(strong) => {
+            for child in &strong.children {
+                preview_link_collect(base, child, out);
+            }
+        }
+        Md::Delete(delete) => {
+            for child in &delete.children {
+                preview_link_collect(base, child, out);
+            }
+        }
+        Md::InlineCode(code) => preview_link_text(out, code.value.clone()),
+        Md::InlineMath(math) => preview_link_text(out, math.value.clone()),
+        Md::Break(_) => preview_link_text(out, "\n".to_string()),
+        Md::FootnoteReference(footnote) => {
+            preview_link_text(out, format!("[{}]", footnote.identifier));
+        }
+        Md::Link(link) => {
+            let mut nested = Vec::new();
+            for child in &link.children {
+                preview_link_collect(base, child, &mut nested);
+            }
+            let label: String = nested
+                .iter()
+                .map(|s| match s {
+                    PreviewLinkSegment::Text(text) => text.as_str(),
+                    PreviewLinkSegment::Link { label, .. } => label.as_str(),
+                })
+                .collect();
+            out.push(PreviewLinkSegment::Link {
+                label,
+                url: link.url.clone(),
+                path: markdown_link::resolve_markdown_link(base, &link.url),
+            });
+        }
+        // Handled by bailing out of the takeover in `preview_link_unhandled`;
+        // anything else (MDX fragments with MDX off, unknown nodes) is text
+        // the takeover cannot read, so it is left out rather than misdrawn.
+        _ => {}
+    }
+}
+
+/// Appends plain text to `out`, joining it onto the run before it.
+fn preview_link_text(out: &mut Vec<PreviewLinkSegment>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(PreviewLinkSegment::Text(last)) = out.last_mut() {
+        last.push_str(&text);
+    } else {
+        out.push(PreviewLinkSegment::Text(text));
+    }
+}
+
+/// Draws an overridden preview paragraph: its words as plain runs, its links
+/// as clickable ones. Local runs open through [`Tty7App::open_markdown_link`];
+/// any other run keeps the old open-in-browser behaviour.
+fn preview_link_render(
+    app: &gpui::WeakEntity<Tty7App>,
+    host: &SharedHost,
+    base: &Path,
+    node: &MarkdownNode,
+    _window: &mut Window,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    let Some(block) = node.data::<PreviewLinkBlock>().cloned() else {
+        return div().child(node.as_text().to_string()).into_any_element();
+    };
+    // One id namespace per taken-over block: the source hash keeps blocks
+    // apart, the run index keeps the links within a block apart.
+    let block_tag = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        node.as_markdown().hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut row = div().flex().flex_wrap().items_baseline();
+    for (ix, segment) in block.segments.iter().enumerate() {
+        match segment {
+            PreviewLinkSegment::Text(text) => {
+                row = row.child(div().child(text.clone()));
+            }
+            PreviewLinkSegment::Link {
+                label,
+                url,
+                path: Some(path),
+            } => {
+                let app = app.clone();
+                let host = host.clone();
+                let base = base.to_path_buf();
+                let url = url.clone();
+                let tip = path.display().to_string();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "tty7-md-local-link-{block_tag}-{ix}"
+                        )))
+                        .child(label.clone())
+                        .text_color(cx.theme().link)
+                        .underline()
+                        .cursor_pointer()
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                        })
+                        .on_click(move |_, window, cx| {
+                            let _ = app.update(cx, |this, cx| {
+                                this.open_markdown_link(&host, &base, &url, window, cx)
+                            });
+                        }),
+                );
+            }
+            PreviewLinkSegment::Link {
+                label,
+                url,
+                path: None,
+            } => {
+                let url = url.clone();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("tty7-md-link-{block_tag}-{ix}")))
+                        .child(label.clone())
+                        .text_color(cx.theme().link)
+                        .underline()
+                        .cursor_pointer()
+                        .on_click(move |_, _window, cx| {
+                            cx.open_url(&url);
+                        }),
+                );
+            }
+        }
+    }
+    row.into_any_element()
+}
+
 impl Tty7App {
     pub(crate) fn render_code_overlay(
         &mut self,
@@ -3413,10 +3782,19 @@ impl Tty7App {
                 let scroll = f.preview_scroll.clone();
                 let buf = f.id();
                 let app = cx.entity().downgrade();
+                // The buffer's own takeover, built once: handing the view a
+                // fresh registry every frame would re-parse every frame and
+                // wipe the preview's selection.
+                let links = f
+                    .preview_links
+                    .clone()
+                    .map(|s| s.extensions)
+                    .unwrap_or_default();
                 let body = match f.preview_state.clone() {
                     Some(state) => gpui_component::text::TextView::new(&state)
                         .selectable(true)
-                        .style(crate::ui::theme::markdown_style(cx)),
+                        .style(crate::ui::theme::markdown_style(cx))
+                        .markdown_extensions(links),
                     // A previewing buffer is always Markdown and carries the
                     // state above; the managed view below cannot copy and is
                     // only a fallback so a missing state cannot blank the pane.
@@ -3427,6 +3805,7 @@ impl Tty7App {
                             markdown,
                         )
                         .style(crate::ui::theme::markdown_style(cx))
+                        .markdown_extensions(links)
                     }
                 };
                 // The bar's wrapper takes its height from `flex_1`, so it needs
@@ -4537,5 +4916,152 @@ mod preview_gpui_tests {
             Tty7App::editor_preview_copy_text(&weak, id, cx)
         });
         assert_eq!(cleared, "", "no selection copies nothing");
+    }
+
+    /// A scratch directory with a link target in it, removed by the test.
+    fn link_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tty7-md-link-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create link dir");
+        dir
+    }
+
+    fn open_link_base(
+        app: &Entity<Tty7App>,
+        vcx: &mut VisualTestContext,
+        path: PathBuf,
+        text: &str,
+    ) -> BufferId {
+        let text = text.to_string();
+        app.update_in(vcx, |app, window, cx| {
+            let host = app.active_host(cx).expect("a host");
+            let tab = app.tabs.get(app.active).map(|t| t.tree_id.get());
+            let tab = tab.expect("a tab");
+            let indent = crate::ui::editor_text::detect_indent(&text, "markdown");
+            let id = app.editor_new_buffer(
+                host,
+                path,
+                None,
+                text,
+                TextFormat::default(),
+                EditorConfig::default(),
+                indent,
+                None,
+                window,
+                cx,
+            );
+            app.editor_show_in_tab(tab, id, true, window, cx);
+            id
+        })
+    }
+
+    /// Clicking a relative link in a preview opens the target in the editor.
+    /// The preview paint in `show_preview` also runs the link takeover over a
+    /// paragraph that holds one, so this covers the parser and renderer too.
+    #[gpui::test]
+    fn preview_local_link_opens_in_editor(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = link_dir("open");
+        std::fs::write(dir.join("other.md"), "# Other\n").expect("write target");
+        let base = dir.join("a.md");
+        let id = open_link_base(&app, &mut vcx, base.clone(), "see [o](./other.md)\n");
+        show_preview(&app, &mut vcx, id);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let host = app.buffer(id).expect("buffer").host.clone();
+            app.open_markdown_link(&host, &base, "./other.md", window, cx);
+        });
+        settle(&mut vcx);
+        app.read_with(&vcx, |app, _| {
+            assert!(
+                app.editor
+                    .buffers
+                    .iter()
+                    .any(|b| b.path == dir.join("other.md")),
+                "the linked file opened in the editor"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Clicking an absolute local path in a preview opens it in the editor.
+    #[gpui::test]
+    fn preview_absolute_link_opens_in_editor(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = link_dir("absolute");
+        let target = dir.join("abs.md");
+        std::fs::write(&target, "# Abs\n").expect("write target");
+        let base = dir.join("a.md");
+        let text = format!("see [o]({})\n", target.display());
+        let id = open_link_base(&app, &mut vcx, base.clone(), &text);
+        show_preview(&app, &mut vcx, id);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let host = app.buffer(id).expect("buffer").host.clone();
+            app.open_markdown_link(&host, &base, &target.display().to_string(), window, cx);
+        });
+        settle(&mut vcx);
+        app.read_with(&vcx, |app, _| {
+            assert!(
+                app.editor.buffers.iter().any(|b| b.path == target),
+                "the absolute linked file opened in the editor"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An external link keeps the old behaviour: nothing opens in the editor.
+    #[gpui::test]
+    fn preview_external_link_stays_out_of_the_editor(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = link_dir("external");
+        let base = dir.join("a.md");
+        let id = open_link_base(
+            &app,
+            &mut vcx,
+            base.clone(),
+            "see [w](https://example.com)\n",
+        );
+        show_preview(&app, &mut vcx, id);
+        let before = app.read_with(&vcx, |app, _| app.editor.buffers.len());
+        app.update_in(&mut vcx, |app, window, cx| {
+            let host = app.buffer(id).expect("buffer").host.clone();
+            app.open_markdown_link(&host, &base, "https://example.com", window, cx);
+        });
+        settle(&mut vcx);
+        app.read_with(&vcx, |app, _| {
+            assert_eq!(
+                app.editor.buffers.len(),
+                before,
+                "an external link opens nothing in the editor"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A link to nothing still only notifies: no buffer, no crash.
+    #[gpui::test]
+    fn preview_missing_link_notifies_without_crashing(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = link_dir("missing");
+        let base = dir.join("a.md");
+        let id = open_link_base(&app, &mut vcx, base.clone(), "see [o](./nope.md)\n");
+        show_preview(&app, &mut vcx, id);
+        let before = app.read_with(&vcx, |app, _| app.editor.buffers.len());
+        app.update_in(&mut vcx, |app, window, cx| {
+            let host = app.buffer(id).expect("buffer").host.clone();
+            app.open_markdown_link(&host, &base, "./nope.md", window, cx);
+        });
+        settle(&mut vcx);
+        app.read_with(&vcx, |app, _| {
+            assert_eq!(
+                app.editor.buffers.len(),
+                before,
+                "a missing target opens nothing"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
