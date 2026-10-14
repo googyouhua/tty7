@@ -53,3 +53,9 @@
   summary: 全量 tty7-core 套件 3 个失败（daemon shell_integration x2、spawn x1），与 instance 改动无关。
   evidence: 评审在基线 stash 下复现同败；diff 仅碰 instance.rs，被败模块不依赖 instance（仅 remote_link.rs 引用）。
   revisit_when: daemon 测试在 CI/本机稳定后；复验=cargo test -p tty7-core 全绿。
+
+## Deferred from: code review of story-md-preview-copy-plan.md (2026-10-14)
+
+- source_plan: `_bmad-output/backlog/story-md-preview-copy-plan.md`
+  summary: 预览快捷键复制（Ctrl+C）与右键复制一致性未在真机验证
+  evidence: 上游 selectable TextView 自带绑定但本分支只验证了右键路径；25 机选中后按 Ctrl+C 比对粘贴即可证伪或证实

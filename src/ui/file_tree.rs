@@ -3943,7 +3943,13 @@ mod drop_gpui_tests {
             app.file_tree_drop_paths(vec![from.join("note.txt")], root.clone(), window, cx);
         });
         wait_until(&mut vcx, "the copy never landed", |_| {
-            root.join("note.txt").exists()
+            // Poll the content, not just the existence: on a slow machine the
+            // watcher can report the new file (and the tree can go quiet)
+            // while the worker's copy is still in flight, so existence alone
+            // can win the race and read back short.
+            std::fs::read_to_string(root.join("note.txt"))
+                .map(|body| body == "hello")
+                .unwrap_or(false)
         });
         settle(&app, &mut vcx, &root);
 
