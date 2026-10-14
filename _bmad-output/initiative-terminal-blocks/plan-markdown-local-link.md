@@ -99,3 +99,7 @@ context: []
 - `cargo test -p tty7 code_editor` -- expected: 预览相关单测全过（含新增）
 - `cargo fmt --check` -- expected: 干净
 - `cargo clippy -- -D warnings` -- expected: 无新增警告（按仓内 lint 门控执行）
+
+**Remote re-verification (192.168.1.25 `/home/snic/tty7-verify-md-link`, branch `verify/md-local-link`):**
+- `markdown_link` 11 passed, `code_editor` 99 passed, `fmt --check` clean
+- 为腾空间删除远端 4 个无未提交改动的旧 checkout（`tty7-build`/`tty7-test`/`tty7-onekey`/`tty7-link`）；`tty7_2` 含未提交改动予以保留

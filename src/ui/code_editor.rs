@@ -3481,12 +3481,18 @@ fn preview_link_parse(
 }
 
 /// Whether `node` needs rendering the link takeover cannot do: an image (its
-/// own loading path), a reference link (its target lives in a definition
-/// block elsewhere), or inline HTML.
+/// own loading path) or a reference link (its target lives in a definition
+/// block elsewhere).
+///
+/// Inline HTML tags (`<sub>`, `</sub>` …) are *not* in this list on purpose:
+/// with MDX off they tokenize as tag-only `Html` nodes whose inner text
+/// survives as sibling `Text` nodes, so the takeover drops the tags in
+/// `preview_link_collect` and keeps the words and links (losing only the
+/// tag's own styling, like every other mark the takeover flattens).
 fn preview_link_unhandled(node: &gpui_component::text::markdown_ast::Node) -> bool {
     use gpui_component::text::markdown_ast::Node as Md;
     match node {
-        Md::Image(_) | Md::ImageReference(_) | Md::LinkReference(_) | Md::Html(_) => true,
+        Md::Image(_) | Md::ImageReference(_) | Md::LinkReference(_) => true,
         Md::Emphasis(emphasis) => emphasis.children.iter().any(preview_link_unhandled),
         Md::Strong(strong) => strong.children.iter().any(preview_link_unhandled),
         Md::Delete(delete) => delete.children.iter().any(preview_link_unhandled),
@@ -3554,6 +3560,10 @@ fn preview_link_collect(
         Md::FootnoteReference(footnote) => {
             preview_link_text(out, format!("[{}]", footnote.identifier));
         }
+        // Inline HTML tags (`<sub>` …): dropped, as decided in
+        // `preview_link_unhandled` — their inner text arrives as sibling
+        // `Text` nodes and survives; the tag's own styling does not.
+        Md::Html(_) => {}
         Md::Link(link) => {
             let mut nested = Vec::new();
             for child in &link.children {
@@ -3575,6 +3585,7 @@ fn preview_link_collect(
         // Handled by bailing out of the takeover in `preview_link_unhandled`;
         // anything else (MDX fragments with MDX off, unknown nodes) is text
         // the takeover cannot read, so it is left out rather than misdrawn.
+        // (Inline `Html` has its own arm above and never lands here.)
         _ => {}
     }
 }
@@ -3642,6 +3653,13 @@ fn preview_link_render(
                             gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                         })
                         .on_click(move |_, window, cx| {
+                            // What the text view's own link handler does
+                            // first: finish any preview selection in flight
+                            // and keep the click from reaching the editor
+                            // that opens underneath it (which would read the
+                            // mouse-up as the start of a drag-selection).
+                            window.end_text_selection(cx);
+                            cx.stop_propagation();
                             let _ = app.update(cx, |this, cx| {
                                 this.open_markdown_link(&host, &base, &url, window, cx)
                             });
@@ -3661,7 +3679,9 @@ fn preview_link_render(
                         .text_color(cx.theme().link)
                         .underline()
                         .cursor_pointer()
-                        .on_click(move |_, _window, cx| {
+                        .on_click(move |_, window, cx| {
+                            window.end_text_selection(cx);
+                            cx.stop_propagation();
                             cx.open_url(&url);
                         }),
                 );
@@ -5063,5 +5083,69 @@ mod preview_gpui_tests {
             );
         });
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `<sub>English · [简体中文](README.zh-CN.md)</sub>` (README.md:19)
+    /// parses as a paragraph of tag-only `Html` around a local link: the
+    /// tags must not bail the takeover, and collecting must keep the words
+    /// and resolve the link while dropping the tags.
+    #[test]
+    fn sub_wrapped_link_is_taken_over() {
+        use gpui_component::text::markdown_ast::{Html, Link, Node as Md, Text};
+        let html = |value: &str| {
+            Md::Html(Html {
+                value: value.to_string(),
+                position: None,
+            })
+        };
+        let text = |value: &str| {
+            Md::Text(Text {
+                value: value.to_string(),
+                position: None,
+            })
+        };
+        let children = vec![
+            html("<sub>"),
+            text("English · "),
+            Md::Link(Link {
+                children: vec![text("简体中文")],
+                position: None,
+                url: "README.zh-CN.md".to_string(),
+                title: None,
+            }),
+            html("</sub>"),
+        ];
+        assert!(
+            !children.iter().any(preview_link_unhandled),
+            "inline tags keep the default bail-out away"
+        );
+        let base = Path::new("/repo/README.md");
+        assert!(children.iter().any(|c| preview_link_has_local(base, c)));
+        let mut segments = Vec::new();
+        for child in &children {
+            preview_link_collect(base, child, &mut segments);
+        }
+        assert_eq!(segments.len(), 2, "tags dropped, words kept: {segments:?}");
+        let (PreviewLinkSegment::Text(words), PreviewLinkSegment::Link { label, path, .. }) =
+            (&segments[0], &segments[1])
+        else {
+            panic!("expected text then link: {segments:?}");
+        };
+        assert_eq!(words, "English · ");
+        assert_eq!(label, "简体中文");
+        assert_eq!(path.as_deref(), Some(Path::new("/repo/README.zh-CN.md")));
+    }
+
+    /// Images still bail the takeover: their loading path is untouched.
+    #[test]
+    fn image_paragraphs_keep_the_default_rendering() {
+        use gpui_component::text::markdown_ast::{Image, Node as Md};
+        let image = Md::Image(Image {
+            url: "./shot.png".to_string(),
+            title: None,
+            alt: "shot".to_string(),
+            position: None,
+        });
+        assert!(preview_link_unhandled(&image));
     }
 }
