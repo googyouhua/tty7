@@ -5044,6 +5044,9 @@ mod preview_gpui_tests {
         crate::ui::i18n::set_locale("en");
         let dir = link_dir("open");
         std::fs::write(dir.join("other.md"), "# Other\n").expect("write target");
+        // The editor stores the canonicalized path (`\\?\`-prefixed on
+        // Windows), so compare against that rather than the display form.
+        let target = dir.join("other.md").canonicalize().expect("target exists");
         let base = dir.join("a.md");
         let id = open_link_base(&app, &mut vcx, base.clone(), "see [o](./other.md)\n");
         show_preview(&app, &mut vcx, id);
@@ -5051,14 +5054,11 @@ mod preview_gpui_tests {
             let host = app.buffer(id).expect("buffer").host.clone();
             app.open_markdown_link(&host, &base, "./other.md", window, cx);
         });
-        wait_for_buffer(&app, &mut vcx, &dir.join("other.md"));
+        wait_for_buffer(&app, &mut vcx, &target);
         settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert!(
-                app.editor
-                    .buffers
-                    .iter()
-                    .any(|b| b.path == dir.join("other.md")),
+                app.editor.buffers.iter().any(|b| b.path == target),
                 "the linked file opened in the editor"
             );
         });
@@ -5073,6 +5073,9 @@ mod preview_gpui_tests {
         let dir = link_dir("absolute");
         let target = dir.join("abs.md");
         std::fs::write(&target, "# Abs\n").expect("write target");
+        // The stored buffer path is canonicalized on open (`\\?\`-prefixed
+        // on Windows); the link itself stays in display form.
+        let canonical = target.canonicalize().expect("target exists");
         let base = dir.join("a.md");
         let text = format!("see [o]({})\n", target.display());
         let id = open_link_base(&app, &mut vcx, base.clone(), &text);
@@ -5081,11 +5084,11 @@ mod preview_gpui_tests {
             let host = app.buffer(id).expect("buffer").host.clone();
             app.open_markdown_link(&host, &base, &target.display().to_string(), window, cx);
         });
-        wait_for_buffer(&app, &mut vcx, &target);
+        wait_for_buffer(&app, &mut vcx, &canonical);
         settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert!(
-                app.editor.buffers.iter().any(|b| b.path == target),
+                app.editor.buffers.iter().any(|b| b.path == canonical),
                 "the absolute linked file opened in the editor"
             );
         });
@@ -5131,19 +5134,27 @@ mod preview_gpui_tests {
         let dir = link_dir("fileurl");
         let target = dir.join("f.md");
         std::fs::write(&target, "# F\n").expect("write target");
+        // Canonicalized for the buffer comparison below; the link itself
+        // is built in display form with three slashes (`file:///C:/…` on
+        // Windows — two would read the drive as a host).
+        let canonical = target.canonicalize().expect("target exists");
         let base = dir.join("a.md");
-        let url = format!("file://{}", target.display());
+        let display = target.display().to_string().replace('\\', "/");
+        let url = match display.strip_prefix('/') {
+            Some(_) => format!("file://{display}"),
+            None => format!("file:///{display}"),
+        };
         let id = open_link_base(&app, &mut vcx, base.clone(), &format!("see [o]({url})\n"));
         show_preview(&app, &mut vcx, id);
         app.update_in(&mut vcx, |app, window, cx| {
             let host = app.buffer(id).expect("buffer").host.clone();
             app.open_markdown_link(&host, &base, &url, window, cx);
         });
-        wait_for_buffer(&app, &mut vcx, &target);
+        wait_for_buffer(&app, &mut vcx, &canonical);
         settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert!(
-                app.editor.buffers.iter().any(|b| b.path == target),
+                app.editor.buffers.iter().any(|b| b.path == canonical),
                 "the file:// linked file opened in the editor"
             );
         });

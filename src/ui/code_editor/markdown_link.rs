@@ -156,9 +156,9 @@ fn is_drive_absolute(text: &str) -> bool {
 
 /// Strips the one leading slash from `/C:/…`, for `file:` URLs on Windows.
 #[cfg(windows)]
-fn strip_drive_slash(path: String) -> Option<String> {
+fn strip_drive_slash(path: &str) -> Option<String> {
     let stripped = path.strip_prefix('/')?;
-    is_drive_absolute(&stripped).then(|| stripped.to_string())
+    is_drive_absolute(stripped).then(|| stripped.to_string())
 }
 
 /// Joins `dir` and `rel` on `/` separators and folds away `.` and `..`
