@@ -4841,6 +4841,22 @@ mod preview_gpui_tests {
         vcx.run_until_parked();
     }
 
+    /// Polls until `path` is open or the budget runs out: async host opens
+    /// land on background threads, and one `settle` is not enough for them
+    /// under a loaded CI runner. The assert after this reports the miss.
+    fn wait_for_buffer(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, path: &Path) {
+        for _ in 0..50 {
+            let found = app.read_with(vcx, |app, _| {
+                app.editor.buffers.iter().any(|b| b.path == path)
+            });
+            if found {
+                return;
+            }
+            vcx.run_until_parked();
+            let _ = vcx.update(|window, cx| window.draw(cx));
+        }
+    }
+
     fn show_preview(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, id: BufferId) {
         app.update_in(vcx, |app, _, _| {
             app.buffer_mut(id).expect("buffer").preview = true;
@@ -5035,6 +5051,7 @@ mod preview_gpui_tests {
             let host = app.buffer(id).expect("buffer").host.clone();
             app.open_markdown_link(&host, &base, "./other.md", window, cx);
         });
+        wait_for_buffer(&app, &mut vcx, &dir.join("other.md"));
         settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert!(
@@ -5064,6 +5081,7 @@ mod preview_gpui_tests {
             let host = app.buffer(id).expect("buffer").host.clone();
             app.open_markdown_link(&host, &base, &target.display().to_string(), window, cx);
         });
+        wait_for_buffer(&app, &mut vcx, &target);
         settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert!(
@@ -5094,6 +5112,7 @@ mod preview_gpui_tests {
             app.open_markdown_link(&host, &base, "https://example.com", window, cx);
         });
         settle(&mut vcx);
+        settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert_eq!(
                 app.editor.buffers.len(),
@@ -5120,6 +5139,7 @@ mod preview_gpui_tests {
             let host = app.buffer(id).expect("buffer").host.clone();
             app.open_markdown_link(&host, &base, &url, window, cx);
         });
+        wait_for_buffer(&app, &mut vcx, &target);
         settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert!(
@@ -5145,6 +5165,7 @@ mod preview_gpui_tests {
             let host = app.buffer(id).expect("buffer").host.clone();
             app.open_markdown_link(&host, &base, "./sub", window, cx);
         });
+        settle(&mut vcx);
         settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert_eq!(
@@ -5181,6 +5202,7 @@ mod preview_gpui_tests {
             app.open_markdown_link(&host, &base, "./run.sh", window, cx);
         });
         settle(&mut vcx);
+        settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert_eq!(
                 app.editor.buffers.len(),
@@ -5205,6 +5227,7 @@ mod preview_gpui_tests {
             let host = app.buffer(id).expect("buffer").host.clone();
             app.open_markdown_link(&host, &base, "./nope.md", window, cx);
         });
+        settle(&mut vcx);
         settle(&mut vcx);
         app.read_with(&vcx, |app, _| {
             assert_eq!(
