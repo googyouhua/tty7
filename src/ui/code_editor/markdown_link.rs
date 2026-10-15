@@ -117,10 +117,9 @@ fn file_url_to_path(text: &str) -> Option<PathBuf> {
     } else {
         #[cfg(windows)]
         {
-            let path = percent_decode(url.path())?.replace('/', "\\");
-            Some(PathBuf::from(
-                format!("\\\\{host}\\{path}",).trim_start_matches('\\'),
-            ))
+            let rest = percent_decode(url.path())?;
+            let rest = rest.strip_prefix('/').unwrap_or(&rest).replace('/', "\\");
+            Some(PathBuf::from(format!("\\\\{host}\\{rest}")))
         }
         #[cfg(not(windows))]
         {

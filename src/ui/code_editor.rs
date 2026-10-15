@@ -4857,6 +4857,15 @@ mod preview_gpui_tests {
         }
     }
 
+    /// What the editor keys an opened file by: `Host::canonicalize` strips
+    /// Windows' `\\?\` escape hatch, so a raw `std::fs::canonicalize` would
+    /// compare unequal there — spell the expectation the same way.
+    fn opened_spelling(target: &Path) -> PathBuf {
+        tty7_core::core::path_spelling::local_spelling_buf(
+            target.canonicalize().expect("target exists"),
+        )
+    }
+
     fn show_preview(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, id: BufferId) {
         app.update_in(vcx, |app, _, _| {
             app.buffer_mut(id).expect("buffer").preview = true;
@@ -5046,7 +5055,7 @@ mod preview_gpui_tests {
         std::fs::write(dir.join("other.md"), "# Other\n").expect("write target");
         // The editor stores the canonicalized path (`\\?\`-prefixed on
         // Windows), so compare against that rather than the display form.
-        let target = dir.join("other.md").canonicalize().expect("target exists");
+        let target = opened_spelling(&dir.join("other.md"));
         let base = dir.join("a.md");
         let id = open_link_base(&app, &mut vcx, base.clone(), "see [o](./other.md)\n");
         show_preview(&app, &mut vcx, id);
@@ -5075,7 +5084,7 @@ mod preview_gpui_tests {
         std::fs::write(&target, "# Abs\n").expect("write target");
         // The stored buffer path is canonicalized on open (`\\?\`-prefixed
         // on Windows); the link itself stays in display form.
-        let canonical = target.canonicalize().expect("target exists");
+        let canonical = opened_spelling(&target);
         let base = dir.join("a.md");
         let text = format!("see [o]({})\n", target.display());
         let id = open_link_base(&app, &mut vcx, base.clone(), &text);
@@ -5137,7 +5146,7 @@ mod preview_gpui_tests {
         // Canonicalized for the buffer comparison below; the link itself
         // is built in display form with three slashes (`file:///C:/…` on
         // Windows — two would read the drive as a host).
-        let canonical = target.canonicalize().expect("target exists");
+        let canonical = opened_spelling(&target);
         let base = dir.join("a.md");
         let display = target.display().to_string().replace('\\', "/");
         let url = match display.strip_prefix('/') {
