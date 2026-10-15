@@ -103,3 +103,9 @@ context: []
 **Remote re-verification (192.168.1.25 `/home/snic/tty7-verify-md-link`, branch `verify/md-local-link`):**
 - `markdown_link` 11 passed, `code_editor` 99 passed, `fmt --check` clean
 - 为腾空间删除远端 4 个无未提交改动的旧 checkout（`tty7-build`/`tty7-test`/`tty7-onekey`/`tty7-link`）；`tty7_2` 含未提交改动予以保留
+
+**CI fixes (PR #29):**
+- `check-host-boundary.sh` 禁 `ui::` 直接 `.is_absolute()`（Windows 下对 `/home/me` 也报 false）：resolver 改走平台无关的 `/` 字符串语义，`file:` 自行解析（`Url::to_file_path` 同样平台相关：Windows 下 `file://host` 变 UNC、`file:///tmp` 反而非法）
+- Windows 单测按统一语义钉死（仅远端-host 的 `file:` URL 保留 cfg：Windows 走 UNC，别处判不可读）
+- 打开类集成测试加有界等待（CI 负载下异步落盘抖动）
+- 评审项同步修：三函数递归抽取 `preview_link_children`、两 Link 分支抽取 `preview_link_run`、(app,host,base) 扎 `PreviewLinkContext`、`open_markdown_link` 加本地守卫、补 file:///目录/二进制集成测试
