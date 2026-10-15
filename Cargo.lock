@@ -11548,6 +11548,7 @@ dependencies = [
  "libc",
  "log",
  "lsp-types",
+ "markdown",
  "memchr",
  "notify 8.2.0",
  "notify-rust",

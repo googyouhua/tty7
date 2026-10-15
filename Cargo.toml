@@ -274,6 +274,9 @@ ksni = { version = "0.3.6", default-features = false, features = ["blocking", "a
 # into test builds and never reaches a release binary.
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+# Markdown AST inspection for preview link tests (same version the preview
+# renders through gpui-component).
+markdown = "1.0.0"
 # tests/edns_z_flag.rs drives iroh's resolver, so the simple-dns patch below is
 # checked by the default `cargo test` CI runs, which skips tty7-gateway.
 iroh = "1.2"

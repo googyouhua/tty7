@@ -59,3 +59,9 @@
 - source_plan: `_bmad-output/backlog/story-md-preview-copy-plan.md`
   summary: 预览快捷键复制（Ctrl+C）与右键复制一致性未在真机验证
   evidence: 上游 selectable TextView 自带绑定但本分支只验证了右键路径；25 机选中后按 Ctrl+C 比对粘贴即可证伪或证实
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-markdown-local-link.md`
+  summary: 含图片/引用链接/HTML 的段落整段回退，段内本地链接仍走旧 open_url
+  evidence: preview_link_unhandled 有意回退；日常文档图片与链接分段，命中率低
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-markdown-local-link.md`
+  summary: 接管段落拍平为纯文本（加粗/斜体/行内代码样式丢失，换行不保留）
+  evidence: 词与链接目标保留、复制可用；恢复 marks 需重做内联渲染，非小补丁
