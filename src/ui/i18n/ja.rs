@@ -1806,7 +1806,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerEnter => "開く",
         L10nKey::InstancePickerClose => "閉じる",
         L10nKey::InstanceBadgeWelcome => "やあ {name}",
-        L10nKey::InstancePickerInvalid => "ユーザー名は [a-z0-9-] のみ使用できます。",
+        L10nKey::InstancePickerInvalid => "ユーザー名は英字・数字・-のみ使用できます。",
         L10nKey::InstancePickerRelaunchFailed => {
             "tty7 を起動できませんでした。もう一度お試しください。"
         }

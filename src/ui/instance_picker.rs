@@ -1556,6 +1556,11 @@ mod tests {
             state.create_candidate("  carol-2  "),
             Some("carol-2".to_string())
         );
+        // Uppercase folds to the same instance — `Carol` creates `carol`,
+        // and `ALICE` is already listed as `alice`.
+        assert_eq!(state.create_candidate("Carol"), Some("carol".to_string()));
+        assert_eq!(state.create_candidate("ALICE"), None);
+        assert_eq!(state.create_candidate("Default"), None);
         // Listed, empty, or invalid: no candidate, button stays disabled.
         assert_eq!(state.create_candidate("alice"), None);
         assert_eq!(state.create_candidate("bob"), None);

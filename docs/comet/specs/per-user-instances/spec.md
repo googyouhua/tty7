@@ -9,7 +9,7 @@
 ## 2. `tty7 --as <name>`（CLI 全局参数）
 
 - 用法：`tty7 --as alice status`、`tty7 --as alice new ~/code/api`、`tty7 --as alice run -- cargo test`。`--as` 接受在子命令前后（全局参数）。
-- `<name>` 规则：非空、`[a-z0-9-]+` 且不以 `-` 开头；非法直接报错退出 `2`，不启动任何 server、不建目录。
+- `<name>` 规则：非空、字母/数字/`-`（大写自动转小写，`Alice` 即 `alice`），且不以 `-` 开头；`default` 大小写变体保留；非法直接报错退出 `2`，不启动任何 server、不建目录。
 - 映射到 `${TTY7_AS_ROOT:-$HOME/.config}/tty7-<name>`；`TTY7_AS_ROOT` 已设置时不要求 `$HOME`。
 - 首次使用自动建目录并 `chmod 700`（仅 leaf 目录，父目录不动）。
 - 优先级（CLI 内）：`--as` > `TTY7_CONFIG_DIR` > portable > 默认。`--config-dir` 只存在于 `tty7-app` / `tty7-server` 二进制上，不在 CLI；GUI 启动时 `--config-dir`（flag）优先于一切。

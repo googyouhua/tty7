@@ -31,7 +31,8 @@ tty7 --as alice new ~/code/api
 tty7 --as alice run -- cargo test
 ```
 
-Names are lowercase `[a-z0-9-]`; anything else is refused before anything
+Names use letters, digits, and `-` (uppercase folds to lowercase, so
+`--as Alice` enters `alice`); anything else is refused before anything
 starts. The instance directory is created `700` on first use. Every `tty7`
 verb works unchanged behind the flag — including `server start`, `server
 stop` (which now stops only *your* instance), `agents`, `wait`, and
