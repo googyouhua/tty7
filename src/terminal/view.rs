@@ -5921,40 +5921,56 @@ impl TerminalView {
 
     /// The inline suggestion: the most recent entry that extends the line,
     /// preferring one run in the current directory and falling back to the
-    /// most recent anywhere. Commands that last exited non-zero are never
-    /// offered. Pure recency, not frecency, so the ghost names what ↑ would
-    /// recall rather than an older command that merely ran more often; Ctrl+R
-    /// is where frecency ranks.
+    /// most recent anywhere. Commands whose latest run exited non-zero are
+    /// demoted, not discarded: a failed entry is only offered when no
+    /// succeeding entry matches (b). An entry that exactly equals the line
+    /// never counts as a suggestion itself — the search keeps going for a
+    /// longer entry that extends it (c). Pure recency, not frecency, so the
+    /// ghost names what ↑ would recall rather than an older command that
+    /// merely ran more often; Ctrl+R is where frecency ranks.
     fn ghost_suggestion(&self) -> Option<String> {
         if self.cmd.is_empty() || self.cmd.cursor() != self.cmd.len() {
             return None;
         }
         let line = self.cmd.text();
         let cwd = self.ranked_cwd.as_deref().and_then(|p| p.to_str());
-        let mut elsewhere = None;
+        // Newest wins inside each tier; tiers resolve at the end so any
+        // success beats any failure regardless of directory.
+        let mut elsewhere_ok: Option<&String> = None;
+        let mut here_failed: Option<&String> = None;
+        let mut elsewhere_failed: Option<&String> = None;
         for h in self.history.iter().rev() {
+            // (c) `<=` skips the exact match itself and keeps looking for a
+            // longer entry that extends the line, instead of going blank.
             if h.len() <= line.len() || !h.starts_with(&line) {
                 continue;
             }
-            if self
+            let failed = self
                 .history_meta
                 .get(h)
                 .and_then(|m| m.exit)
-                .is_some_and(|code| code != 0)
-            {
-                continue;
-            }
+                .is_some_and(|code| code != 0);
             let here = cwd.is_some_and(|dir| {
                 self.history_cwds
                     .get(h)
                     .is_some_and(|dirs| dirs.contains(dir))
             });
-            if here || cwd.is_none() {
-                return Some(h.clone());
+            if !failed {
+                if here || cwd.is_none() {
+                    return Some(h.clone());
+                }
+                elsewhere_ok.get_or_insert(h);
+            } else {
+                // (b) demote: remember the newest failure per directory tier
+                // and only offer it when no success matches.
+                if here {
+                    here_failed.get_or_insert(h);
+                } else {
+                    elsewhere_failed.get_or_insert(h);
+                }
             }
-            elsewhere.get_or_insert(h);
         }
-        elsewhere.cloned()
+        elsewhere_ok.or(here_failed).or(elsewhere_failed).cloned()
     }
 
     fn note_integration_gap(&mut self, cx: &mut Context<Self>) {
@@ -19808,7 +19824,7 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn ghost_skips_commands_that_failed(cx: &mut TestAppContext) {
+    fn ghost_demotes_commands_that_failed(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, _, _| {
@@ -19829,10 +19845,60 @@ mod gpui_tests {
                 );
                 view.cmd.set("make l");
                 assert_eq!(
-                    view.ghost_suggestion(),
-                    None,
-                    "a command whose only run failed is never offered"
+                    view.ghost_suggestion().as_deref(),
+                    Some("make lint"),
+                    "a command whose only run failed is demoted, not hidden"
                 );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ghost_success_anywhere_beats_failure_here(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                seed_ghost_history(
+                    view,
+                    &[
+                        ("cargo build", &["/elsewhere"], None),
+                        ("cargo bad-flag", &["/work/proj"], Some(1)),
+                    ],
+                    Some("/work/proj"),
+                );
+                view.cmd.set("cargo b");
+                assert_eq!(
+                    view.ghost_suggestion().as_deref(),
+                    Some("cargo build"),
+                    "any success outranks a failure, even one run here"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ghost_exact_match_suggests_a_longer_entry(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                seed_ghost_history(
+                    view,
+                    &[
+                        ("git status", &["/work/proj"], Some(0)),
+                        ("git status --short", &["/work/proj"], Some(0)),
+                    ],
+                    Some("/work/proj"),
+                );
+                // Typing the full shorter command must not go blank: the
+                // exact match is skipped and the longer extension is offered.
+                view.cmd.set("git status");
+                assert_eq!(
+                    view.ghost_suggestion().as_deref(),
+                    Some("git status --short"),
+                );
+                // With no longer extension there is nothing truthful to show.
+                view.cmd.set("git status --short");
+                assert_eq!(view.ghost_suggestion(), None);
             })
             .unwrap();
     }
