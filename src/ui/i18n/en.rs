@@ -1745,7 +1745,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::InstancePickerEnter => "Enter",
         L10nKey::InstancePickerClose => "Close",
         L10nKey::InstanceBadgeWelcome => "Hi {name}",
-        L10nKey::InstancePickerInvalid => "Usernames use [a-z0-9-].",
+        L10nKey::InstancePickerInvalid => "Usernames use letters, digits, -.",
         L10nKey::InstancePickerRelaunchFailed => "Could not start tty7 — try again.",
         L10nKey::InstancePickerNoMatch => "No matching instances.",
         L10nKey::InstancePickerMatchCount => "{count} matches",

@@ -1978,7 +1978,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::InstancePickerEnter => "Войти",
         L10nKey::InstancePickerClose => "Закрыть",
         L10nKey::InstanceBadgeWelcome => "Привет, {name}",
-        L10nKey::InstancePickerInvalid => "Имена — только [a-z0-9-].",
+        L10nKey::InstancePickerInvalid => "Имена — только буквы, цифры и -.",
         L10nKey::InstancePickerRelaunchFailed => "Не удалось запустить tty7 — попробуйте ещё раз.",
         L10nKey::InstancePickerNoMatch => "Нет подходящих инстансов.",
         L10nKey::InstancePickerMatchCount => "Совпадений: {count}",

@@ -19,19 +19,20 @@ pub const OUTSIDE_SHELL: &str = "not inside a tty7 shell — pass an explicit %p
 #[cfg(test)]
 pub const ENV_INSTANCE_ROOT: &str = tty7_core::core::instance::ENV_INSTANCE_ROOT;
 
-/// A per-user instance name for `--as`: lowercase letters, digits, hyphens.
-/// Rejects `..`, `/`, a leading `-`, and anything else that could escape the
-/// `tty7-<name>` directory shape. Used as a clap value parser, so a refusal
-/// is a usage error (exit 2) raised before anything starts. The rule itself
-/// lives in `tty7_core::core::instance` so the GUI picker enforces the same
-/// shape.
+/// A per-user instance name for `--as`: letters, digits, hyphens.
+/// Uppercase folds to lowercase (`--as Alice` enters `alice`), so one name
+/// owns one `tty7-<name>` directory on case-insensitive filesystems too.
+/// Rejects `..`, `/`, a leading `-`, and the `default` sentinel in any case.
+/// Used as a clap value parser, so a refusal is a usage error (exit 2)
+/// raised before anything starts. The rule itself lives in
+/// `tty7_core::core::instance` so the GUI picker enforces the same shape.
 pub fn parse_instance_name(s: &str) -> Result<String, String> {
     tty7_core::core::instance::validate_name(s)
 }
 
 /// The config directory for `--as <name>`, resolved without touching the
-/// filesystem: `${TTY7_AS_ROOT:-$HOME/.config}/tty7-<name>`. Pure so tests
-/// can pin both inputs; the root rule is shared with
+/// filesystem: `${TTY7_AS_ROOT:-$HOME/.config}/tty7-<name>` (lowercased).
+/// Pure so tests can pin both inputs; the root rule is shared with
 /// `tty7_core::core::instance::root_with`.
 #[cfg(test)]
 pub fn instance_dir(
@@ -39,9 +40,10 @@ pub fn instance_dir(
     root: Option<&str>,
     home: Option<&str>,
 ) -> Result<std::path::PathBuf> {
+    let norm = tty7_core::core::instance::validate_name(name).map_err(|e| anyhow!("{e}"))?;
     let root = tty7_core::core::instance::root_with(root, home)
         .ok_or_else(|| anyhow!("$HOME is unset and {ENV_INSTANCE_ROOT} is not set"))?;
-    Ok(root.join(format!("tty7-{name}")))
+    Ok(root.join(format!("tty7-{norm}")))
 }
 
 /// Point this process at `--as <name>`'s instance: create its directory
@@ -265,9 +267,10 @@ mod tests {
     fn instance_names_take_a_narrow_shape() {
         assert_eq!(parse_instance_name("alice").unwrap(), "alice");
         assert_eq!(parse_instance_name("a-1").unwrap(), "a-1");
+        assert_eq!(parse_instance_name("Alice").unwrap(), "alice");
         // Nothing that could escape `tty7-<name>` or read as a flag.
         for bad in [
-            "", "Alice", "ALICE", "default", "../x", "a/b", "-x", "a b", "a_b", "%41",
+            "", "default", "Default", "../x", "a/b", "-x", "a b", "a_b", "%41",
         ] {
             assert!(
                 parse_instance_name(bad).is_err(),
@@ -290,6 +293,11 @@ mod tests {
         assert_eq!(
             instance_dir("alice", None, Some("/home/u")).unwrap(),
             PathBuf::from("/home/u/.config/tty7-alice")
+        );
+        // Uppercase folds to the same directory.
+        assert_eq!(
+            instance_dir("Alice", Some("/r"), Some("/home/u")).unwrap(),
+            PathBuf::from("/r/tty7-alice")
         );
         assert!(instance_dir("alice", None, None).is_err());
         assert!(instance_dir("alice", Some(""), Some("")).is_err());

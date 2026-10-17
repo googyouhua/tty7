@@ -31,20 +31,24 @@ pub const DEFAULT_SENTINEL: &str = "default";
 /// The directory prefix instances hang under the root.
 const INSTANCE_PREFIX: &str = "tty7-";
 
-/// A per-user instance name: lowercase letters, digits, hyphens. Rejects
-/// `..`, `/`, a leading `-`, and the `default` sentinel — nothing that
-/// could escape the `tty7-<name>` directory shape or read as a flag.
+/// A per-user instance name: letters, digits, hyphens. Uppercase is accepted
+/// and folded to lowercase, so `Alice` and `alice` share one `tty7-alice`
+/// directory (also safe on case-insensitive filesystems). Rejects `..`,
+/// `/`, a leading `-`, and the `default` sentinel in any case — nothing
+/// that could escape the `tty7-<name>` directory shape or read as a flag.
 pub fn validate_name(s: &str) -> Result<String, String> {
-    let ok = !s.is_empty()
-        && s != DEFAULT_SENTINEL
-        && !s.starts_with('-')
-        && s.bytes()
+    let norm = s.trim().to_lowercase();
+    let ok = !norm.is_empty()
+        && norm != DEFAULT_SENTINEL
+        && !norm.starts_with('-')
+        && norm
+            .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     if ok {
-        Ok(s.to_string())
+        Ok(norm)
     } else {
         Err(format!(
-            "'{s}' is not an instance name — use [a-z0-9-], e.g. alice"
+            "'{s}' is not an instance name — use letters/digits/hyphens, e.g. alice"
         ))
     }
 }
@@ -80,12 +84,12 @@ pub fn default_root() -> Option<PathBuf> {
 }
 
 /// The config directory for `name` under the live root, or `None` when no
-/// root resolves. The name is validated first: an invalid name is an error,
-/// never a surprising path.
+/// root resolves. The name is validated and lowercased first: an invalid
+/// name is an error, never a surprising path.
 pub fn dir_for(name: &str) -> Option<PathBuf> {
     validate_name(name)
         .ok()
-        .and_then(|_| default_root().map(|r| r.join(format!("{INSTANCE_PREFIX}{name}"))))
+        .and_then(|norm| default_root().map(|r| r.join(format!("{INSTANCE_PREFIX}{norm}"))))
 }
 
 /// Create an instance directory, locking the leaf to its owner. Parents are
@@ -101,8 +105,9 @@ pub fn ensure_dir(path: &Path) -> std::io::Result<()> {
 }
 
 /// Instance names present under `root`: subdirectories shaped exactly
-/// `tty7-<valid-name>`, sorted. The default instance is implied, never
-/// listed — it has no suffixed directory.
+/// `tty7-<valid-name>`, sorted and deduplicated. Letter case is folded, so
+/// a legacy `tty7-Alice` lists as `alice`. The default instance is implied,
+/// never listed — it has no suffixed directory.
 pub fn list_in(root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -113,11 +118,14 @@ pub fn list_in(root: &Path) -> Vec<String> {
         let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(INSTANCE_PREFIX)) else {
             continue;
         };
-        if entry.path().is_dir() && validate_name(rest).is_ok() {
-            names.push(rest.to_string());
+        if entry.path().is_dir() {
+            if let Ok(norm) = validate_name(rest) {
+                names.push(norm);
+            }
         }
     }
     names.sort();
+    names.dedup();
     names
 }
 
@@ -172,8 +180,8 @@ pub fn memory_name_for(dir: &Path) -> Option<String> {
     if dir.parent() == Some(root.as_path()) {
         let name = dir.file_name()?.to_str()?;
         let rest = name.strip_prefix(INSTANCE_PREFIX)?;
-        if validate_name(rest).is_ok() {
-            return Some(rest.to_string());
+        if let Ok(norm) = validate_name(rest) {
+            return Some(norm);
         }
     }
     None
@@ -185,7 +193,7 @@ pub fn memory_name_for(dir: &Path) -> Option<String> {
 pub fn read_last_in(default_dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(default_dir.join(MEMORY_FILE)).ok()?;
     let name = text.trim();
-    if name == DEFAULT_SENTINEL {
+    if name.to_lowercase() == DEFAULT_SENTINEL {
         return Some(DEFAULT_SENTINEL.to_string());
     }
     validate_name(name).ok()
@@ -205,14 +213,20 @@ pub fn read_last() -> Option<String> {
 /// [`validate_name`]-clean name is written, anything else is an
 /// `InvalidInput` error that leaves the directory and file untouched.
 pub fn write_last_in(default_dir: &Path, name: &str) -> std::io::Result<()> {
-    if name != DEFAULT_SENTINEL && validate_name(name).is_err() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("'{name}' is not an instance name — use [a-z0-9-], e.g. alice"),
-        ));
-    }
+    let clean = if name == DEFAULT_SENTINEL {
+        DEFAULT_SENTINEL.to_string()
+    } else {
+        validate_name(name).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "'{name}' is not an instance name — use letters/digits/hyphens, e.g. alice"
+                ),
+            )
+        })?
+    };
     std::fs::create_dir_all(default_dir)?;
-    std::fs::write(default_dir.join(MEMORY_FILE), format!("{name}\n"))
+    std::fs::write(default_dir.join(MEMORY_FILE), format!("{clean}\n"))
 }
 
 /// Remember `name` under the live default directory.
@@ -468,8 +482,12 @@ mod tests {
     fn names_take_a_narrow_shape() {
         assert_eq!(validate_name("alice").unwrap(), "alice");
         assert_eq!(validate_name("a-1").unwrap(), "a-1");
+        // Uppercase folds to the same instance — `Alice` enters `alice`.
+        assert_eq!(validate_name("Alice").unwrap(), "alice");
+        assert_eq!(validate_name("ALICE").unwrap(), "alice");
+        assert_eq!(validate_name("  Bob  ").unwrap(), "bob");
         for bad in [
-            "", "Alice", "ALICE", "default", "../x", "a/b", "-x", "a b", "a_b", "%41",
+            "", "default", "Default", "DEFAULT", "../x", "a/b", "-x", "a b", "a_b", "%41",
         ] {
             assert!(
                 validate_name(bad).is_err(),
@@ -596,7 +614,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tty7-mem-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_last_in(&dir, "alice").unwrap();
-        for bad in ["", "-x", "../x", "a/b", "Alice", "a_b"] {
+        for bad in ["", "-x", "../x", "a/b", "a_b"] {
             assert!(
                 write_last_in(&dir, bad).is_err(),
                 "{bad:?} must not pass the memory guard"
@@ -604,10 +622,14 @@ mod tests {
             // The remembered value is untouched: still alice, not garbage.
             assert_eq!(read_last_in(&dir).as_deref(), Some("alice"));
         }
+        // Uppercase folds to the same instance: remembering `Alice`
+        // stores canonical `alice`.
+        write_last_in(&dir, "Alice").unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join(MEMORY_FILE)).unwrap(),
             "alice\n"
         );
+        assert_eq!(read_last_in(&dir).as_deref(), Some("alice"));
         // The sentinel stays writable: it is a memory value, not an instance.
         write_last_in(&dir, DEFAULT_SENTINEL).unwrap();
         assert_eq!(read_last_in(&dir).as_deref(), Some(DEFAULT_SENTINEL));
@@ -688,7 +710,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("tty7-keep")).unwrap();
         std::fs::write(root.join("tty7-keep").join("state.json"), "{}").unwrap();
-        for bad in ["", "default", "-x", "../x", "a/b", "Alice"] {
+        for bad in ["", "default", "-x", "../x", "a/b"] {
             assert!(
                 matches!(
                     remove_instance_in(&root, bad, false),
@@ -709,6 +731,22 @@ mod tests {
         assert!(
             root.join("tty7-keep").is_dir(),
             "a refused remove must touch nothing"
+        );
+        // Uppercase folds instead of refusing: `Alice` resolves exactly
+        // like `alice` — never `Invalid`.
+        assert!(
+            !matches!(
+                remove_instance_in(&root, "Alice", false),
+                Err(RemoveError::Invalid(_))
+            ),
+            "'Alice' must fold to alice, not be refused as invalid"
+        );
+        assert!(
+            !matches!(
+                remove_instance_in(&root, "Alice", true),
+                Err(RemoveError::Invalid(_))
+            ),
+            "forced 'Alice' must fold to alice, not be refused as invalid"
         );
         assert_eq!(list_in(&root), vec!["keep".to_string()]);
         let _ = std::fs::remove_dir_all(&root);
