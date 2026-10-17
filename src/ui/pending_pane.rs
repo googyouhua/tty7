@@ -30,6 +30,11 @@ pub struct PendingSpawn {
     pub run_on_land: Option<String>,
     pub owner: Option<crate::core::session::WorkspaceId>,
     pub font_size: f32,
+    /// Native SSH redial carried as pending so a restore never dials on the
+    /// UI thread. `None` for workspace panes.
+    pub native_ssh: Option<Box<crate::daemon::protocol::NativeSshSpec>>,
+    /// Start directory on the far host for a native SSH redial.
+    pub native_start_dir: Option<std::path::PathBuf>,
 }
 
 pub enum PendingState {

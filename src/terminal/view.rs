@@ -187,7 +187,7 @@ impl gpui::EventEmitter<OpenFileRequested> for TerminalView {}
 
 pub struct NativeSshParts {
     terminal: RemoteTerminal,
-    pane_id: u64,
+    pub(crate) pane_id: u64,
     persist: Box<crate::daemon::protocol::NativeSshSpec>,
 }
 

@@ -4216,6 +4216,102 @@ impl Tty7App {
         cx.notify();
     }
 
+    fn land_native_pane(
+        &mut self,
+        slot_id: gpui::EntityId,
+        pending: &Entity<crate::ui::pending_pane::PendingPane>,
+        dialed: Result<crate::terminal::view::NativeSshParts, String>,
+        font_size: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parts = match dialed {
+            Ok(parts) => parts,
+            Err(reason) => {
+                log::warn!("restoring native SSH pane failed: {reason}");
+                pending.update(cx, |p, cx| p.fail(reason, cx));
+                return;
+            }
+        };
+        let still_there = self
+            .tabs
+            .iter()
+            .any(|tab| tab.pane.leaves().iter().any(|l| l.entity_id() == slot_id));
+        if !still_there {
+            let route = crate::terminal::PaneRoute::for_workspace(None);
+            kill_pane_off_thread(route, parts.pane_id, cx);
+            return;
+        }
+        let was_focused = pending.read(cx).focus_handle.contains_focused(window, cx);
+        let view = cx.new(|cx| {
+            let mut view =
+                crate::terminal::view::TerminalView::from_native_ssh_parts(parts, window, cx);
+            view.font_size = px(font_size);
+            view
+        });
+        cx.subscribe_in(&view, window, |app, view, _: &ChildExited, window, cx| {
+            app.on_child_exited(view.clone(), window, cx);
+        })
+        .detach();
+        cx.subscribe_in(
+            &view,
+            window,
+            |app, _view, _: &crate::terminal::view::AgentSessionChanged, _window, cx| {
+                app.save_session(cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &view,
+            window,
+            |app, _view, ev: &crate::terminal::view::AgentDetected, _window, cx| {
+                app.note_agent_detected(ev.0, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &view,
+            window,
+            |app, view, _: &crate::terminal::view::AuthPromptReady, window, cx| {
+                app.on_auth_prompt_ready(view.clone(), window, cx);
+            },
+        )
+        .detach();
+        watch_open_file_requests(&view, window, cx);
+        let handle = view.read(cx).focus_handle.clone();
+        watch_pane_focus(&handle, view.entity_id(), window, cx);
+        let spawn = pending.read(cx).spawn.clone();
+        view.update(cx, |view, _| view.set_role(spawn.role.clone()));
+        // Same resume as a workspace land: a restored agent reattaches, a
+        // fresh role pane gets its first send later.
+        let resume = agent_resume_command(
+            &spawn.agent,
+            spawn.agent_session_id.as_deref(),
+            spawn.agent_launch_argv.as_deref(),
+            spawn.role.as_deref(),
+            view.read(cx),
+            cx,
+        )
+        .or_else(|| spawn.run_on_land.clone());
+        if let Some(cmd) = resume {
+            view.read(cx).run_command_line(&cmd);
+        }
+        if let Some(slug) = spawn.role.clone()
+            && let Some(role) = crate::ui::agent_launch::find_role(slug.trim())
+            && let Some(crate::ui::agent_launch::RoleFirstSend::TwoPhase { followup, .. }) =
+                crate::ui::agent_launch::plan_role_first_send(&role)
+        {
+            crate::ui::agent_launch::send_role_followup_later(view.clone(), followup, window, cx);
+        }
+        let slot = PaneSlot::Ready(view);
+        replace_leaf_in(&mut self.tabs, slot_id, slot.clone());
+        if was_focused {
+            self.focus_leaf(&slot, window, cx);
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
     fn refresh_git_status_all(&mut self, cx: &mut Context<Self>) {
         for leaf in self.tabs.iter().flat_map(|tab| tab.pane.terminals()) {
             leaf.update(cx, |view, cx| view.refresh_git_status_now(cx));
@@ -10525,10 +10621,19 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
         Pane::Leaf(PaneSlot::Connecting(pending)) => {
             let spawn = &pending.read(cx).spawn;
             SessionPane::Leaf {
-                cwd: spawn.working_directory.clone(),
+                cwd: spawn
+                    .native_ssh
+                    .as_ref()
+                    .and_then(|_| spawn.native_start_dir.clone())
+                    .or_else(|| spawn.working_directory.clone()),
                 pane_id: spawn.restore_pane,
                 shell: spawn.shell.clone(),
-                ssh_spec: None,
+                // Never persist live secrets: the Ready path stores the
+                // stripped form, so a parked redial does too.
+                ssh_spec: spawn
+                    .native_ssh
+                    .clone()
+                    .map(|spec| Box::new(spec.without_secrets())),
                 agent: spawn.agent,
                 agent_session_id: spawn.agent_session_id.clone(),
                 agent_launch_argv: spawn.agent_launch_argv.clone(),
@@ -10878,12 +10983,49 @@ fn session_to_pane(
             if restore.is_none() {
                 if let Some(spec) = ssh_spec.clone() {
                     let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
-                    // A native SSH leaf's recorded cwd is the far shell's own
-                    // report, so it is where the redialled shell starts.
-                    match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
-                        Ok(view) => return Some(Pane::leaf(PaneSlot::Ready(view))),
-                        Err(e) => log::error!("restoring native SSH pane failed: {e}"),
-                    }
+                    // Never dial on the UI thread: an unreachable host would
+                    // block event handling for the whole reply budget per pane,
+                    // which reads as the window being frozen. Park a
+                    // connecting pane and dial in the background instead.
+                    let machine: gpui::SharedString =
+                        format!("{}@{}", resolved.user, resolved.host).into();
+                    let spawn = crate::ui::pending_pane::PendingSpawn {
+                        workspace: None,
+                        working_directory: None,
+                        restore_pane: None,
+                        shell: None,
+                        agent: *agent,
+                        agent_session_id: agent_session_id.clone(),
+                        agent_launch_argv: agent_launch_argv.clone(),
+                        role: role.clone(),
+                        run_on_land: None,
+                        owner: Some(owner),
+                        font_size,
+                        native_ssh: Some(resolved),
+                        native_start_dir: cwd.clone(),
+                    };
+                    let pending =
+                        cx.new(|cx| crate::ui::pending_pane::PendingPane::new(machine, spawn, cx));
+                    cx.subscribe_in(
+                        &pending,
+                        window,
+                        |_app, pending, _: &crate::ui::pending_pane::RetryRequested, window, cx| {
+                            if let Some(spec) = pending.read(cx).spawn.native_ssh.clone() {
+                                let resolved =
+                                    crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
+                                pending.update(cx, |p, cx| {
+                                    p.spawn.native_ssh = Some(resolved);
+                                    p.retrying(cx);
+                                });
+                            }
+                            start_native_spawn(pending.clone(), window, cx);
+                        },
+                    )
+                    .detach();
+                    let handle = pending.read(cx).focus_handle.clone();
+                    watch_pane_focus(&handle, pending.entity_id(), window, cx);
+                    start_native_spawn(pending.clone(), window, cx);
+                    return Some(Pane::leaf(PaneSlot::Connecting(pending)));
                 }
             }
             // Past here the leaf comes back as a shell on the window's own
@@ -10990,6 +11132,8 @@ pub(crate) fn new_terminal(
         run_on_land: None,
         owner,
         font_size,
+        native_ssh: None,
+        native_start_dir: None,
     };
     // The same leak the reconnect banner had: this name is read out as
     // "Connecting to {machine}…" and "Could not reach {machine}", and a
@@ -11021,6 +11165,12 @@ fn start_pane_spawn(
     cx: &mut Context<Tty7App>,
 ) {
     let spawn = pending.read(cx).spawn.clone();
+    // A native redial parked in a workspace spawn must not go through the
+    // workspace dial: it has its own spec and start directory.
+    if spawn.native_ssh.is_some() {
+        start_native_spawn(pending, window, cx);
+        return;
+    }
     let slot_id = pending.entity_id();
     let font_size = spawn.font_size;
     cx.spawn_in(window, async move |this, cx| {
@@ -11039,6 +11189,33 @@ fn start_pane_spawn(
             .await;
         let _ = this.update_in(cx, |app, window, cx| {
             app.land_pane(slot_id, &pending, parts, font_size, window, cx);
+        });
+    })
+    .detach();
+}
+
+fn start_native_spawn(
+    pending: Entity<crate::ui::pending_pane::PendingPane>,
+    window: &mut Window,
+    cx: &mut Context<Tty7App>,
+) {
+    let spawn = pending.read(cx).spawn.clone();
+    let Some(spec) = spawn.native_ssh.clone() else {
+        return;
+    };
+    let start_dir = spawn.native_start_dir.clone();
+    let slot_id = pending.entity_id();
+    let font_size = spawn.font_size;
+    cx.spawn_in(window, async move |this, cx| {
+        let dialed = cx
+            .background_executor()
+            .spawn(async move {
+                crate::terminal::view::TerminalView::spawn_native_ssh_terminal(spec, start_dir)
+                    .map_err(|e| format!("{e:#}"))
+            })
+            .await;
+        let _ = this.update_in(cx, |app, window, cx| {
+            app.land_native_pane(slot_id, &pending, dialed, font_size, window, cx);
         });
     })
     .detach();
@@ -12454,6 +12631,8 @@ mod tests {
                         run_on_land: None,
                         owner: None,
                         font_size: 14.0,
+                        native_ssh: None,
+                        native_start_dir: None,
                     },
                     cx,
                 )
@@ -14325,6 +14504,8 @@ mod tab_focus_memory_tests {
                     run_on_land: None,
                     owner: None,
                     font_size: 14.,
+                    native_ssh: None,
+                    native_start_dir: None,
                 },
                 cx,
             )
