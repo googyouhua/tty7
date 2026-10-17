@@ -3883,6 +3883,8 @@ mod selection_gpui_tests {
                         run_on_land: None,
                         owner: None,
                         font_size: 14.0,
+                        native_ssh: None,
+                        native_start_dir: None,
                     },
                     cx,
                 )
