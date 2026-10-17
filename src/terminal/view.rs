@@ -18364,6 +18364,42 @@ mod gpui_tests {
         );
     }
 
+    /// Gutter markers carry `(seq, folded, failed)` straight from the spans:
+    /// a failed span reddens, a clean one does not, and a row no span starts
+    /// on stays blank.
+    #[gpui::test]
+    fn gutter_markers_carry_seq_fold_and_failed_per_row(cx: &mut TestAppContext) {
+        let (_window, view, _daemon) = rooted_harness(cx);
+        cx.update(|cx| {
+            let store = view.read(cx).terminal.block_tracker();
+            let mut tracker = store.lock().expect("the test holds no other lock");
+            tracker.note_b(0);
+            tracker.note_d(1, Some(2), None);
+            tracker.note_b(3);
+            tracker.note_d(4, Some(0), None);
+        });
+        cx.update(|cx| view.update(cx, |v, _| v.sync_frame_map()));
+        let (markers, rows) = cx.update(|cx| {
+            (
+                view.read(cx).block_gutter_markers(),
+                view.read(cx).terminal.size().rows,
+            )
+        });
+        assert_eq!(markers.len(), rows);
+        assert_eq!(
+            markers[0],
+            Some((1, false, true)),
+            "exit 2 reddens the failed span"
+        );
+        assert_eq!(
+            markers[3],
+            Some((2, false, false)),
+            "exit 0 leaves the clean span open"
+        );
+        assert_eq!(markers[2], None, "no span starts mid-block");
+        assert_eq!(markers[5], None, "rows past the spans stay blank");
+    }
+
     /// A fold change between render and paint/click falls back to a live
     /// mapping, and a lock-contended paint leaves the slot alone for the
     /// retained repaint to stand on.
@@ -18462,6 +18498,134 @@ mod gpui_tests {
             kept,
             Some(fresh),
             "the failed paint must not corrupt the slot"
+        );
+    }
+
+    /// `mouse_grid_line` guards its inputs: rows past the window resolve to
+    /// nothing, and the alternate screen takes the identity row — folds or
+    /// no folds, the full-screen program owns every row it shows.
+    #[gpui::test]
+    fn mouse_grid_line_guards_the_window_and_the_alternate_screen(cx: &mut TestAppContext) {
+        use alacritty_terminal::index::Line;
+
+        let (_window, view, mut daemon) = rooted_harness(cx);
+        seed_one_folded_span(&view, cx);
+        let rows = cx.update(|cx| view.read(cx).terminal.size().rows);
+
+        let past_the_window = cx.update(|cx| {
+            let term_arc = view.read(cx).terminal.term.clone();
+            let term = term_arc.lock();
+            view.read(cx).mouse_grid_line(&term, rows)
+        });
+        assert_eq!(
+            past_the_window, None,
+            "a row past the window resolves to nothing, not the last row clamped"
+        );
+
+        DaemonMsg::Output(b"\x1b[?1049h".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            let alt = cx.update(|cx| {
+                view.read(cx)
+                    .terminal
+                    .term
+                    .lock()
+                    .mode()
+                    .contains(TermMode::ALT_SCREEN)
+            });
+            if alt {
+                break;
+            }
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let alt_line = cx.update(|cx| {
+            let term_arc = view.read(cx).terminal.term.clone();
+            let term = term_arc.lock();
+            assert!(
+                term.mode().contains(TermMode::ALT_SCREEN),
+                "the harness entered the alternate screen"
+            );
+            view.read(cx).mouse_grid_line(&term, 0)
+        });
+        assert_eq!(
+            alt_line,
+            Some(Line(0)),
+            "the alternate screen resolves the identity row"
+        );
+    }
+
+    /// A fold that lands after render invalidates the slot: the click
+    /// recomputes live through `visible_map` instead of trusting the stale
+    /// rows — the rows below the new fold have moved.
+    #[gpui::test]
+    fn mouse_grid_line_falls_back_live_when_a_fold_invalidates_the_slot(cx: &mut TestAppContext) {
+        use crate::terminal::blocks::{screen_to_line, visible_map, window_abs_range};
+        use alacritty_terminal::index::Line;
+
+        let (_window, view, _daemon) = rooted_harness(cx);
+        seed_one_folded_span(&view, cx);
+        let rows = cx.update(|cx| view.read(cx).terminal.size().rows);
+        cx.update(|cx| view.update(cx, |v, _| v.sync_frame_map()));
+
+        // A second span below the first, open at render time.
+        cx.update(|cx| {
+            let store = view.read(cx).terminal.block_tracker();
+            let mut tracker = store.lock().expect("the test holds no other lock");
+            tracker.note_b(8);
+            tracker.note_d(12, Some(0), None);
+        });
+        cx.update(|cx| view.update(cx, |v, _| v.sync_frame_map()));
+
+        // Folding it with no render in between leaves the slot stale — still
+        // naming the open window — while the live table has moved on.
+        cx.update(|cx| {
+            let store = view.read(cx).terminal.block_tracker();
+            let mut tracker = store.lock().expect("the test holds no other lock");
+            assert_eq!(
+                tracker.set_folded(2, true),
+                Some(true),
+                "the second span folds"
+            );
+        });
+
+        let row = 13;
+        let (stale, live) = cx.update(|cx| {
+            let term_arc = view.read(cx).terminal.term.clone();
+            let term = term_arc.lock();
+            let history = term.grid().history_size() as i64;
+            let slot = view
+                .read(cx)
+                .frame_map
+                .clone()
+                .expect("render filled the slot");
+            let stale = screen_to_line(row, slot.fold_top, slot.fold_map.as_deref(), history);
+            let store = view.read(cx).terminal.block_tracker();
+            let tracker = store.lock().expect("the test holds no other lock");
+            let (top, _) = window_abs_range(&term, rows);
+            let map = visible_map(&term, &tracker, rows);
+            let live = screen_to_line(row, top, map.as_deref(), history)
+                .filter(|line| *line >= term.topmost_line() && *line <= term.bottommost_line());
+            assert!(tracker.has_folds(), "the live table still folds");
+            (stale, live)
+        });
+        assert_ne!(
+            stale, live,
+            "the second fold has to move the rows below it, or the test is vacuous"
+        );
+        let got = cx.update(|cx| {
+            let term_arc = view.read(cx).terminal.term.clone();
+            let term = term_arc.lock();
+            view.read(cx).mouse_grid_line(&term, row)
+        });
+        assert_eq!(
+            got, live,
+            "the click follows the live mapping, not the stale slot"
+        );
+        assert!(
+            got.is_some_and(|line| line != Line(row as i32)),
+            "the folded window must not resolve the identity row"
         );
     }
 
@@ -18677,6 +18841,70 @@ mod gpui_tests {
         assert!(
             selected,
             "copy-on-select must keep the selection highlighted"
+        );
+    }
+
+    /// The three block-copy menu items each write their own exact string —
+    /// command→command+exit, output→output+exit, both→all+exit — through
+    /// the same right-click latch the menu uses.
+    #[gpui::test]
+    fn three_copy_actions_write_their_exact_clipboard_strings(cx: &mut TestAppContext) {
+        let (_window, view, mut daemon) = rooted_harness(cx);
+        cx.update(|cx| {
+            cx.update_global::<Config, _>(|cfg, _| cfg.clipboard_trim_trailing_spaces = true)
+        });
+
+        DaemonMsg::Output(b"$ cmd\r\nout1\r\nout2\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let row: String = cx.update(|cx| {
+                let term = view.read(cx).terminal.term.clone();
+                let term = term.lock();
+                (0..5)
+                    .map(|c| term.grid()[alacritty_terminal::index::Line(0)][Column(c)].c)
+                    .collect()
+            });
+            if row == "$ cmd" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cx.update(|cx| {
+            let store = view.read(cx).terminal.block_tracker();
+            let mut tracker = store.lock().expect("the test holds no other lock");
+            tracker.note_b(0);
+            tracker.note_c();
+            tracker.note_d(2, Some(0), Some(String::new()));
+        });
+
+        // Latch exactly like a right-click: screen row 0 names the span the
+        // grid shows there.
+        cx.update(|cx| view.update(cx, |v, _| v.record_menu_block(0)));
+        let latched = cx.update(|cx| view.read(cx).menu_block);
+        assert_eq!(latched, Some(1), "row 0 latches the seeded span");
+
+        let clipboard = |cx: &mut TestAppContext| {
+            cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        };
+        cx.update(|cx| view.update(cx, |v, cx| v.copy_block_command(cx)));
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("$ cmd\nexit 0"),
+            "command copies the first line plus the exit line"
+        );
+        cx.update(|cx| view.update(cx, |v, cx| v.copy_block_output(cx)));
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("out1\nout2\nexit 0"),
+            "output copies the rows past the command plus the exit line"
+        );
+        cx.update(|cx| view.update(cx, |v, cx| v.copy_block(cx)));
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("$ cmd\nout1\nout2\nexit 0"),
+            "both copies the whole span plus the exit line"
         );
     }
 
