@@ -11214,9 +11214,24 @@ fn start_native_spawn(
                     .map_err(|e| format!("{e:#}"))
             })
             .await;
-        let _ = this.update_in(cx, |app, window, cx| {
+        // A dropped `update_in` leaves a live dial unlanded: keep its pane
+        // id out so the window-gone path can still reap it below.
+        let live_pane = dialed.as_ref().ok().map(|parts| parts.pane_id);
+        let landed = this.update_in(cx, |app, window, cx| {
             app.land_native_pane(slot_id, &pending, dialed, font_size, window, cx);
         });
+        if landed.is_err()
+            && let Some(pane_id) = live_pane
+        {
+            cx.background_executor()
+                .spawn(async move {
+                    crate::terminal::RemoteTerminal::kill_pane_on(
+                        &crate::terminal::PaneRoute::for_workspace(None),
+                        pane_id,
+                    )
+                })
+                .detach();
+        }
     })
     .detach();
 }
@@ -12659,6 +12674,184 @@ mod tests {
                 "the role tag travels with the spawn metadata"
             );
         });
+    }
+
+    fn native_spec_for_test() -> Box<crate::daemon::protocol::NativeSshSpec> {
+        use crate::daemon::protocol::{SshAlgorithms, SshAuthMode, SshProxy};
+        Box::new(crate::daemon::protocol::NativeSshSpec {
+            host: "build-box".to_string(),
+            port: 22,
+            user: "tester".to_string(),
+            auth_mode: SshAuthMode::Auto,
+            identity_files: Vec::new(),
+            agent_forward: false,
+            password: Some("live-secret".to_string()),
+            key_passphrases: Some(std::collections::HashMap::from([(
+                "/home/tester/.ssh/id_ed25519".to_string(),
+                "live-passphrase".to_string(),
+            )])),
+            proxy: SshProxy::None,
+            jump: None,
+            forwards: Vec::new(),
+            keepalive_interval_s: None,
+            keepalive_count_max: None,
+            connect_timeout_s: None,
+            algorithms: SshAlgorithms::default(),
+            x11: false,
+            term: "xterm-256color".to_string(),
+            verify_host_keys: true,
+            skip_banner: false,
+            shell_integration: true,
+            remote_clipboard_write: false,
+            login_script: Vec::new(),
+            display_name: None,
+            profile_id: None,
+        })
+    }
+
+    #[gpui::test]
+    fn a_parked_native_redial_saves_no_secrets(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::SessionPane;
+        use crate::ui::pane::{Pane, PaneSlot};
+        use crate::ui::pending_pane::{PendingPane, PendingSpawn};
+        use gpui::AppContext as _;
+
+        cx.update(|cx| {
+            let pending = cx.new(|cx| {
+                PendingPane::new(
+                    "tester@build-box",
+                    PendingSpawn {
+                        workspace: None,
+                        working_directory: None,
+                        restore_pane: None,
+                        shell: None,
+                        agent: None,
+                        agent_session_id: None,
+                        agent_launch_argv: None,
+                        role: None,
+                        run_on_land: None,
+                        owner: None,
+                        font_size: 14.0,
+                        native_ssh: Some(native_spec_for_test()),
+                        native_start_dir: Some(std::path::PathBuf::from("/far/dir")),
+                    },
+                    cx,
+                )
+            });
+            let saved = super::pane_to_session(&Pane::leaf(PaneSlot::Connecting(pending)), cx);
+            let SessionPane::Leaf { cwd, ssh_spec, .. } = saved else {
+                panic!("a leaf saves as a leaf");
+            };
+            assert_eq!(
+                cwd,
+                Some(std::path::PathBuf::from("/far/dir")),
+                "the far start directory survives the snapshot"
+            );
+            let spec = ssh_spec.expect("the redial keeps its spec");
+            assert_eq!(spec.host, "build-box");
+            assert!(
+                spec.password.is_none() && spec.key_passphrases.is_none(),
+                "live secrets never reach the session snapshot"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_native_ssh_restore_parks_connecting_off_thread(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{SessionPane, WorkspaceId};
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx) = super::test_window::harness(cx);
+        let leaf = SessionPane::Leaf {
+            cwd: Some(std::path::PathBuf::from("/far/dir")),
+            pane_id: None,
+            shell: None,
+            ssh_spec: Some(native_spec_for_test()),
+            agent: None,
+            agent_session_id: None,
+            agent_launch_argv: None,
+            role: None,
+        };
+        let pane = app.update_in(&mut vcx, |_, window, cx| {
+            super::session_to_pane(None, WorkspaceId::new(), &leaf, None, 14.0, window, cx)
+        });
+        let Some(Pane::Leaf(PaneSlot::Connecting(pending))) = pane else {
+            panic!("an unreachable native leaf parks instead of dialling on the UI thread");
+        };
+        pending.read_with(cx, |pending, _| {
+            assert_eq!(pending.machine.to_string(), "tester@build-box");
+            assert!(
+                pending
+                    .spawn
+                    .native_ssh
+                    .as_ref()
+                    .is_some_and(|s| s.host == "build-box"),
+                "the retry carries the spec"
+            );
+            assert_eq!(
+                pending.spawn.native_start_dir,
+                Some(std::path::PathBuf::from("/far/dir"))
+            );
+        });
+        // The background dial has nowhere to go in the harness (no daemon
+        // under the pinned test config dir), so it must land Failed —
+        // non-modal, with Try Again — rather than hang Connecting.
+        cx.background_executor.run_until_parked();
+        cx.background_executor.run_until_parked();
+        pending.read_with(cx, |pending, _| {
+            assert!(
+                pending.is_failed(),
+                "an unreachable host lands Failed, never a frozen Connecting"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_failed_native_land_fails_the_pending_pane(cx: &mut gpui::TestAppContext) {
+        use crate::ui::pane::{Pane, PaneSlot};
+        use crate::ui::pending_pane::{PendingPane, PendingSpawn};
+
+        let (app, mut vcx) = super::test_window::harness(cx);
+        let pending = app.update_in(&mut vcx, |_, _, cx| {
+            use gpui::AppContext as _;
+            cx.new(|cx| {
+                PendingPane::new(
+                    "tester@build-box",
+                    PendingSpawn {
+                        workspace: None,
+                        working_directory: None,
+                        restore_pane: None,
+                        shell: None,
+                        agent: None,
+                        agent_session_id: None,
+                        agent_launch_argv: None,
+                        role: None,
+                        run_on_land: None,
+                        owner: None,
+                        font_size: 14.0,
+                        native_ssh: Some(native_spec_for_test()),
+                        native_start_dir: None,
+                    },
+                    cx,
+                )
+            })
+        });
+        let slot_id = pending.entity_id();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.land_native_pane(
+                slot_id,
+                &pending,
+                Err("ssh: connect: no route".into()),
+                14.0,
+                window,
+                cx,
+            );
+        });
+        pending.read_with(cx, |pending, _| {
+            assert!(pending.is_failed(), "dial failure parks as Failed");
+        });
+        // The leaf keeps its Connecting slot so Try Again can redial it.
+        let _ = Pane::leaf(PaneSlot::Connecting(pending));
     }
 
     #[test]
