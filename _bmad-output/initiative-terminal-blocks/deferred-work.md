@@ -9,13 +9,13 @@
   evidence: `break 'conn` 已确认；version handshake 存在但不管 pane 协议新 kind；属协议版本管辖，非本 epic 范围。
   revisit_when: 协议版本门控覆盖 pane 消息时；复验=旧 daemon 收 kind 64 不掉线。
 - source_plan: `_bmad-output/initiative-terminal-blocks/epic-terminal-blocks/story-copy-plan.md`
-  summary: 三复制 action 的剪贴板精确串缺回归单测（wiring 已人工验对：command→block_command_text、output→block_output_text、both→block_text）。
-  evidence: 缺 block 覆盖（更正：`view.rs:11698` 有 TestAppContext harness，129 测试含 harness 用例，但三 action 无一使用；待补）。
-  revisit_when: 用现成 harness latch 块后断言三 action 剪贴板精确串。
+  summary: RESOLVED——三复制 action 剪贴板精确串回归单测已补。
+  evidence: view.rs gpui_tests 新增 three_copy_actions_write_their_exact_clipboard_strings（rooted_harness 真 daemon 输出 latch `record_menu_block(0)`，断言 command→`$ cmd\nexit 0`、output→`out1\nout2\nexit 0`、both→`$ cmd\nout1\nout2\nexit 0`）；terminal::1170 全过。
+  revisit_when: 无（关闭）
 - source_plan: `_bmad-output/initiative-terminal-blocks/epic-terminal-blocks/story-ctrl-c-plan.md`
-  summary: gutter marker (seq,folded,failed) 映射缺单测（wiring 已人工验对：is_failed() 直通第三元组）。
-  evidence: 同上，待 harness-backed 映射用例（failed/success/None 三 span 第三元组）。
-  revisit_when: 同上。
+  summary: RESOLVED——gutter marker (seq,folded,failed) 映射单测已补。
+  evidence: view.rs gpui_tests 新增 gutter_markers_carry_seq_fold_and_failed_per_row（exit 2→`(1,false,true)`、exit 0→`(2,false,false)`、无 span 行→None）；terminal::1170 全过。
+  revisit_when: 无（关闭）
 - source_plan: `_bmad-output/initiative-terminal-blocks/epic-terminal-blocks/story-perf-plan.md`
   summary: B 轨 GUI 真跑未跑——Xvfb 下 baseline 二进制 vs 现二进制 11MB cat 五次平均，无数据；A 轨已过门，不阻塞收 epic。
   evidence: bench harness 系 macOS-only（zsh driver `scripts/bench/run_one.sh`、`/Applications` 路径）；本容器无 zsh、无 release 二进制（仅 debug 产物），time-box 内未起构建。A 轨数据见 plan Implementation Notes。
@@ -37,17 +37,17 @@
   evidence: view.rs gpui_tests 新增 toggle_fold_by_seq_keeps_the_top_anchor_stable_on_a_live_grid（含窗外折叠 want==offset 分支）与 toggle_fold_by_seq_falls_back_to_the_summary_row_on_a_live_grid；terminal::1139 全过。锁争用/alt-screen 跳过分支仍无单测（需精确制造争用，维持不测）。
   revisit_when: 无（关闭）
 - source_plan: `_bmad-output/initiative-terminal-blocks/plan-fold-display-fix.md`
-  summary: mouse_grid_line 快照验证/回退分支缺单测（函数本体需 TerminalView gpui harness）。
-  evidence: view.rs:11698 有 TestAppContext harness，但 mouse 路径无一使用；fold_epoch/回退逻辑仅由 live-Term 映射单测间接覆盖。
-  revisit_when: 同 P5/P6，harness 落地后补 mouse 事件级用例。
+  summary: RESOLVED——mouse_grid_line 快照验证/回退分支单测已补。
+  evidence: view.rs gpui_tests 新增 mouse_grid_line_guards_the_window_and_the_alternate_screen（越界行→None、alt-screen 取 identity）与 mouse_grid_line_falls_back_live_when_a_fold_invalidates_the_slot（第二折叠致 slot 过期→live `visible_map`，且断言 live≠stale 防空转）；terminal::1170 全过。frame 短 map 空白行→None 与 try_lock 锁争用分支仍无单测（需精确制造，维持不测）。
+  revisit_when: 无（关闭；空白行/锁争用分支维持不测）
 - source_plan: `_bmad-output/initiative-terminal-blocks/plan-host-ui-thread-panic-fix.md`
   summary: RESOLVED——Host call on UI thread panic（`manual_cwd_rejoins` 后台化，单飞+缓存）
   evidence: 远端 192.168.1.25 /tmp/tty7-app.log：thread 'main' panicked at crates/tty7-core/src/host/mod.rs:54:5；已单开 plan 修完待 25 机器验证
 
 - source_plan: `_bmad-output/initiative-terminal-blocks/epic-username-selector/story-mtime-recency-tracer-plan.md`
-  summary: bin 测试目标不编译（src/terminal/view.rs 测试模块 24 处 E0252 重复 import），picker 侧单测无法执行。
-  evidence: stash 后基线复建同样 24 错、与本改动无关；core 7/7 绿、bin check 干净。本 epic 后续 entry 的 picker 单测同样被挡。
-  revisit_when: view.rs 测试 import 修复后；复验=cargo test --bin tty7-app instance_picker 全绿（含 rows_retain_snapshot_mtimes）。
+  summary: RESOLVED——bin 测试目标恢复编译（defer 理由不成立：E0252 已消失）。
+  evidence: `cargo check --bin tty7-app --tests` 仅 warning 无报错；`cargo test --bin tty7-app instance_picker` 25/25 全绿（含 rows_retain_snapshot_mtimes）。
+  revisit_when: 无（关闭）
 
 - source_plan: `_bmad-output/initiative-terminal-blocks/epic-username-selector/story-core-delete-op-plus-probe-plus-memory-guard-plan.md`
   summary: 全量 tty7-core 套件 3 个失败（daemon shell_integration x2、spawn x1），与 instance 改动无关。
