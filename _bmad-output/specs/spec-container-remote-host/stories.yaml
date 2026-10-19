@@ -1,0 +1,36 @@
+- id: "1"
+  title: Container transport skeleton — register a container, push the server, open a container shell
+  description: >-
+    Register a running container as a tty7 workspace and open a shell pane inside
+    it, pushing the version-matched tty7-server over docker exec and carrying the
+    daemon protocol on the exec stdio channel. Delivers CAP-1 and CAP-2.
+  done_checkpoint: true
+- id: "2"
+  title: Container pane's agent avatar and cwd on the sidebar
+  description: >-
+    Make a container pane's sidebar show the in-container agent avatar and status
+    dot, and track the working directory from the container's shell integration.
+    Delivers CAP-3 and CAP-5.
+- id: "3"
+  title: In-container git — branch, diff, and file tree
+  description: >-
+    Make branch, working-tree diff, and file tree reflect the repository inside
+    the container for bind-mount and in-container-clone alike. Delivers CAP-4.
+- id: "4"
+  title: Container lifecycle and degradation
+  description: >-
+    Handle container stop, restart, and link reconnect, surface a non-connected
+    state with a stated reason, and relocate the server to an executable directory
+    when the target is unwritable or noexec. Delivers CAP-6.
+- id: "5"
+  title: WSL-hosted container runtimes
+  description: >-
+    Reach a runtime hosted in a WSL distro (docker inside the distro, and the
+    Docker Desktop WSL2 backend) by wrapping the invocation as
+    wsl.exe -d <distro> --exec docker exec .... Delivers CAP-7.
+- id: "6"
+  title: Entry picker and pane re-home
+  description: >-
+    Offer a OneKey-style pane picker when a container runtime becomes foreground,
+    re-homing the pane (keeping its scrollback) into the container workspace on
+    accept, with a per-container trust option. Delivers CAP-8.
