@@ -136,6 +136,9 @@ pub enum RemoteTarget {
     Wsl {
         distro: String,
     },
+    Container {
+        container: String,
+    },
     LocalStdio {
         program: String,
         args: Vec<String>,
@@ -173,6 +176,7 @@ impl RemoteTarget {
                 format!("ssh-direct:{user}@{}:{port}", host.to_ascii_lowercase())
             }
             RemoteTarget::Wsl { distro } => format!("wsl:{distro}"),
+            RemoteTarget::Container { container } => format!("container:{container}"),
             RemoteTarget::LocalStdio { program, args } => {
                 format!("local-stdio:{program} {}", args.join(" "))
             }
@@ -184,7 +188,9 @@ impl RemoteTarget {
             RemoteTarget::Profile { .. }
             | RemoteTarget::Alias { .. }
             | RemoteTarget::Direct { .. } => true,
-            RemoteTarget::Wsl { .. } | RemoteTarget::LocalStdio { .. } => false,
+            RemoteTarget::Wsl { .. }
+            | RemoteTarget::Container { .. }
+            | RemoteTarget::LocalStdio { .. } => false,
         }
     }
 
@@ -197,7 +203,8 @@ impl RemoteTarget {
             RemoteTarget::Profile { .. }
             | RemoteTarget::Alias { .. }
             | RemoteTarget::Direct { .. }
-            | RemoteTarget::Wsl { .. } => true,
+            | RemoteTarget::Wsl { .. }
+            | RemoteTarget::Container { .. } => true,
             RemoteTarget::LocalStdio { .. } => false,
         }
     }
@@ -217,6 +224,7 @@ impl RemoteTarget {
             RemoteTarget::Alias { alias } => alias_known(alias),
             RemoteTarget::Direct { .. }
             | RemoteTarget::Wsl { .. }
+            | RemoteTarget::Container { .. }
             | RemoteTarget::LocalStdio { .. } => true,
         }
     }
@@ -242,6 +250,7 @@ impl std::fmt::Display for RemoteTarget {
                 Ok(())
             }
             RemoteTarget::Wsl { distro } => write!(f, "wsl:{distro}"),
+            RemoteTarget::Container { container } => write!(f, "container:{container}"),
             RemoteTarget::LocalStdio { program, .. } => {
                 let name = std::path::Path::new(program)
                     .file_name()
@@ -762,6 +771,9 @@ mod tests {
                 program: "tty7-server".into(),
                 args: vec![],
             },
+            RemoteTarget::Container {
+                container: "web".into(),
+            },
         ] {
             assert!(target.resolvable(&[], |_| false), "{target}");
         }
@@ -874,6 +886,13 @@ mod tests {
             .connection_key(),
             "wsl:Ubuntu"
         );
+        assert_eq!(
+            RemoteTarget::Container {
+                container: "web".into()
+            }
+            .connection_key(),
+            "container:web"
+        );
     }
 
     #[test]
@@ -897,6 +916,13 @@ mod tests {
             }
             .is_ssh(),
             "a distribution is reached through wsl.exe, not a connection"
+        );
+        assert!(
+            !RemoteTarget::Container {
+                container: "web".into()
+            }
+            .is_ssh(),
+            "a container is reached through docker exec, not a connection"
         );
         assert!(
             !RemoteTarget::LocalStdio {
@@ -929,6 +955,13 @@ mod tests {
             }
             .hosts_our_server(),
             "a distribution's server is installed and launched from here, like an SSH one"
+        );
+        assert!(
+            RemoteTarget::Container {
+                container: "web".into()
+            }
+            .hosts_our_server(),
+            "a container's server is installed and launched from here, like WSL's"
         );
         assert!(
             !RemoteTarget::LocalStdio {
@@ -971,6 +1004,31 @@ mod tests {
             }
             .connection_key()
         );
+    }
+
+    #[test]
+    fn a_container_target_is_its_own_machine() {
+        let web = RemoteTarget::Container {
+            container: "web".into(),
+        };
+        let same = RemoteTarget::Container {
+            container: "web".into(),
+        };
+        let other = RemoteTarget::Container {
+            container: "db".into(),
+        };
+        assert_eq!(web.connection_key(), "container:web");
+        assert_eq!(web.host_id(), same.host_id(), "identity is the name alone");
+        assert_ne!(
+            web.host_id(),
+            other.host_id(),
+            "two containers are two machines"
+        );
+        assert!(
+            !web.host_id().is_local(),
+            "a container is never the local host"
+        );
+        assert_eq!(web.to_string(), "container:web");
     }
 
     #[test]

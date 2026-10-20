@@ -950,6 +950,7 @@ pub struct Tty7App {
     pub(crate) closed: Vec<SessionTab>,
     pub(crate) renaming: Option<Renaming>,
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
+    pub(crate) container_prompt: Option<crate::ui::container_prompt::ContainerPrompt>,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
     pub(crate) mod_hint_gen: u64,
@@ -1641,6 +1642,7 @@ impl Tty7App {
             closed: Vec::new(),
             renaming: None,
             worktree_prompt: None,
+            container_prompt: None,
             maximized: None,
             mod_hint_badges: false,
             mod_hint_gen: 0,
@@ -6551,6 +6553,14 @@ impl Tty7App {
             );
         }
 
+        // The consent-only door to a running container: no list is enumerated,
+        // the user names the container they are already in.
+        actions.push(
+            Item::localized(L10nKey::CmdAddContainer, CommandKind::AddContainer)
+                .with_subtitle(t(L10nKey::CmdAddContainerSubtitle))
+                .in_group(CommandGroup::Ssh),
+        );
+
         // Offered only where it would do something. A connection opened from a
         // saved host has nothing to save, and a pane that is not an SSH one has
         // no connection at all — either would be a row that quietly did nothing
@@ -7082,6 +7092,7 @@ impl Tty7App {
             }
             SaveQuickConnect(target) => self.open_ssh_profile_new_from_target(target, window, cx),
             SaveSshSessionAsHost => self.save_ssh_session_as_host(window, cx),
+            AddContainer => self.open_container_prompt(window, cx),
             OpenSshProfiles => self.open_settings_section(SettingsSection::Ssh, window, cx),
             SendSelectionToAgent => self.send_selection_to_agent(window, cx),
             SendGitDiffToAgent => self.send_git_diff_to_agent(window, cx),
@@ -10446,6 +10457,9 @@ impl Render for Tty7App {
                 // clipped to the terminal area, which read as "only the
                 // terminal is busy".
                 .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
+                    this.child(el)
+                })
+                .when_some(self.render_container_prompt_overlay(cx), |this, el| {
                     this.child(el)
                 })
                 // Same reason, and the ssh prompt has more claim to it than any

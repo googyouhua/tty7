@@ -1721,6 +1721,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteProfileMissing => "that saved SSH profile no longer exists",
         L10nKey::RemoteAliasMissing => "\"{alias}\" is no longer in ~/.ssh/config",
         L10nKey::RemoteWslNoSsh => "a WSL workspace has no SSH connection",
+        L10nKey::RemoteContainerNoSsh => "a container workspace has no SSH connection",
         L10nKey::RemoteLocalStdioNoSsh => "a local --stdio workspace has no SSH connection",
         L10nKey::RemoteHostNotTty7 => "{machine} answered, but not as a tty7 server: {error}",
         L10nKey::RemoteWorkspaceListFailed => {
@@ -1981,6 +1982,17 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdSshPortForwarding => "SSH: Port Forwarding",
         L10nKey::CmdSshSaveConnection => "SSH: Save Connection as Host…",
         L10nKey::CmdSshSaveConnectionSubtitle => "Keep this connection as a saved host.",
+        L10nKey::CmdAddContainer => "Add Container…",
+        L10nKey::CmdAddContainerSubtitle => "Run a tty7 agent inside a running container.",
+        L10nKey::ContainerPromptTitle => "Add a container",
+        L10nKey::ContainerPromptName => "Container",
+        L10nKey::ContainerPromptPlaceholder => "name or id of a running container",
+        L10nKey::ContainerPromptHint => {
+            "tty7 installs its server inside the container over docker exec and leaves it \
+             running there. The container itself is not restarted."
+        }
+        L10nKey::ContainerPromptAdd => "Add Container",
+        L10nKey::ContainerPromptNeedsName => "Type the name or id of a running container.",
         L10nKey::CmdSshConnectWithInput => "SSH: Connect {input}",
         L10nKey::CmdAgentSendSelection => "Agent: Send Selection",
         L10nKey::CmdAgentSendSelectionSubtitle => "selection → running coding agent",

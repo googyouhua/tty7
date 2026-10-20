@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 pub mod asset;
 pub mod checksums;
+pub mod container;
 #[cfg(feature = "remote-install")]
 pub mod download;
 pub mod outcome;
@@ -62,6 +63,13 @@ pub struct RemoteStat {
 
 pub trait RemoteOps: Send + Sync {
     fn home_dir(&self) -> Result<String, String>;
+    /// The base directory the server install is rooted at, when it cannot be
+    /// the account's home — a container whose home is read-only or on a noexec
+    /// mount relocates rather than failing. `None`, the default, means the
+    /// home itself; every SSH host and WSL distribution answers that.
+    fn install_home(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
     fn run(&self, cmd: &str) -> Result<ExecOutput, String>;
     fn spawn_detached(&self, cmd: &str) -> Result<(), String>;
     fn launch_settle(&self, _binary: &str) -> Option<String> {
@@ -480,6 +488,13 @@ pub enum InstallError {
     Probe(String),
     Unsupported(UnsupportedTarget),
     NoHome(String),
+    /// No directory inside the container is both writable and executable, so
+    /// the server could not be put anywhere it could run. Relocation is tried
+    /// first; this is what is left when it finds nothing.
+    NoInstallLocation {
+        host: String,
+        reason: String,
+    },
     Download {
         url: String,
         reason: String,
@@ -520,6 +535,12 @@ impl std::fmt::Display for InstallError {
             Self::Unsupported(target) => write!(f, "{target}"),
             Self::NoHome(reason) => {
                 write!(f, "could not resolve the remote home directory: {reason}")
+            }
+            Self::NoInstallLocation { host, reason } => {
+                write!(
+                    f,
+                    "could not find a writable, executable place for tty7-server on {host}: {reason}"
+                )
             }
             Self::Download { url, reason } => {
                 write!(f, "could not download {url}: {reason}")
@@ -670,6 +691,32 @@ impl<'a> Installer<'a> {
         asset::remote_paths_on(platform, home, self.dialect.control, self.dialect.protocol)
     }
 
+    /// The base the server is installed under: the account's home, unless
+    /// [`RemoteOps::install_home`] moved it — a container whose home cannot
+    /// hold an executable. Every path-taking operation goes through here, so a
+    /// restart or a forced update looks where the first install actually put
+    /// the binary.
+    fn install_base(&self, home: &str) -> Result<String, InstallError> {
+        let base = match self.ops.install_home() {
+            Ok(Some(base)) => base,
+            Ok(None) => return Ok(home.to_string()),
+            Err(reason) => {
+                return Err(InstallError::NoInstallLocation {
+                    host: self.host.clone(),
+                    reason,
+                });
+            }
+        };
+        if base != home {
+            log::info!(
+                "{}: {} cannot hold an executable server; relocating the install to {base}",
+                self.host,
+                home,
+            );
+        }
+        Ok(base)
+    }
+
     /// Which server this machine needs, and what kind of machine it is.
     ///
     /// `uname -sm` first, exactly as before, so a Linux or macOS host is asked
@@ -745,7 +792,8 @@ impl<'a> Installer<'a> {
 
     fn put_ours_and_cycle(&self, force: bool) -> Result<(), InstallError> {
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
-        let paths = self.paths_for(RemotePlatform::of_sftp_home(&home), &home);
+        let install_home = self.install_base(&home)?;
+        let paths = self.paths_for(RemotePlatform::of_sftp_home(&home), &install_home);
 
         if force || !self.published_binary_serves_us(&paths)? {
             let (platform, asset) = self.detect_target()?;
@@ -795,7 +843,8 @@ impl<'a> Installer<'a> {
 
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
         self.check_platform(platform, &home)?;
-        let paths = self.paths_for(platform, &home);
+        let install_home = self.install_base(&home)?;
+        let paths = self.paths_for(platform, &install_home);
 
         let already = self
             .ops
@@ -830,7 +879,7 @@ impl<'a> Installer<'a> {
                     );
                     report.paths = asset::remote_paths_for_binary_on(
                         platform,
-                        &home,
+                        &install_home,
                         &exe,
                         self.dialect.control,
                         self.dialect.protocol,
@@ -1249,7 +1298,8 @@ impl<'a> Installer<'a> {
     /// left exactly as it was, and told to install one first.
     pub fn restart_daemon(&self) -> Result<(), InstallError> {
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
-        let paths = self.paths_for(RemotePlatform::of_sftp_home(&home), &home);
+        let install_home = self.install_base(&home)?;
+        let paths = self.paths_for(RemotePlatform::of_sftp_home(&home), &install_home);
         if !self.published_binary_serves_us(&paths)? {
             return Err(InstallError::NoServerToRestart {
                 host: self.host.clone(),

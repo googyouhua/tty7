@@ -59,6 +59,9 @@ struct FakeRemote {
     /// a login shell that could not read the script, which is the shape the
     /// no-`/proc` bug took on every Mac.
     stop_fails: bool,
+    /// What `install_home` answers: `None` keeps the account's home, a base
+    /// relocates the install, and an error is the "nowhere to install" case.
+    install_home: Option<Result<String, String>>,
     /// SFTP metadata reads — the realpath behind `home_dir` and every `stat`.
     /// The journal carries commands and writes; these are the other half of
     /// what a probe spends on the wire, and #695 is a count of both.
@@ -91,12 +94,26 @@ impl FakeRemote {
             speaks: Mutex::new(HashMap::new()),
             installed_speaks: Some(ours()),
             stop_fails: false,
+            install_home: None,
             sftp_reads: Mutex::new(0),
         }
     }
 
     fn refusing_to_stop(mut self) -> Self {
         self.stop_fails = true;
+        self
+    }
+
+    /// A machine whose home cannot hold an executable server: the server lives
+    /// under this base instead (`/run/user/…`, a mounted volume, …).
+    fn installing_at(mut self, base: &str) -> Self {
+        self.install_home = Some(Ok(base.to_string()));
+        self
+    }
+
+    /// Nowhere on the machine is both writable and executable.
+    fn with_nowhere_to_install(mut self, reason: &str) -> Self {
+        self.install_home = Some(Err(reason.to_string()));
         self
     }
 
@@ -211,6 +228,14 @@ impl RemoteOps for FakeRemote {
     fn home_dir(&self) -> Result<String, String> {
         *self.sftp_reads.lock().unwrap() += 1;
         Ok(HOME.to_string())
+    }
+
+    fn install_home(&self) -> Result<Option<String>, String> {
+        match &self.install_home {
+            None => Ok(None),
+            Some(Ok(base)) => Ok(Some(base.clone())),
+            Some(Err(reason)) => Err(reason.clone()),
+        }
     }
 
     fn run(&self, cmd: &str) -> Result<ExecOutput, String> {
@@ -1102,6 +1127,69 @@ fn an_unidentifiable_running_daemon_is_not_a_mismatch() {
         .run()
         .unwrap();
     assert!(report.mismatch.is_none());
+}
+
+#[test]
+fn a_relocated_server_is_where_every_path_operation_looks() {
+    // The container case: `$HOME` cannot hold an executable, so the install
+    // base is elsewhere. Restart and update have to look there too — using the
+    // account's home would report "nothing to restart" while a good server is
+    // running out of the relocated directory.
+    const BASE: &str = "/run/user/1000/tty7";
+    let relocated = asset::remote_paths(BASE, CONTROL, PROTOCOL).binary;
+    let remote = FakeRemote::new().installing_at(BASE);
+    remote.preinstall(&relocated, 0o755);
+    remote
+        .speaks
+        .lock()
+        .unwrap()
+        .insert(relocated.clone(), ours());
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@container-box:22")
+        .run()
+        .expect("the relocated server is reused, not reinstalled");
+    assert_eq!(
+        report.paths.binary, relocated,
+        "the binary lives at the base"
+    );
+    assert!(!report.installed, "nothing is pushed twice");
+
+    installer(&remote, &release, &user, "me@container-box:22")
+        .restart_daemon()
+        .expect("the relocated server is the one that gets restarted");
+}
+
+#[test]
+fn nowhere_to_install_is_refused_with_the_reason_before_anything_is_asked() {
+    let remote = FakeRemote::new()
+        .with_nowhere_to_install("no directory in the container is both writable and executable");
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let refused = installer(&remote, &release, &user, "me@container-box:22")
+        .run()
+        .expect_err("there is nowhere to put the server");
+
+    assert!(
+        matches!(
+            &refused,
+            InstallError::NoInstallLocation { host, reason }
+                if host == "me@container-box:22"
+                    && reason.contains("both writable and executable")
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        user.asked().is_empty(),
+        "the user is not asked to approve an install that has nowhere to go"
+    );
+    assert!(
+        remote.writes().is_empty(),
+        "nothing was written: {:?}",
+        remote.writes()
+    );
 }
 
 #[test]

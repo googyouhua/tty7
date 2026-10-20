@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A running container can host a workspace.** *Add Container…* in the command
+  palette takes a container name or id and attaches to it the way an SSH host is
+  attached: tty7 installs its server inside the container and speaks the daemon
+  protocol over `docker exec`, so the sidebar keeps the agent, branch and diff
+  for work done in a container. The transport rides the host's docker socket —
+  no container network, no listener, no extra run flags, and a `--network none`
+  container works the same. Containers are only entered when named; tty7 never
+  enumerates them.
+
 ### Fixed
 
 - **Volta shims, and anything else that reads its own argv[0], work again in

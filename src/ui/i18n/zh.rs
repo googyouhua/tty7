@@ -1598,6 +1598,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteProfileMissing => "该已保存的 SSH 主机配置已不存在",
         L10nKey::RemoteAliasMissing => "“{alias}”已不再位于 ~/.ssh/config 中",
         L10nKey::RemoteWslNoSsh => "WSL 工作区没有 SSH 连接",
+        L10nKey::RemoteContainerNoSsh => "容器工作区没有 SSH 连接",
         L10nKey::RemoteLocalStdioNoSsh => "本地 --stdio 工作区没有 SSH 连接",
         L10nKey::RemoteHostNotTty7 => "{machine} 已响应，但它不是 tty7 server：{error}",
         L10nKey::RemoteWorkspaceListFailed => "已连接到 {machine}，但其工作区列表获取失败：{error}",
@@ -1836,6 +1837,16 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshPortForwarding => "SSH：端口转发",
         L10nKey::CmdSshSaveConnection => "SSH：将当前连接保存为主机…",
         L10nKey::CmdSshSaveConnectionSubtitle => "把这条连接存成一个主机配置。",
+        L10nKey::CmdAddContainer => "添加容器…",
+        L10nKey::CmdAddContainerSubtitle => "在运行中的容器里运行 tty7 代理。",
+        L10nKey::ContainerPromptTitle => "添加容器",
+        L10nKey::ContainerPromptName => "容器",
+        L10nKey::ContainerPromptPlaceholder => "运行中容器的名称或 ID",
+        L10nKey::ContainerPromptHint => {
+            "tty7 通过 docker exec 把服务器安装进容器，并让它在容器内保持运行；容器本身不会被重启。"
+        }
+        L10nKey::ContainerPromptAdd => "添加容器",
+        L10nKey::ContainerPromptNeedsName => "请输入运行中容器的名称或 ID。",
         L10nKey::CmdSshConnectWithInput => "SSH：连接 {input}",
         L10nKey::CmdAgentSendSelection => "Agent：发送选区",
         L10nKey::CmdAgentSendSelectionSubtitle => "选区 → 运行中的编码 agent",

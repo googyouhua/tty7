@@ -65,6 +65,27 @@ that disagree never quietly half-work — tty7 installs the matching one instead
 On Windows, a WSL distribution is handed the Linux server the installer already
 shipped, so a WSL workspace needs no network access at all.
 
+## Containers
+
+A running Linux container can be a remote host too. Open the command palette
+and choose **Add Container…**, then type the container's name or id — there is
+no list to pick from, and tty7 never looks for containers on its own. The
+container must be running and provide a POSIX shell.
+
+tty7 reaches it through the docker CLI on the host that runs tty7
+(`docker exec -i …`), so nothing has to be mounted into the container, no port
+is opened, and a container on `--network none` works unchanged. The container's
+own start command, image and flags are never modified.
+
+The same server is installed as on an SSH host, under
+`~/.local/share/tty7/bin`. If that directory cannot hold an executable — a
+read-only home, a `noexec` mount — the install moves to the first writable,
+executable location the container offers and says where. The container's home
+is otherwise untouched, and the daemon it starts stops when the container does.
+
+To undo it, remove that directory inside the container (and stop the
+`tty7-server` process listed by `ps`); nothing outside it was written.
+
 ## Reattaching
 
 Remote workspaces are the point at which persistence pays off twice: the panes

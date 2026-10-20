@@ -3342,7 +3342,9 @@ pub(crate) fn host_form_label(target: &RemoteTarget) -> Option<&'static str> {
         RemoteTarget::Alias { .. } | RemoteTarget::Direct { .. } => {
             Some(t(L10nKey::SwitcherSaveAsHost))
         }
-        RemoteTarget::Wsl { .. } | RemoteTarget::LocalStdio { .. } => None,
+        RemoteTarget::Wsl { .. }
+        | RemoteTarget::Container { .. }
+        | RemoteTarget::LocalStdio { .. } => None,
     }
 }
 

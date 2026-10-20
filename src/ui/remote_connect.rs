@@ -129,6 +129,7 @@ fn live_label(cx: &App, target: &RemoteTarget) -> Option<String> {
             .map(|h| h.label),
         RemoteTarget::Alias { .. }
         | RemoteTarget::Direct { .. }
+        | RemoteTarget::Container { .. }
         | RemoteTarget::LocalStdio { .. } => None,
     }
 }
@@ -316,6 +317,7 @@ fn spec_from(
             ))
         }
         RemoteTarget::Wsl { .. } => Err(t(L10nKey::RemoteWslNoSsh).to_string()),
+        RemoteTarget::Container { .. } => Err(t(L10nKey::RemoteContainerNoSsh).to_string()),
         RemoteTarget::LocalStdio { .. } => Err(t(L10nKey::RemoteLocalStdioNoSsh).to_string()),
     }
 }
@@ -327,6 +329,7 @@ pub fn control_route(target: &RemoteTarget, cx: &App) -> Result<RouteHeader, Str
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
         ),
         RemoteTarget::Wsl { distro } => RouteHeader::wsl(distro.clone()),
+        RemoteTarget::Container { container } => RouteHeader::container(container.clone()),
         _ => spec_for(target, cx).map(RouteHeader::ssh)?,
     };
     note_origin(&header.target, target);
@@ -948,6 +951,37 @@ mod tests {
             alias: "build-box".into(),
         };
         assert_eq!(label_from_hosts(&[], &alias), "build-box");
+    }
+
+    /// The container's control route is what every connect, restart and
+    /// replace on a container rides. Without its own arm the SSH fallback
+    /// answers instead — with the very "a container has no SSH connection"
+    /// complaint this change adds.
+    #[gpui::test]
+    fn a_container_control_route_skips_ssh(cx: &mut gpui::TestAppContext) {
+        use crate::daemon::router::{RouteChannel, RouteTarget};
+
+        // The harness stands up the globals `spec_for` reads, so the last
+        // assertion below is about the container and not a missing `Config`.
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Container {
+            container: "web".into(),
+        };
+        let header = app
+            .update(cx, |_, cx| control_route(&target, cx))
+            .expect("a container is routed without SSH details");
+        assert!(
+            matches!(&header.target, RouteTarget::Container { container } if container == "web"),
+            "wrong target: {:?}",
+            header.target
+        );
+        assert_eq!(header.channel, RouteChannel::Control);
+        assert_eq!(header.describe(), "container web");
+        assert_eq!(header.for_pane().channel, RouteChannel::Pane);
+        assert!(
+            app.update(cx, |_, cx| spec_for(&target, cx)).is_err(),
+            "the SSH spec builder must still refuse a container"
+        );
     }
 
     fn request() -> InstallRequest {

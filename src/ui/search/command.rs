@@ -179,6 +179,8 @@ pub enum CommandKind {
     /// New Tab menu's row for it would.
     OpenShell(String),
     SaveSshSessionAsHost,
+    /// Opens the typed prompt that registers a running container as a host.
+    AddContainer,
     QuickConnect(String),
     SaveQuickConnect(String),
     OpenSshProfiles,
@@ -311,6 +313,7 @@ impl CommandKind {
             OpenSshProfiles => "ssh-manage-profiles",
             OneKeyAutofill => "onekey-autofill",
             SaveSshSessionAsHost => "ssh-save-connection",
+            AddContainer => "add-container",
             OpenSshConnect(_)
             | SetTheme(_)
             | GoToTab { .. }
@@ -487,6 +490,7 @@ impl CommandKind {
             | EditSavedProfile(_)
             | OpenShell(_)
             | SaveSshSessionAsHost
+            | AddContainer
             | QuickConnect(_)
             | SaveQuickConnect(_)
             | LaunchAgent(_)
@@ -1002,6 +1006,11 @@ mod tests {
                 rows[ix].title
             );
         });
+    }
+
+    #[test]
+    fn the_container_door_is_a_stable_command() {
+        assert_eq!(CommandKind::AddContainer.id(), Some("add-container"));
     }
 
     #[test]

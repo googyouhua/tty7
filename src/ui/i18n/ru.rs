@@ -1954,6 +1954,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteProfileMissing => "этот сохранённый профиль SSH больше не существует",
         L10nKey::RemoteAliasMissing => "«{alias}» больше нет в ~/.ssh/config",
         L10nKey::RemoteWslNoSsh => "У рабочей области WSL нет SSH-соединения",
+        L10nKey::RemoteContainerNoSsh => "У рабочей области-контейнера нет SSH-соединения",
         L10nKey::RemoteLocalStdioNoSsh => "У локальной рабочей области --stdio нет SSH-соединения",
         L10nKey::RemoteHostNotTty7 => "{machine} ответил, но не как сервер tty7: {error}",
         L10nKey::RemoteWorkspaceListFailed => {
@@ -2216,6 +2217,17 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshPortForwarding => "SSH: проброс портов",
         L10nKey::CmdSshSaveConnection => "SSH: сохранить как хост…",
         L10nKey::CmdSshSaveConnectionSubtitle => "Сохранить это подключение как хост.",
+        L10nKey::CmdAddContainer => "Добавить контейнер…",
+        L10nKey::CmdAddContainerSubtitle => "Запустить агент tty7 внутри работающего контейнера.",
+        L10nKey::ContainerPromptTitle => "Добавить контейнер",
+        L10nKey::ContainerPromptName => "Контейнер",
+        L10nKey::ContainerPromptPlaceholder => "имя или ID работающего контейнера",
+        L10nKey::ContainerPromptHint => {
+            "tty7 устанавливает свой сервер в контейнер через docker exec и оставляет его \
+             работать там. Сам контейнер не перезапускается."
+        }
+        L10nKey::ContainerPromptAdd => "Добавить контейнер",
+        L10nKey::ContainerPromptNeedsName => "Введите имя или ID работающего контейнера.",
         L10nKey::CmdSshConnectWithInput => "SSH: подключиться к {input}",
         L10nKey::CmdAgentSendSelection => "Агент: отправить выделение",
         L10nKey::CmdAgentSendSelectionSubtitle => "передать выделение работающему агенту",

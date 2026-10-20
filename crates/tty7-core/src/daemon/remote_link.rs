@@ -17,7 +17,40 @@ pub enum RemoteLink {
 
     Wsl(ProcessStream),
 
+    Container(ProcessStream),
+
     LocalStdio(ProcessStream),
+}
+
+/// The transport behind a link, split from the live handle so the label table
+/// can be exercised without spawning anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    StreamLocal,
+    SessionExec,
+    Wsl,
+    Container,
+    LocalStdio,
+}
+
+impl LinkKind {
+    pub const ALL: [LinkKind; 5] = [
+        LinkKind::StreamLocal,
+        LinkKind::SessionExec,
+        LinkKind::Wsl,
+        LinkKind::Container,
+        LinkKind::LocalStdio,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LinkKind::StreamLocal => "streamlocal",
+            LinkKind::SessionExec => "session-exec",
+            LinkKind::Wsl => "wsl-stdio",
+            LinkKind::Container => "container-stdio",
+            LinkKind::LocalStdio => "local-stdio",
+        }
+    }
 }
 
 impl RemoteLink {
@@ -52,19 +85,63 @@ impl RemoteLink {
         )?))
     }
 
-    pub fn kind_label(&self) -> &'static str {
+    /// The transport: `docker exec -i <ctr> <server> --stdio [--pane]`, spawned
+    /// against the **host's** docker CLI, so the protocol rides the docker API
+    /// over the host socket and the container needs no network of its own.
+    pub fn container(
+        container: &str,
+        server: &str,
+        channel: RouteChannel,
+    ) -> io::Result<RemoteLink> {
+        super::install::container::validate_container(container)?;
+        let args = super::install::container::docker_args(
+            container,
+            &container_link_argv(server, channel),
+        );
+        Ok(RemoteLink::Container(spawn_stdio_owned(
+            super::install::container::DOCKER_EXE,
+            &args,
+        )?))
+    }
+
+    /// A container link that runs a caller-supplied command instead of the
+    /// installed server, for the header's `server_command` (instance reuse and
+    /// the like). `sh -c` because the command is a whole command line.
+    pub fn container_shell(
+        container: &str,
+        command: &str,
+        channel: RouteChannel,
+    ) -> io::Result<RemoteLink> {
+        super::install::container::validate_container(container)?;
+        let command = channel.bridge_command(command);
+        let args = super::install::container::docker_args(container, &["sh", "-c", &command]);
+        Ok(RemoteLink::Container(spawn_stdio_owned(
+            super::install::container::DOCKER_EXE,
+            &args,
+        )?))
+    }
+
+    pub fn kind(&self) -> LinkKind {
         match self {
-            RemoteLink::StreamLocal(_) => "streamlocal",
-            RemoteLink::SessionExec(_) => "session-exec",
-            RemoteLink::Wsl(_) => "wsl-stdio",
-            RemoteLink::LocalStdio(_) => "local-stdio",
+            RemoteLink::StreamLocal(_) => LinkKind::StreamLocal,
+            RemoteLink::SessionExec(_) => LinkKind::SessionExec,
+            RemoteLink::Wsl(_) => LinkKind::Wsl,
+            RemoteLink::Container(_) => LinkKind::Container,
+            RemoteLink::LocalStdio(_) => LinkKind::LocalStdio,
         }
+    }
+
+    pub fn kind_label(&self) -> &'static str {
+        self.kind().label()
     }
 
     pub fn is_stdio_bridge(&self) -> bool {
         matches!(
             self,
-            RemoteLink::SessionExec(_) | RemoteLink::Wsl(_) | RemoteLink::LocalStdio(_)
+            RemoteLink::SessionExec(_)
+                | RemoteLink::Wsl(_)
+                | RemoteLink::Container(_)
+                | RemoteLink::LocalStdio(_)
         )
     }
 
@@ -77,6 +154,14 @@ impl RemoteLink {
 }
 
 fn wsl_link_argv<'a>(server: &'a str, channel: RouteChannel) -> Vec<&'a str> {
+    let mut argv = vec![server, "--stdio"];
+    if channel == RouteChannel::Pane {
+        argv.push("--pane");
+    }
+    argv
+}
+
+fn container_link_argv<'a>(server: &'a str, channel: RouteChannel) -> Vec<&'a str> {
     let mut argv = vec![server, "--stdio"];
     if channel == RouteChannel::Pane {
         argv.push("--pane");
@@ -296,7 +381,9 @@ impl AsyncRead for RemoteLink {
             RemoteLink::StreamLocal(s) | RemoteLink::SessionExec(s) => {
                 Pin::new(s).poll_read(cx, buf)
             }
-            RemoteLink::Wsl(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_read(cx, buf),
+            RemoteLink::Wsl(s) | RemoteLink::Container(s) | RemoteLink::LocalStdio(s) => {
+                Pin::new(s).poll_read(cx, buf)
+            }
         }
     }
 }
@@ -311,14 +398,18 @@ impl AsyncWrite for RemoteLink {
             RemoteLink::StreamLocal(s) | RemoteLink::SessionExec(s) => {
                 Pin::new(s).poll_write(cx, buf)
             }
-            RemoteLink::Wsl(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_write(cx, buf),
+            RemoteLink::Wsl(s) | RemoteLink::Container(s) | RemoteLink::LocalStdio(s) => {
+                Pin::new(s).poll_write(cx, buf)
+            }
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             RemoteLink::StreamLocal(s) | RemoteLink::SessionExec(s) => Pin::new(s).poll_flush(cx),
-            RemoteLink::Wsl(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_flush(cx),
+            RemoteLink::Wsl(s) | RemoteLink::Container(s) | RemoteLink::LocalStdio(s) => {
+                Pin::new(s).poll_flush(cx)
+            }
         }
     }
 
@@ -327,7 +418,9 @@ impl AsyncWrite for RemoteLink {
             RemoteLink::StreamLocal(s) | RemoteLink::SessionExec(s) => {
                 Pin::new(s).poll_shutdown(cx)
             }
-            RemoteLink::Wsl(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_shutdown(cx),
+            RemoteLink::Wsl(s) | RemoteLink::Container(s) | RemoteLink::LocalStdio(s) => {
+                Pin::new(s).poll_shutdown(cx)
+            }
         }
     }
 }
@@ -393,11 +486,35 @@ mod tests {
 
     #[test]
     fn every_variant_has_a_distinct_label() {
-        let labels = ["streamlocal", "session-exec", "wsl-stdio", "local-stdio"];
-        let mut sorted = labels.to_vec();
+        // Read the labels off the same function production uses — a hand-kept
+        // array here would stay green while `label` drifted or two kinds
+        // collided.
+        let labels: Vec<&str> = LinkKind::ALL.iter().map(|kind| kind.label()).collect();
+        assert_eq!(labels.len(), 5, "every link kind is listed");
+        let mut sorted = labels.clone();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), labels.len(), "labels must be distinguishable");
+    }
+
+    #[test]
+    fn the_container_link_asks_for_the_pane_socket_only_for_a_pane() {
+        let server = "/root/.local/share/tty7/bin/tty7-server-c8p6";
+        assert_eq!(
+            container_link_argv(server, RouteChannel::Control),
+            vec![server, "--stdio"]
+        );
+        assert_eq!(
+            container_link_argv(server, RouteChannel::Pane),
+            vec![server, "--stdio", "--pane"]
+        );
+    }
+
+    #[test]
+    fn a_container_link_refuses_a_name_that_could_be_an_option() {
+        let err = RemoteLink::container("--privileged", "tty7-server", RouteChannel::Control)
+            .expect_err("a leading dash is an option, not a container");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

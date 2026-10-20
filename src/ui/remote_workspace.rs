@@ -691,9 +691,16 @@ impl Tty7App {
                 // asked of a machine that was not connected yet) can now run:
                 // the link just told us the home directory to root it at.
                 if let Some(pending) = self.take_create_waiting_on(&choice.target) {
+                    // A container is entered to work in, so the first pane is a
+                    // shell on it; a plain host create keeps its empty-workspace
+                    // behavior for now.
+                    let opens_shell = matches!(pending.target, RemoteTarget::Container { .. });
                     self.close_switcher(window, cx);
                     self.create_remote_workspace(pending.target, home, window, cx);
                     self.name_fresh_workspace(pending.name, window, cx);
+                    if opens_shell {
+                        self.new_tab(window, cx);
+                    }
                 }
             }
             Err(error) => {
@@ -715,7 +722,23 @@ impl Tty7App {
                         self.pending_create = None;
                     }
                 }
-                self.connect = Some(ConnectFlow::Failed { choice, error });
+                let reopened = match &choice.target {
+                    RemoteTarget::Container { container } => Some(container.clone()),
+                    _ => None,
+                };
+                self.connect = Some(ConnectFlow::Failed {
+                    choice,
+                    error: error.clone(),
+                });
+                if let Some(container) = reopened
+                    && self.parked_create.is_none()
+                {
+                    // The typed prompt closed on submit and a container has no
+                    // row and no workspace to carry the reason, so hand it back
+                    // with the field still filled in. A parked create is the
+                    // exception: the update it waits on will finish the job.
+                    self.reopen_container_prompt(container, error, window, cx);
+                }
             }
         }
         cx.notify();
@@ -2849,6 +2872,63 @@ mod tests {
                 "the name travels with the create it was typed for"
             );
         });
+    }
+
+    /// A container is entered to work in, so its pending create must leave a
+    /// shell tab behind rather than an empty workspace. The alias case is here
+    /// to prove the rule is a container rule, not "always open a tab".
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_container_create_opens_a_first_shell_tab(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let handle = gpui::VisualContext::window_handle(&vcx);
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews::default(),
+            );
+            crate::ui::windows::WindowRegistry::init(cx);
+            crate::ui::windows::WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        for (target, opens_shell) in [
+            (
+                RemoteTarget::Container {
+                    container: "tty7-test-web".into(),
+                },
+                true,
+            ),
+            (
+                RemoteTarget::Alias {
+                    alias: "tty7-test-plain-host".into(),
+                },
+                false,
+            ),
+        ] {
+            let choice = HostChoice {
+                target: target.clone(),
+                label: target.to_string(),
+                detail: String::new(),
+            };
+            app.update_in(&mut vcx, |app, window, cx| {
+                app.pending_create = Some(crate::ui::switcher::PendingCreate {
+                    target: target.clone(),
+                    name: None,
+                });
+                app.connect = Some(ConnectFlow::Connecting {
+                    choice: choice.clone(),
+                });
+                app.finish_connect(Ok(fake_connected(&target.to_string())), window, cx);
+                // Each create lands in a fresh workspace, so the count is
+                // absolute: one shell for a container, nothing for an alias.
+                assert_eq!(
+                    app.tabs.len(),
+                    usize::from(opens_shell),
+                    "{target}: the create left the wrong number of panes behind"
+                );
+            });
+        }
     }
 
     /// The moment the replacement lands the machine is connected at again

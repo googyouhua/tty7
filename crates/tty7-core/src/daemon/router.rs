@@ -45,6 +45,7 @@ impl RouteChannel {
 pub enum RouteTarget {
     Ssh(Box<NativeSshSpec>),
     Wsl { distro: String },
+    Container { container: String },
     LocalStdio { program: String, args: Vec<String> },
 }
 
@@ -125,6 +126,17 @@ impl RouteHeader {
         }
     }
 
+    pub fn container(container: impl Into<String>) -> RouteHeader {
+        RouteHeader {
+            target: RouteTarget::Container {
+                container: container.into(),
+            },
+            server_command: None,
+            channel: RouteChannel::Control,
+            action: RouteAction::Forward,
+        }
+    }
+
     pub fn local_stdio(program: impl Into<String>, args: &[&str]) -> RouteHeader {
         RouteHeader {
             target: RouteTarget::LocalStdio {
@@ -152,6 +164,7 @@ impl RouteHeader {
         match &self.target {
             RouteTarget::Ssh(spec) => format!("ssh {}@{}:{}", spec.user, spec.host, spec.port),
             RouteTarget::Wsl { distro } => format!("wsl {distro}"),
+            RouteTarget::Container { container } => format!("container {container}"),
             RouteTarget::LocalStdio { program, .. } => format!("local {program}"),
         }
     }
@@ -162,6 +175,7 @@ impl RouteTarget {
         match self {
             RouteTarget::Ssh(spec) => ConnectionKey::from_spec(spec).as_str().to_string(),
             RouteTarget::Wsl { distro } => format!("wsl:{distro}"),
+            RouteTarget::Container { container } => format!("container:{container}"),
             RouteTarget::LocalStdio { program, .. } => format!("local-stdio:{program}"),
         }
     }
@@ -632,6 +646,23 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
         log::info!("wsl:{distro}: the bridge closed without answering; proving it again next time");
         crate::daemon::install::wsl::forget_wsl_server(distro);
     }
+    // The container arm: a `docker exec` of a server path that has stopped
+    // existing — the container was recreated by a fresh `docker run`, or the
+    // binary was removed — spawns fine and says nothing. Forget the container's
+    // note so the next pane proves it again rather than repeating a failure
+    // that would otherwise outlive every window. Forgetting is cheap here: the
+    // note is a plain map, with no install gate to wait on.
+    if let RouteTarget::Container { container } = &header.target
+        && header.server_command.is_none()
+        && !copied
+            .as_ref()
+            .is_ok_and(|(_, from_remote)| *from_remote > 0)
+    {
+        log::info!(
+            "container:{container}: the bridge closed without answering; proving it again next time"
+        );
+        crate::daemon::install::container::forget_container_server(container);
+    }
     // The same reasoning over SSH, where the note is the one this connection's
     // probe left behind. `exec` on a session channel succeeds whatever the
     // command turns out to be, so a server binary that has been deleted or
@@ -802,6 +833,33 @@ async fn restart_server(
                 .await??;
             Ok(())
         }
+        (RouteTarget::Container { container }, RouteAction::ReplaceServer) => {
+            let container = container.clone();
+            setup
+                .blocking(move || {
+                    crate::daemon::install::container::replace_container_server(&container)
+                })
+                .await??;
+            Ok(())
+        }
+        (RouteTarget::Container { container }, RouteAction::UpdateServer) => {
+            let container = container.clone();
+            setup
+                .blocking(move || {
+                    crate::daemon::install::container::update_container_server(&container)
+                })
+                .await??;
+            Ok(())
+        }
+        (RouteTarget::Container { container }, _) => {
+            let container = container.clone();
+            setup
+                .blocking(move || {
+                    crate::daemon::install::container::restart_container_daemon(&container)
+                })
+                .await??;
+            Ok(())
+        }
         _ => Err(anyhow::anyhow!(
             "restarting tty7's server is only supported for machines it serves, not {}",
             header.describe()
@@ -815,6 +873,15 @@ async fn ensure_wsl_server(distro: &str, setup: &RouteSetup) -> anyhow::Result<S
     let distro = distro.to_string();
     Ok(setup
         .blocking(move || crate::daemon::install::wsl::ensure_wsl_server(&distro))
+        .await??)
+}
+
+/// Prove (or recall) where this container's server is, off the reactor — the
+/// probe is a chain of blocking `docker exec` calls the first time round.
+async fn ensure_container_server(container: &str, setup: &RouteSetup) -> anyhow::Result<String> {
+    let container = container.to_string();
+    Ok(setup
+        .blocking(move || crate::daemon::install::container::ensure_container_server(&container))
         .await??)
 }
 
@@ -855,13 +922,39 @@ async fn open_link(
                 Err(e) => Err(e.into()),
             }
         }
+        RouteTarget::Container { container } => {
+            if let Some(command) = header.server_command.as_deref() {
+                let link = RemoteLink::container_shell(container, command, setup.channel)?;
+                return Ok((link, None));
+            }
+
+            let from_memory =
+                crate::daemon::install::container::remembered_container_server(container).is_some();
+            let binary = ensure_container_server(container, setup).await?;
+            match RemoteLink::container(container, &binary, setup.channel) {
+                Ok(link) => Ok((link, None)),
+                // Only worth a second look when the path came from memory: one
+                // proved a moment ago will prove the same, and re-proving it
+                // just doubles the wait before the error reaches the user.
+                Err(stale) if from_memory => {
+                    log::info!(
+                        "container:{container}: the remembered server would not start ({stale}); \
+                         looking again"
+                    );
+                    crate::daemon::install::container::forget_container_server(container);
+                    let binary = ensure_container_server(container, setup).await?;
+                    let link = RemoteLink::container(container, &binary, setup.channel)?;
+                    Ok((link, None))
+                }
+                Err(e) => Err(e.into()),
+            }
+        }
         RouteTarget::LocalStdio { program, args } => {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             Ok((RemoteLink::local_stdio(program, &args)?, None))
         }
     }
 }
-
 #[cfg(unix)]
 fn into_async(local: Stream) -> io::Result<tokio::net::UnixStream> {
     local.set_nonblocking(true)?;

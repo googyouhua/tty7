@@ -194,6 +194,10 @@ impl PaneWorkspace {
         use crate::daemon::router::RouteHeader;
         let header = match (&self.target, &self.spec) {
             (RemoteTarget::Wsl { distro }, _) => RouteHeader::wsl(distro.clone()),
+            // The bridge runs `docker exec -i <ctr> <server> --stdio --pane`:
+            // `for_pane` below is what adds `--pane`, exactly as it does for a
+            // WSL pane.
+            (RemoteTarget::Container { container }, _) => RouteHeader::container(container.clone()),
             (RemoteTarget::LocalStdio { program, args }, _) => {
                 let mut argv: Vec<&str> = args.iter().map(String::as_str).collect();
                 if !argv.contains(&"--pane") {
@@ -5617,6 +5621,37 @@ mod tests {
         let header = route.header().expect("WSL is routed");
         assert_eq!(header.describe(), "wsl Ubuntu-22.04");
         assert_eq!(header.channel, crate::daemon::router::RouteChannel::Pane);
+    }
+
+    #[test]
+    fn a_container_workspace_routes_to_its_container_on_the_pane_channel() {
+        let ws = PaneWorkspace {
+            workspace: crate::core::session::WorkspaceId::new(),
+            target: crate::core::session::RemoteTarget::Container {
+                container: "web".into(),
+            },
+            spec: None,
+            label: None,
+            resize_echo: false,
+            size_lease: false,
+        };
+        let route = PaneRoute::for_workspace(Some(&ws));
+        let header = route.header().expect("a container is routed");
+        assert_eq!(header.describe(), "container web");
+        assert_eq!(header.channel, crate::daemon::router::RouteChannel::Pane);
+        assert_eq!(
+            header.target.origin_key(),
+            "container:web",
+            "the origin key is what restart/replace address the container by"
+        );
+        assert!(
+            matches!(
+                &header.target,
+                crate::daemon::router::RouteTarget::Container { container } if container == "web"
+            ),
+            "a container pane must reach the docker-exec link, not the SSH path: {:?}",
+            header.target
+        );
     }
 
     #[test]

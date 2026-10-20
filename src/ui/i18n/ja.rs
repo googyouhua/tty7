@@ -1778,6 +1778,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteProfileMissing => "その保存済み SSH プロファイルはもう存在しません",
         L10nKey::RemoteAliasMissing => "`{alias}` は ~/.ssh/config にありません",
         L10nKey::RemoteWslNoSsh => "WSL ワークスペースには SSH 接続がありません",
+        L10nKey::RemoteContainerNoSsh => "コンテナワークスペースには SSH 接続がありません",
         L10nKey::RemoteLocalStdioNoSsh => {
             "ローカルの --stdio ワークスペースには SSH 接続がありません"
         }
@@ -2042,6 +2043,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshPortForwarding => "SSH: ポートフォワーディング",
         L10nKey::CmdSshSaveConnection => "SSH: この接続をホストとして保存…",
         L10nKey::CmdSshSaveConnectionSubtitle => "この接続を保存済みホストとして残します",
+        L10nKey::CmdAddContainer => "コンテナを追加…",
+        L10nKey::CmdAddContainerSubtitle => "実行中のコンテナ内で tty7 エージェントを動かします。",
+        L10nKey::ContainerPromptTitle => "コンテナを追加",
+        L10nKey::ContainerPromptName => "コンテナ",
+        L10nKey::ContainerPromptPlaceholder => "実行中コンテナの名前または ID",
+        L10nKey::ContainerPromptHint => {
+            "tty7 は docker exec でサーバーをコンテナ内に導入し、そこで動かし続けます。コンテナ自体は再起動しません。"
+        }
+        L10nKey::ContainerPromptAdd => "コンテナを追加",
+        L10nKey::ContainerPromptNeedsName => "実行中コンテナの名前または ID を入力してください。",
         L10nKey::CmdSshConnectWithInput => "SSH: {input} に接続",
         L10nKey::CmdAgentSendSelection => "エージェント: 選択範囲を送信",
         L10nKey::CmdAgentSendSelectionSubtitle => "選択範囲 → 実行中のコーディングエージェント",
