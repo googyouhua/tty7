@@ -145,3 +145,11 @@ The stdio transport docks mechanically into the existing `RouteTarget::LocalStdi
 
 **Manual checks (if no CLI):**
 - With a local Linux container running, register it, open a pane: confirm a shell inside the container and the container tag in the workspace list; reopen it and confirm no re-push; repeat with a `--network none` container.
+
+## ATDD Artifacts
+
+- Checklist: `_bmad-output/test-artifacts/atdd-checklist-1-container-transport-skeleton.md`
+- Acceptance scaffolds (RED, `#[ignore]`): `crates/tty7-core/src/daemon/install/container/atdd.rs`
+- Module wiring: `crates/tty7-core/src/daemon/install/container.rs` (`#[cfg(test)] mod atdd;`)
+- Criteria: AC-1…AC-4 (generated from the four acceptance bullets; story 1 retrofit)
+- Run: `USER=root LOGNAME=root cargo test -p tty7-core --lib atdd` (skipped) / `... -- --ignored` (activated)

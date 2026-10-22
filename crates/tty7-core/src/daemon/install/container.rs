@@ -680,6 +680,11 @@ fn put_server_in_container(container: &str, force: bool) -> io::Result<()> {
     Ok(())
 }
 
+// ATDD red-phase acceptance scaffolds for story 1. Test-only, no production
+// code; see the module header for why they live here instead of `tests/`.
+#[cfg(test)]
+mod atdd;
+
 #[cfg(test)]
 mod tests {
     use super::*;
