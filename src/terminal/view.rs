@@ -2135,6 +2135,32 @@ impl TerminalView {
         self.terminal.remote_context()
     }
 
+    /// The machine a workspace pane lives on, when nothing the shell itself
+    /// reported names it.
+    ///
+    /// [`Self::remote_context`] describes a shell that ssh'd onward; a
+    /// container pane's shell runs in the far daemon's own pty and reports no
+    /// SSH/WSL context, so the workspace target is the only thing that knows
+    /// the pane is in a container. The target is spelled the way the router
+    /// spells it — `container <name>`, from
+    /// [`RouteHeader::describe`](crate::daemon::router::RouteHeader::describe)
+    /// — so the card and the route can never disagree.
+    ///
+    /// `None` for a local pane, for any pane whose shell already named its
+    /// machine, and for every workspace target that is not a container: an SSH
+    /// or WSL workspace row keeps the answer it had.
+    pub fn machine_label(&self) -> Option<String> {
+        if self.remote_context().is_some() {
+            return None;
+        }
+        match self.workspace().map(|w| &w.target) {
+            Some(crate::core::session::RemoteTarget::Container { container }) => {
+                Some(crate::daemon::router::RouteHeader::container(container.clone()).describe())
+            }
+            _ => None,
+        }
+    }
+
     pub fn local_cwd(&self) -> Option<std::path::PathBuf> {
         self.paths_are_local().then(|| self.cwd())?
     }

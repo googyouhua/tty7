@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container works the same. Containers are only entered when named; tty7 never
   enumerates them.
 
+- **A container pane's sidebar card names its container.** The hover card now
+  spells the machine as `container <name>`, read from the pane's workspace and
+  named the way the router names the route.
+
 ### Fixed
 
 - **Volta shims, and anything else that reads its own argv[0], work again in

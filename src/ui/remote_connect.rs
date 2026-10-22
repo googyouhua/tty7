@@ -544,6 +544,16 @@ impl HostLinks {
     }
 }
 
+#[cfg(test)]
+impl HostLinks {
+    /// Plant the home a link would have reported, for tests that cannot stand
+    /// up a whole `RemoteHost`. Test-only: production homes come from the
+    /// control hello in [`Self::insert`].
+    pub(crate) fn set_home_for_test(cx: &mut App, id: HostId, home: PathBuf) {
+        cx.default_global::<HostLinks>().homes.insert(id, home);
+    }
+}
+
 pub fn install_detail(request: &InstallRequest) -> String {
     t_fmt(
         L10nKey::RemoteInstallDetail,

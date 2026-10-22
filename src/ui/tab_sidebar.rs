@@ -213,7 +213,8 @@ struct SidebarInfo {
     branch: Option<(SharedString, u32, u32)>,
     /// Full working directory, when the row's second line was elided.
     cwd: Option<SharedString>,
-    /// Remote host, when the avatar only shows a dot for it.
+    /// The machine the card names — the shell's own remote target, or a
+    /// container pane's workspace.
     host: Option<SharedString>,
 }
 
@@ -2152,11 +2153,14 @@ impl Tty7App {
         };
         // The host is read off the same leaf the title and cwd came from; a
         // split tab whose panes sit on different machines would otherwise
-        // name whichever one happens to be first.
+        // name whichever one happens to be first. A container pane's shell
+        // reports no `RemoteContext` (it runs in the far daemon's own pty),
+        // so the machine falls through to the pane's workspace target.
         if let Some(target) = tab.pane.focused_or_first(window, cx).and_then(|leaf| {
-            leaf.read(cx)
-                .remote_context()
+            let leaf = leaf.read(cx);
+            leaf.remote_context()
                 .map(|r| SharedString::from(r.target.clone()))
+                .or_else(|| leaf.machine_label().map(SharedString::from))
         }) {
             info.host = Some(target);
         }
@@ -3231,6 +3235,9 @@ fn git_click(
         Some((view.host_id(), cwd))
     })
 }
+
+#[cfg(test)]
+mod atdd;
 
 #[cfg(test)]
 mod fold_tests {

@@ -86,6 +86,13 @@ is otherwise untouched, and the daemon it starts stops when the container does.
 To undo it, remove that directory inside the container (and stop the
 `tty7-server` process listed by `ps`); nothing outside it was written.
 
+Container panes behave like any other remote pane in the sidebar: the agent
+avatar and status dot come from the process running inside the container, `cd`
+updates the row and the Info panel, new tabs and splits open in the container's
+own directory, and a row's hover card names the machine as `container <name>`.
+A shell that ssh's onward from inside the container names the farther machine
+instead, as it does on any other pane.
+
 ## Reattaching
 
 Remote workspaces are the point at which persistence pays off twice: the panes
