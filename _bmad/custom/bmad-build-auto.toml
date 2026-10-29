@@ -1,0 +1,8 @@
+[workflow]
+persistent_facts = [
+  "auto 模式默认使用 git worktree 隔离开发，无需询问用户，直接执行。",
+]
+
+activation_steps_prepend = [
+  "auto 模式跳过是否使用 worktree 的询问，直接按 using-git-worktrees Step 0-3 建立隔离 workspace：先检测是否已在 worktree（比较 GIT_DIR 与 GIT_COMMON 并排除 submodule，已在则复用）；否则直接在项目根 .worktrees/<branch-name> 创建 worktree，后续 setup、开发与测试一律在该 worktree 内执行。",
+]

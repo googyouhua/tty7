@@ -1,0 +1,8 @@
+[agent]
+persistent_facts = [
+  "开发隔离策略：无论当前是否已在 worktree 内，每次开发前都必须先询问用户是否使用 git worktree 隔离；未经用户明确同意不得擅自创建、切换或复用 worktree。",
+]
+
+activation_steps_prepend = [
+  "每次开发前必须先询问用户是否使用 worktree 隔离：先运行 using-git-worktrees Step 0 检测当前状态（比较 GIT_DIR 与 GIT_COMMON 并排除 submodule）并把结果告知用户——若已在 worktree 则说明路径与分支状态并询问是复用当前隔离环境还是新建/回主工作区，若不在则询问是否在项目根 .worktrees/<branch-name> 新建隔离环境；用户同意才按其 Step 1b 创建或进入对应 worktree 并在其中执行后续 setup 与测试，用户拒绝则在当前目录原地开发。禁止跳过询问直接创建。",
+]
