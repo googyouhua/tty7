@@ -307,6 +307,13 @@ impl SshPromptState {
         self.routed_host
     }
 
+    /// The attempt that asked the routed sheet on screen, if it named one. A
+    /// prompt the router raised outside a client connect has no attempt, and
+    /// neither does an empty sheet.
+    pub(crate) fn routed_attempt(&self) -> Option<crate::ui::remote_connect::AttemptId> {
+        self.routed.as_ref().and_then(|pending| pending.attempt)
+    }
+
     /// The banners stacked above the sheet, oldest first.
     #[cfg(test)]
     pub(crate) fn banners(&self) -> &[String] {
@@ -316,6 +323,18 @@ impl SshPromptState {
     #[cfg(test)]
     pub(crate) fn first_input(&self) -> Option<Entity<InputState>> {
         self.inputs.first().cloned()
+    }
+
+    /// Stand up a pane-owned sheet without a live handshake behind it.
+    #[cfg(test)]
+    pub(crate) fn set_pane_sheet_for_test(
+        &mut self,
+        pane: Entity<TerminalView>,
+        model: PromptModel,
+    ) {
+        self.pane = Some(pane);
+        self.pane_id = None;
+        self.model = Some(model);
     }
 
     pub(crate) fn new(cx: &mut Context<Tty7App>) -> Self {
@@ -537,27 +556,38 @@ impl Tty7App {
             .any(|view| view.entity_id() == pane.entity_id())
     }
 
-    pub(crate) fn clear_orphaned_pane_prompt(&mut self, cx: &mut Context<Self>) {
-        if !self.pane_auth_orphaned() {
-            return;
-        }
-        self.ssh_prompt.clear();
-        cx.notify();
-    }
-
-    /// Call off the routed sheet on screen when it belongs to `host` — the
-    /// connect it was asked by has been cancelled, and leaving the question up
-    /// would invite an answer into an attempt nobody is watching.
-    pub(crate) fn cancel_routed_auth(
+    pub(crate) fn clear_orphaned_pane_prompt(
         &mut self,
-        host: tty7_core::host::HostId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ssh_prompt.routed_host != Some(host) {
+        if !self.pane_auth_orphaned() {
             return;
         }
+        // The same way out every other sheet takes: it releases anything it
+        // held, hands focus back, and lets whatever else is asking have the
+        // window instead of leaving the app with no focused target.
+        self.dismiss_and_advance(window, cx);
+    }
+
+    /// Call off the routed sheet on screen when it belongs to `host` and was
+    /// asked by `attempt` — the connect it was asked by has been cancelled, and
+    /// leaving the question up would invite an answer into an attempt nobody is
+    /// watching. A sheet a newer attempt raised is left where it is.
+    pub(crate) fn cancel_routed_auth(
+        &mut self,
+        host: tty7_core::host::HostId,
+        attempt: crate::ui::remote_connect::AttemptId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.ssh_prompt.routed_host != Some(host)
+            || self.ssh_prompt.routed_attempt() != Some(attempt)
+        {
+            return false;
+        }
         self.cancel_ssh_prompt(window, cx);
+        true
     }
 
     pub(crate) fn submit_ssh_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -782,6 +812,12 @@ impl Tty7App {
                 // attempt mid-handshake. It gets the scrim, so it reads as
                 // modal, and Escape stays the only way out.
                 .bg(crate::ui::presets::scrim_fill(cx))
+                // Painted over the switcher now (a connect started there asks
+                // for its password while the switcher is still up), and gpui
+                // hands a click to every hitbox under it that is not
+                // occluded: without this, a click on the sheet's scrim would
+                // reach the switcher row beneath and pick a workspace.
+                .occlude()
                 .flex()
                 .flex_col()
                 .items_center()
@@ -1612,7 +1648,7 @@ mod focus_tests {
     #[gpui::test]
     fn a_sheet_whose_pane_is_gone_is_cleared(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
-        app.update_in(&mut vcx, |app, _window, cx| {
+        app.update_in(&mut vcx, |app, window, cx| {
             let pane = app.tabs[0].pane.terminals()[0].clone();
             app.ssh_prompt.pane = Some(pane);
             app.ssh_prompt.model = Some(host_key_sheet());
@@ -1620,7 +1656,7 @@ mod focus_tests {
 
             app.tabs.clear();
             assert!(app.pane_auth_orphaned(), "the tab that held it is gone");
-            app.clear_orphaned_pane_prompt(cx);
+            app.clear_orphaned_pane_prompt(window, cx);
             assert!(
                 app.ssh_prompt.model.is_none(),
                 "nothing can answer it, so it comes down"

@@ -1899,7 +1899,6 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneLeasedBy => "Используется на {by}, размер подогнан под его экран",
         L10nKey::RemoteActionConnect => "Подключиться",
         L10nKey::RemoteActionRetry => "Повторить",
-        L10nKey::RemoteActionCancel => "Отмена",
         L10nKey::RemoteActionRemoveEntry => "Удалить запись",
         L10nKey::RemoteNoConnectionDetails => {
             "Окно показывает рабочую область на {machine}, но у tty7 нет данных для подключения. Проверьте, что её профиль SSH или запись в ~/.ssh/config ещё существует."

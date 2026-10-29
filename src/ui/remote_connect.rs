@@ -587,6 +587,51 @@ pub fn human_bytes(n: u64) -> String {
 
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Which connect an authentication prompt belongs to.
+///
+/// The same machine can be connected to twice in a row — the first attempt
+/// cancelled while it is still on the wire, the second already dialling — and a
+/// password asked by one, or a result that arrives late for one, must not be
+/// spent on the other. The counter is process-wide and never wraps in any
+/// session's lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AttemptId(u64);
+
+static NEXT_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_attempt() -> AttemptId {
+    AttemptId(NEXT_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The attempt currently on the wire for each machine, if one is.
+///
+/// The router builds a prompt on a daemon thread with no window and no flow to
+/// look at, so this is how a `PendingAuth` learns which connect asked it. A
+/// prompt for a cancelled attempt is then answered into nothing instead of into
+/// whichever connect happens to be current when the user types.
+static ATTEMPT_BY_HOST: std::sync::LazyLock<Mutex<HashMap<HostId, AttemptId>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn note_attempt(host: HostId, attempt: AttemptId) {
+    if let Ok(mut map) = ATTEMPT_BY_HOST.lock() {
+        map.insert(host, attempt);
+    }
+}
+
+/// Forget `attempt` only if it is still the one on the wire. A retired attempt
+/// must not take a newer one's place with it.
+pub(crate) fn retire_attempt(host: HostId, attempt: AttemptId) {
+    if let Ok(mut map) = ATTEMPT_BY_HOST.lock()
+        && map.get(&host) == Some(&attempt)
+    {
+        map.remove(&host);
+    }
+}
+
+pub(crate) fn current_attempt(host: HostId) -> Option<AttemptId> {
+    ATTEMPT_BY_HOST.lock().ok()?.get(&host).copied()
+}
+
 pub struct PendingInstall {
     pub request: InstallRequest,
     reply: std::sync::mpsc::SyncSender<InstallDecision>,
@@ -661,6 +706,25 @@ pub fn take_pending_install() -> Option<PendingInstall> {
     MAILBOX.lock().ok()?.pop()
 }
 
+/// Drop the install-consent question this machine is waiting on, if one is.
+///
+/// A connect that was called off must not later pop a modal about installing a
+/// server for it — and must not leave the far end waiting on that answer.
+pub fn cancel_pending_install(host: HostId) {
+    let Ok(mut mailbox) = MAILBOX.lock() else {
+        return;
+    };
+    let all: Vec<PendingInstall> = mailbox.drain(..).collect();
+    let (ours, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| {
+        origin_host(&p.request.host).unwrap_or_else(|| HostId::from_connection_key(&p.request.host))
+            == host
+    });
+    *mailbox = rest;
+    for pending in ours {
+        pending.answer(InstallDecision::Decline);
+    }
+}
+
 pub struct PendingAuth {
     pub host: HostId,
     pub prompt: AuthPromptKind,
@@ -676,6 +740,11 @@ pub struct PendingAuth {
     /// The route already carried a stored password into this attempt, so a
     /// password prompt arriving anyway means the server turned it down.
     pub auto_supplied_password: bool,
+    /// The connect that asked this, when one was on the wire for the machine.
+    /// `None` for a prompt raised outside a client connect (a route the GUI
+    /// itself dials) — those cannot be tied to an attempt and are answered by
+    /// whoever is at the keyboard.
+    pub attempt: Option<AttemptId>,
     reply: std::sync::mpsc::SyncSender<AuthResponse>,
     /// Alive for exactly as long as someone is waiting on `reply`. The asker
     /// holds the only strong count and drops it the moment it stops waiting —
@@ -718,6 +787,7 @@ impl PendingAuth {
             prompt,
             endpoint: None,
             auto_supplied_password: false,
+            attempt: None,
             reply,
             asker: Arc::downgrade(&asker),
         };
@@ -815,6 +885,7 @@ fn ask_routed(
             prompt: prompt.clone(),
             endpoint,
             auto_supplied_password,
+            attempt: current_attempt(host),
             reply: tx,
             asker: Arc::downgrade(&asker),
         });
@@ -826,18 +897,29 @@ pub fn take_pending_auth() -> Option<PendingAuth> {
     AUTH_MAILBOX.lock().ok()?.pop()
 }
 
-/// Answer every prompt this machine still has in the mailbox with `Cancelled`.
+/// Answer every prompt this attempt still has in the mailbox with `Cancelled`.
 ///
 /// A connect that was called off may have asked its question microseconds
 /// before the pump could raise it. Left in the mailbox it would be raised on
 /// the next tick — for an attempt nobody is watching — and, worse, the asker
-/// would go on waiting for an answer nobody wants to give.
-pub fn cancel_pending_auth(host: HostId) {
+/// would go on waiting for an answer nobody wants to give. Prompted by a
+/// different attempt for the same machine is none of this one's business.
+pub fn cancel_pending_auth(host: HostId, attempt: AttemptId) {
+    cancel_pending_auth_where(|p| p.host == host && p.attempt == Some(attempt));
+}
+
+/// The same, for every prompt the machine has, whatever attempt asked it. Used
+/// when the machine is disconnected outright: there is nothing left to answer.
+pub fn cancel_pending_auth_for_host(host: HostId) {
+    cancel_pending_auth_where(|p| p.host == host);
+}
+
+fn cancel_pending_auth_where(mut theirs: impl FnMut(&PendingAuth) -> bool) {
     let Ok(mut mailbox) = AUTH_MAILBOX.lock() else {
         return;
     };
     let all: Vec<PendingAuth> = mailbox.drain(..).collect();
-    let (ours, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| p.host == host);
+    let (ours, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| theirs(p));
     *mailbox = rest;
     for pending in ours {
         pending.answer(AuthResponse::Cancelled);

@@ -1422,7 +1422,6 @@ l10n_keys! {
     PaneLeasedBy,
     RemoteActionConnect,
     RemoteActionRetry,
-    RemoteActionCancel,
     RemoteActionRemoveEntry,
     RemoteNoConnectionDetails,
     RemoteThisComputer,

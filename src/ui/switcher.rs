@@ -112,7 +112,7 @@ fn link_from(
     has_link: bool,
 ) -> Link {
     match connect {
-        Some(ConnectFlow::Connecting { choice }) if &choice.target == target => {
+        Some(ConnectFlow::Connecting { choice, .. }) if &choice.target == target => {
             return Link::Connecting;
         }
         Some(ConnectFlow::Failed { choice, .. }) if &choice.target == target => {
@@ -2094,7 +2094,7 @@ impl Tty7App {
                             let id = gpui::ElementId::from("switcher-cancel-connect");
                             row.child(
                                 Button::new((id, group.key.clone()))
-                                    .label(t(L10nKey::RemoteActionCancel))
+                                    .label(t(L10nKey::Cancel))
                                     .xsmall()
                                     .ghost()
                                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -3769,6 +3769,7 @@ mod tests {
                 label: "gpu-lab".into(),
                 detail: String::new(),
             },
+            attempt: crate::ui::remote_connect::next_attempt(),
         };
 
         assert_eq!(

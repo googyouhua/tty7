@@ -1532,7 +1532,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneLeasedBy => "正在 {by} 上使用，按它的屏幕尺寸显示",
         L10nKey::RemoteActionConnect => "连接",
         L10nKey::RemoteActionRetry => "重试",
-        L10nKey::RemoteActionCancel => "取消",
         L10nKey::RemoteActionRemoveEntry => "移除条目",
         L10nKey::RemoteNoConnectionDetails => {
             "此窗口是 {machine} 上的工作区，但 tty7 没有它的连接信息了——检查其 SSH 配置或 ~/.ssh/config 条目是否还在。"
