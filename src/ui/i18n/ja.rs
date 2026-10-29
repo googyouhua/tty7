@@ -1719,6 +1719,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneLeasedBy => "{by} で使用中（その画面サイズで表示）",
         L10nKey::RemoteActionConnect => "接続",
         L10nKey::RemoteActionRetry => "再試行",
+        L10nKey::RemoteActionCancel => "キャンセル",
         L10nKey::RemoteActionRemoveEntry => "エントリを削除",
         L10nKey::RemoteNoConnectionDetails => {
             "このウィンドウは {machine} 上のワークスペースですが、tty7 に接続情報がありません。SSH プロファイルか ~/.ssh/config の項目が残っているか確認してください"

@@ -1649,6 +1649,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PaneLeasedBy => "In use on {by}, at its screen size",
         L10nKey::RemoteActionConnect => "Connect",
         L10nKey::RemoteActionRetry => "Retry",
+        L10nKey::RemoteActionCancel => "Cancel",
         L10nKey::RemoteActionRemoveEntry => "Remove entry",
         L10nKey::RemoteNoConnectionDetails => {
             "This window is a workspace on {machine}, but tty7 has no connection details for it — check its SSH profile or ~/.ssh/config entry still exists."

@@ -826,6 +826,24 @@ pub fn take_pending_auth() -> Option<PendingAuth> {
     AUTH_MAILBOX.lock().ok()?.pop()
 }
 
+/// Answer every prompt this machine still has in the mailbox with `Cancelled`.
+///
+/// A connect that was called off may have asked its question microseconds
+/// before the pump could raise it. Left in the mailbox it would be raised on
+/// the next tick — for an attempt nobody is watching — and, worse, the asker
+/// would go on waiting for an answer nobody wants to give.
+pub fn cancel_pending_auth(host: HostId) {
+    let Ok(mut mailbox) = AUTH_MAILBOX.lock() else {
+        return;
+    };
+    let all: Vec<PendingAuth> = mailbox.drain(..).collect();
+    let (ours, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| p.host == host);
+    *mailbox = rest;
+    for pending in ours {
+        pending.answer(AuthResponse::Cancelled);
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn post_pending_auth(pending: PendingAuth) {
     AUTH_MAILBOX.lock().unwrap().push(pending);

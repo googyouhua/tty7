@@ -129,7 +129,8 @@ impl RemoteStatus {
 
     pub fn action_label(&self) -> Option<&'static str> {
         match self {
-            RemoteStatus::Attached | RemoteStatus::Connecting => None,
+            RemoteStatus::Attached => None,
+            RemoteStatus::Connecting => Some(t(L10nKey::RemoteActionCancel)),
             RemoteStatus::Reconnecting { .. } => Some(t(L10nKey::RemoteActionRetryNow)),
             RemoteStatus::Preempted { .. } => Some(t(L10nKey::RemoteActionTakeBack)),
             RemoteStatus::Disconnected => Some(t(L10nKey::RemoteActionConnect)),
@@ -299,6 +300,11 @@ pub(crate) enum StripAction {
     /// Connect, reconnect, retry, take back — every move that amounts to
     /// "try the link again now".
     Retry,
+    /// Call off the attempt this window is watching. Offered only while a
+    /// `connect` of its own is still in flight: `Connecting` also covers a
+    /// Take Back on the wire and a supervisor's first dial, and neither of
+    /// those is this window's to cancel.
+    Cancel,
     UpdateServer {
         target: RemoteTarget,
         label: String,
@@ -512,6 +518,19 @@ impl Tty7App {
         cx: &gpui::App,
     ) -> Option<(&'static str, StripAction)> {
         let label = status.action_label()?;
+        if matches!(status, RemoteStatus::Connecting) {
+            // Only an attempt this window started can be called off here. A
+            // reclaim's `Connecting` and the supervisor's own first dial are
+            // not this window's `connect`, and a button that did nothing would
+            // be worse than no button.
+            let mine = WorkspaceStore::remote_ref(cx, self.workspace).is_some_and(|own| {
+                self.connect
+                    .as_ref()
+                    .and_then(ConnectFlow::choice)
+                    .is_some_and(|choice| choice.target == own.target)
+            });
+            return mine.then_some((label, StripAction::Cancel));
+        }
         let RemoteStatus::ServerMismatch(refusal) = status else {
             return Some((label, StripAction::Retry));
         };
@@ -555,12 +574,49 @@ impl Tty7App {
     ) {
         match action {
             StripAction::Retry => self.remote_retry(cx),
+            StripAction::Cancel => self.cancel_connect(window, cx),
             StripAction::UpdateServer {
                 target,
                 label,
                 action,
             } => self.confirm_replace_remote_server(target, label, action, window, cx),
         }
+    }
+
+    /// Call off the manual connect this window is watching.
+    ///
+    /// The attempt itself runs on a background thread that cannot be
+    /// interrupted: this takes away everything that could still deliver its
+    /// result to the screen. `connect` is cleared, so an answer that lands
+    /// later is discarded by `finish_connect`'s first line; the questions that
+    /// attempt is still waiting on are answered `Cancelled`, which is what
+    /// makes the far end stop waiting too; and the window's own routed sheet,
+    /// if it is this machine's, comes down.
+    pub(crate) fn cancel_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(choice) = (match self.connect.take() {
+            Some(ConnectFlow::Connecting { choice }) => Some(choice),
+            other => {
+                self.connect = other;
+                None
+            }
+        }) else {
+            return;
+        };
+        let host = choice.target.host_id();
+        // The sheet first: closing it releases this machine's place in the
+        // queue, and anything that was waiting behind it gets it back.
+        self.cancel_routed_auth(host, window, cx);
+        cancel_auth_prompts(host, cx);
+        // A create waiting on this link dies with the connect, exactly as it
+        // does when the switcher disconnects the machine: otherwise the next
+        // successful connect would grow the workspace the user just called off.
+        for slot in [&mut self.pending_create, &mut self.parked_create] {
+            if slot.as_ref().is_some_and(|p| p.target == choice.target) {
+                *slot = None;
+            }
+        }
+        log::info!("connect to {} cancelled by the user", choice.label);
+        cx.notify();
     }
 
     pub(crate) fn remote_retry(&mut self, cx: &mut Context<Self>) {
@@ -603,6 +659,18 @@ impl Tty7App {
         cx.notify();
 
         let host_id = choice.target.host_id();
+        // The window to raise a password prompt in if this attempt asks for
+        // one before the machine has an open workspace here. Without this the
+        // prompt had nowhere to land when the connect was started from the
+        // switcher, and the attempt sat until the far end's grace time ran out.
+        cx.default_global::<RemoteLinks>()
+            .auth_window
+            .insert(host_id, self.workspace);
+        // With no workspace open on the machine yet, the supervisor has
+        // nothing to supervise and would stop on its first tick. Its prompt
+        // pump is still the only thing that can deliver a password sheet, so
+        // keep it running for as long as this attempt is on the wire.
+        RemoteLinks::ensure_running(cx);
         remote_connect::clear_install_progress(host_id);
         self.watch_for_install_consent(host_id, cx);
         cx.spawn(async move |this, cx| {
@@ -618,8 +686,17 @@ impl Tty7App {
             // window pointed at this machine *and* takes away the Update
             // Server button, which is the one thing that could have fixed it.
             remote_connect::clear_install_progress(host_id);
+            // Same reason, and one more: if the window that started this
+            // connect has closed, `update_in` fails and `finish_connect` never
+            // runs. The record has to retire here or the supervisor's pump
+            // stays up for a prompt that can never be asked again.
+            cx.update(|cx| {
+                cx.default_global::<RemoteLinks>()
+                    .auth_window
+                    .remove(&host_id);
+            });
             let _ = this.update_in(cx, |this, window, cx| {
-                this.finish_connect(result, window, cx)
+                this.finish_connect(host_id, result, window, cx)
             });
         })
         .detach();
@@ -658,6 +735,7 @@ impl Tty7App {
 
     fn finish_connect(
         &mut self,
+        attempt: HostId,
         result: Result<remote_connect::Connected, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -665,6 +743,24 @@ impl Tty7App {
         let Some(choice) = self.connect.as_ref().and_then(ConnectFlow::choice).cloned() else {
             return;
         };
+        // The result belongs to the attempt that was started for `attempt`, and
+        // a window may have moved on since: the user cancelled that connect and
+        // started another one while this one was still on the wire. Applying
+        // the old result to the new flow would fail a machine the user is no
+        // longer connecting to and take away the window its own prompt was
+        // meant for.
+        if choice.target.host_id() != attempt {
+            log::info!(
+                "dropping the result of a connect to {attempt:?}: this window is now connecting to {}",
+                choice.label
+            );
+            return;
+        }
+        // The attempt this record was for is over, whichever way it went; a
+        // window that later started another connect writes its own.
+        cx.default_global::<RemoteLinks>()
+            .auth_window
+            .remove(&choice.target.host_id());
         match result {
             Ok(connected) => {
                 let home = connected.home.clone();
@@ -800,6 +896,17 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Going somewhere else drops the attempt this window was watching
+        // (`finish_connect` bows out for it from here on), so the window it
+        // would have raised prompts in is no longer this attempt's business.
+        if let Some(host) = self
+            .connect
+            .as_ref()
+            .and_then(ConnectFlow::choice)
+            .map(|choice| choice.target.host_id())
+        {
+            cx.default_global::<RemoteLinks>().auth_window.remove(&host);
+        }
         self.connect = None;
         RemoteLinks::ensure_running(cx);
         let previous = self.spawn_host(cx);
@@ -1359,6 +1466,10 @@ pub(crate) struct RemoteLinks {
         reason = "read by the prompt relay's drain, which lands with the routed auth sheet"
     )]
     pub(crate) auth: AuthSheetQueue,
+    /// The window that started a manual connect to this machine, while that
+    /// attempt is still in flight. A routed prompt that arrives before the
+    /// machine has an open workspace here has no other place to land.
+    auth_window: std::collections::HashMap<HostId, WorkspaceId>,
     pumping: bool,
 }
 
@@ -1549,6 +1660,7 @@ impl RemoteLinks {
 
     pub(crate) fn disconnect(cx: &mut gpui::App, host: HostId) {
         cx.default_global::<RemoteLinks>().suspended.insert(host);
+        cx.default_global::<RemoteLinks>().auth_window.remove(&host);
         for (workspace, _) in workspaces_on(cx, host) {
             release_panes(cx, workspace);
             let links = cx.default_global::<RemoteLinks>();
@@ -1586,6 +1698,15 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
 
     let bound = bound_machines(cx);
     if bound.is_empty() {
+        // A manual connect from the switcher has no workspace open on that
+        // machine yet, so there is nothing here to supervise — but the prompt
+        // pump is the only route a password sheet has to a window, and the
+        // attempt is sitting on it. Stay up until the attempt is over; its
+        // record retires with the result (`connect_to_host`), with a cancel,
+        // or with entering a workspace.
+        if !cx.default_global::<RemoteLinks>().auth_window.is_empty() {
+            return true;
+        }
         let links = cx.default_global::<RemoteLinks>();
         let forgotten = links.machines.len();
         links.machines.clear();
@@ -2076,6 +2197,10 @@ fn finish_attempt(
     // went. Retiring it here is what lets the failure — and the button that
     // answers it — reach the screen at all.
     remote_connect::clear_install_progress(host);
+    // A manual connect's prompt window record has done its job by now; a
+    // reconnect does not get to keep pointing prompts at whatever window
+    // happened to start an earlier attempt.
+    cx.default_global::<RemoteLinks>().auth_window.remove(&host);
     let label = remote_connect::target_label(cx, target);
     match outcome {
         Ok((connected, sent)) => {
@@ -2426,7 +2551,13 @@ pub(crate) fn release_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
 pub(crate) fn pump_auth_sheets(cx: &mut gpui::App) {
     #[cfg(test)]
     let _turn = remote_connect::claim_mailbox();
+    pump_auth_sheets_unlocked(cx);
+}
 
+/// The pump's body, without the test-only mailbox turn: tests that post a
+/// prompt and pump it have to hold that turn themselves, or another test's
+/// pump can take the prompt out from under them.
+fn pump_auth_sheets_unlocked(cx: &mut gpui::App) {
     let mut inbox: Vec<remote_connect::PendingAuth> = Vec::new();
     while let Some(pending) = remote_connect::take_pending_auth() {
         inbox.push(pending);
@@ -2437,17 +2568,33 @@ pub(crate) fn pump_auth_sheets(cx: &mut gpui::App) {
 
     // First take down any sheet whose attempt has stopped listening, so the
     // host's gate is free again for a prompt that is still wanted.
-    retract_abandoned_sheets(cx);
+    retract_stale_sheets(cx);
 
     for pending in inbox {
+        let host = pending.host;
         // Nobody is waiting for this answer any more. Raising it would put up
         // a sheet whose password goes nowhere; parking it would bring that
-        // sheet up later, behind whichever one is on screen now (#820).
+        // sheet up later, behind whichever one is on screen now (#820). And a
+        // prompt that gave up may still be holding this machine's place in
+        // the queue, which would then promote a host with nothing to show —
+        // give it back before dropping it.
         if pending.is_abandoned() {
             log::debug!("dropping a routed auth prompt its attempt gave up on");
+            cx.default_global::<RemoteLinks>().auth.withdraw(host);
             continue;
         }
-        let host = pending.host;
+        // A banner is not a question: it answers itself, needs no sheet, and
+        // must not take the machine's place at the front of the queue. Taking
+        // one used to hold that gate forever — `raise_routed_auth` pushed the
+        // text and returned without ever recording a `routed_host` to release
+        // — so every other machine's password stayed parked behind nothing.
+        if matches!(
+            &pending.prompt,
+            crate::daemon::protocol::AuthPromptKind::Banner { .. }
+        ) {
+            let _ = raise_auth_sheet(cx, pending);
+            continue;
+        }
         if !cx.default_global::<RemoteLinks>().auth.request(host) {
             park(pending);
             continue;
@@ -2464,10 +2611,9 @@ pub(crate) fn pump_auth_sheets(cx: &mut gpui::App) {
     }
 }
 
-/// A routed sheet stays up until someone answers it, and nothing on screen
-/// knows when the attempt that raised it has given up — so the pump looks, and
-/// takes those down itself.
-fn retract_abandoned_sheets(cx: &mut gpui::App) {
+/// Take down the sheets nothing can answer any more: one whose attempt has
+/// given up, and a pane sheet whose pane has gone.
+fn retract_stale_sheets(cx: &mut gpui::App) {
     if !cx.has_global::<crate::ui::windows::WindowRegistry>() {
         return;
     }
@@ -2475,14 +2621,24 @@ fn retract_abandoned_sheets(cx: &mut gpui::App) {
         let Some(app) = app.upgrade() else {
             continue;
         };
-        if !app.read(cx).routed_auth_abandoned() {
+        let (abandoned, orphaned) = {
+            let app = app.read(cx);
+            (app.routed_auth_abandoned(), app.pane_auth_orphaned())
+        };
+        if !abandoned && !orphaned {
             continue;
         }
         let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
             continue;
         };
         let _ = handle.update(cx, |_, window, cx| {
-            app.update(cx, |app, cx| app.retract_abandoned_routed_auth(window, cx))
+            app.update(cx, |app, cx| {
+                if abandoned {
+                    app.retract_abandoned_routed_auth(window, cx);
+                } else {
+                    app.clear_orphaned_pane_prompt(cx);
+                }
+            })
         });
     }
 }
@@ -2493,18 +2649,51 @@ pub(crate) enum SheetOutcome {
     Lost,
 }
 
+/// Which window a routed prompt is raised in.
+///
+/// The window that started the connect comes first: that is where the user is
+/// looking, and the machine may have no workspace of its own here yet — the
+/// exact case where this used to find nothing, leave the prompt undelivered
+/// and let the attempt sit until the far end's grace time ran out. A window
+/// already showing the machine is next, and the window in front last.
+fn auth_sheet_window(cx: &mut gpui::App, host: HostId) -> Option<WorkspaceId> {
+    if !cx.has_global::<crate::ui::windows::WindowRegistry>() {
+        return None;
+    }
+    let live = |cx: &mut gpui::App, id: WorkspaceId| {
+        crate::ui::windows::WindowRegistry::window_for(cx, id).is_some()
+    };
+    if let Some(workspace) = cx
+        .try_global::<RemoteLinks>()
+        .and_then(|links| links.auth_window.get(&host).copied())
+    {
+        if live(cx, workspace) {
+            return Some(workspace);
+        }
+    }
+    if let Some((workspace, _)) = workspaces_on(cx, host)
+        .into_iter()
+        .find(|(id, _)| live(cx, *id))
+    {
+        return Some(workspace);
+    }
+    crate::ui::windows::WindowRegistry::most_recent(cx)
+}
+
 fn raise_auth_sheet(cx: &mut gpui::App, pending: remote_connect::PendingAuth) -> SheetOutcome {
     let host = pending.host;
-    let Some((workspace, _)) = workspaces_on(cx, host).into_iter().next() else {
-        return SheetOutcome::GiveBack(pending);
-    };
-    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
-        return SheetOutcome::GiveBack(pending);
-    };
-    let Some(app) =
-        crate::ui::windows::WindowRegistry::app_for(cx, workspace).and_then(|app| app.upgrade())
-    else {
-        return SheetOutcome::GiveBack(pending);
+    let target = auth_sheet_window(cx, host).and_then(|workspace| {
+        let handle = crate::ui::windows::WindowRegistry::window_for(cx, workspace)?;
+        let app = crate::ui::windows::WindowRegistry::app_for(cx, workspace)?.upgrade()?;
+        Some((handle, app))
+    });
+    let Some((handle, app)) = target else {
+        // Nowhere to put it. Fail the attempt now, with a reason, instead of
+        // holding the machine's gate while the far end waits out its grace
+        // time and then reports "authentication cancelled" two minutes later.
+        log::warn!("no window to raise the authentication prompt for {host:?} in");
+        pending.answer(crate::daemon::protocol::AuthResponse::Cancelled);
+        return SheetOutcome::Lost;
     };
     handle
         .update(cx, move |_, window, cx| {
@@ -2515,6 +2704,33 @@ fn raise_auth_sheet(cx: &mut gpui::App, pending: remote_connect::PendingAuth) ->
 
 pub(crate) fn release_auth_sheet(host: HostId, cx: &mut gpui::App) {
     cx.default_global::<RemoteLinks>().auth.release(host);
+}
+
+/// Give up every question this machine is still asking, for a connect the user
+/// called off. Prompts still in the mailbox and prompts parked behind another
+/// machine's sheet are both answered `Cancelled` — the attempt on the other
+/// side stops waiting rather than sitting out its grace time — the machine
+/// gives up its place in the queue, and the record of the window that started
+/// the connect retires with them.
+fn cancel_auth_prompts(host: HostId, cx: &mut gpui::App) {
+    remote_connect::cancel_pending_auth(host);
+    if let Ok(mut parked) = PARKED.lock() {
+        let all: Vec<_> = parked.drain(..).collect();
+        let (ours, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| p.host == host);
+        *parked = rest;
+        for pending in ours {
+            pending.answer(crate::daemon::protocol::AuthResponse::Cancelled);
+        }
+    }
+    let links = cx.default_global::<RemoteLinks>();
+    links.auth.withdraw(host);
+    links.auth_window.remove(&host);
+    // A prompt that never reached a sheet still took the machine's place; the
+    // next machine in line gets it now instead of waiting for a sheet that
+    // will never close.
+    if links.auth.holder() == Some(host) {
+        links.auth.release(host);
+    }
 }
 
 static PARKED: Mutex<Vec<remote_connect::PendingAuth>> = Mutex::new(Vec::new());
@@ -2559,6 +2775,7 @@ pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::VisualContext as _;
 
     /// The per-workspace relink clock: a miss puts the workspace on the next
     /// backoff step, panes all found their way back retires the entry — so a
@@ -2829,14 +3046,19 @@ mod tests {
             app.connect = Some(ConnectFlow::Connecting {
                 choice: choice.clone(),
             });
-            app.finish_connect(Err(a_dialect_refusal()), window, cx);
+            app.finish_connect(target.host_id(), Err(a_dialect_refusal()), window, cx);
         });
 
         // The server over there was updated and the machine finally connected —
         // whether over `server_replaced`'s kick or the band's own retry, it
         // ends in the same place.
         app.update_in(&mut vcx, |app, window, cx| {
-            app.finish_connect(Ok(fake_connected("tty7-test-refused-box")), window, cx);
+            app.finish_connect(
+                target.host_id(),
+                Ok(fake_connected("tty7-test-refused-box")),
+                window,
+                cx,
+            );
         });
 
         app.update(cx, |app, cx| {
@@ -2874,7 +3096,7 @@ mod tests {
             app.connect = Some(ConnectFlow::Connecting {
                 choice: choice.clone(),
             });
-            app.finish_connect(Err(a_dialect_refusal()), window, cx);
+            app.finish_connect(target.host_id(), Err(a_dialect_refusal()), window, cx);
         });
 
         app.update(cx, |app, cx| {
@@ -3125,7 +3347,7 @@ mod tests {
                 RemoteStatus::Connecting,
                 false,
                 Some(t(L10nKey::RemoteNoticeDisconnected)),
-                None,
+                Some(t(L10nKey::RemoteActionCancel)),
             ),
             (
                 RemoteStatus::Reconnecting {
@@ -3407,8 +3629,9 @@ mod tests {
     /// left one prompt behind per attempt, parked behind the sheet on screen.
     /// Only the newest had anyone waiting on it; the rest came up one after
     /// another once the user was back, and answering them went nowhere. The
-    /// pump has to drop a prompt its attempt gave up on — and still keep the
-    /// one that is live.
+    /// pump has to drop a prompt its attempt gave up on, and it must not leave
+    /// the live one waiting on a window that does not exist: no window means
+    /// the attempt is failed now, not parked for a sheet that may never come.
     #[gpui::test]
     fn the_pump_drops_a_prompt_its_attempt_gave_up_on(cx: &mut gpui::TestAppContext) {
         let host = HostId(0x0820_0820);
@@ -3416,32 +3639,40 @@ mod tests {
             user: "me".into(),
             host: "dropped-box".into(),
         };
-        let (stale, _stale_rx, stale_asker) = remote_connect::PendingAuth::for_test(host, prompt());
-        let (live, _live_rx, _live_asker) = remote_connect::PendingAuth::for_test(host, prompt());
+        let (stale, stale_rx, stale_asker) = remote_connect::PendingAuth::for_test(host, prompt());
+        let (live, live_rx, _live_asker) = remote_connect::PendingAuth::for_test(host, prompt());
         drop(stale_asker);
         {
             let _turn = remote_connect::claim_mailbox();
             remote_connect::post_pending_auth(stale);
             remote_connect::post_pending_auth(live);
+            cx.update(|cx| {
+                crate::ui::windows::WindowRegistry::init(cx);
+                // The test-only body: the turn is already held above, and the
+                // production wrapper would try to take it again.
+                pump_auth_sheets_unlocked(cx);
+            });
         }
-
-        cx.update(|cx| {
-            crate::ui::windows::WindowRegistry::init(cx);
-            pump_auth_sheets(cx);
-        });
 
         // Under the mailbox turn, so no other test's pump is holding ours
         // half-way through.
         let _turn = remote_connect::claim_mailbox();
         let mut parked = PARKED.lock().unwrap();
-        let ours: Vec<_> = parked.iter().filter(|p| p.host == host).collect();
-        assert_eq!(
-            ours.len(),
-            1,
-            "the live prompt waits for a window; the abandoned one is gone"
+        assert!(
+            parked.iter().all(|p| p.host != host),
+            "the abandoned prompt is gone, and the live one had no window to wait for"
         );
-        assert!(!ours[0].is_abandoned(), "and the one kept is the live one");
         parked.retain(|p| p.host != host);
+        drop(parked);
+        drop(_turn);
+
+        // The abandoned one was dropped without an answer; the live one was
+        // told at once that the prompt could not be delivered.
+        assert!(stale_rx.try_recv().is_err());
+        assert_eq!(
+            live_rx.try_recv(),
+            Ok(crate::daemon::protocol::AuthResponse::Cancelled)
+        );
     }
 
     /// #820. Closing the sheet is an answer. The backoff put the same question
@@ -4034,5 +4265,415 @@ mod tests {
             );
             assert!(!links.suspended.contains(&host));
         });
+    }
+
+    // ---- routed auth prompt delivery ---------------------------------------
+
+    /// A window in the registry, on a local workspace, with nothing open on any
+    /// machine — the setup a switcher connect runs in.
+    fn window_on_a_local_workspace(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<Tty7App>, gpui::VisualTestContext) {
+        let (app, vcx) = crate::ui::app::test_window::harness(cx);
+        let handle = vcx.window_handle();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews::default(),
+            );
+            crate::ui::windows::WindowRegistry::init(cx);
+            crate::ui::windows::WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+        (app, vcx)
+    }
+
+    fn password_prompt(host: &str) -> crate::daemon::protocol::AuthPromptKind {
+        crate::daemon::protocol::AuthPromptKind::Password {
+            user: "deploy".into(),
+            host: host.into(),
+        }
+    }
+
+    /// SWITCHER_NO_WS. The machine has no open workspace here, so the prompt
+    /// used to have nowhere to land: it was parked forever while the attempt
+    /// behind it waited out the far end's grace time. It belongs in the window
+    /// that started the connect, and an answer there lets the attempt go on.
+    #[gpui::test]
+    fn a_prompt_lands_in_the_window_that_started_the_connect(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx) = window_on_a_local_workspace(cx);
+        let host = HostId(0x5eed_0001);
+        let (pending, rx, _asker) =
+            remote_connect::PendingAuth::for_test(host, password_prompt("fresh-box"));
+
+        let workspace = app.read_with(cx, |app, _| app.workspace);
+        cx.update(|cx| {
+            cx.default_global::<RemoteLinks>()
+                .auth_window
+                .insert(host, workspace);
+        });
+        assert!(matches!(
+            cx.update(|cx| raise_auth_sheet(cx, pending)),
+            SheetOutcome::Raised
+        ));
+        let shown = app.update(cx, |app, _| {
+            (app.ssh_prompt.is_up(), app.ssh_prompt.routed_host())
+        });
+        assert!(shown.0, "the sheet is up in the window that asked first");
+        assert_eq!(shown.1, Some(host));
+
+        // Typing into it answers the prompt, so the connect carries on rather
+        // than being cancelled by the sheet's timeout.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let input = app
+                .ssh_prompt
+                .first_input()
+                .expect("a password sheet has a field");
+            input.update(cx, |state, cx| state.set_value("hunter2", window, cx));
+            app.submit_ssh_prompt(window, cx);
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            crate::daemon::protocol::AuthResponse::Secret("hunter2".into())
+        );
+    }
+
+    /// QUEUED_HOSTS. The second machine waits rather than raising a second
+    /// sheet, and takes the stage the moment the first one closes.
+    #[gpui::test]
+    fn a_second_machine_takes_the_sheet_when_the_first_one_closes(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx) = window_on_a_local_workspace(cx);
+        let first = HostId(0x5eed_0002);
+        let second = HostId(0x5eed_0003);
+        let (a, _rx_a, _asker_a) =
+            remote_connect::PendingAuth::for_test(first, password_prompt("a"));
+        let (b, _rx_b, _asker_b) =
+            remote_connect::PendingAuth::for_test(second, password_prompt("b"));
+
+        assert!(cx.update(|cx| cx.default_global::<RemoteLinks>().auth.request(first)));
+        assert!(matches!(
+            cx.update(|cx| raise_auth_sheet(cx, a)),
+            SheetOutcome::Raised
+        ));
+        assert!(
+            !cx.update(|cx| cx.default_global::<RemoteLinks>().auth.request(second)),
+            "one sheet at a time"
+        );
+        assert_eq!(
+            cx.update(|cx| cx.default_global::<RemoteLinks>().auth.waiting()),
+            1
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.cancel_ssh_prompt(window, cx)
+        });
+        assert_eq!(
+            cx.update(|cx| cx.default_global::<RemoteLinks>().auth.holder()),
+            Some(second),
+            "closing the sheet hands the gate to the machine waiting behind it"
+        );
+
+        // The next tick offers the queued prompt again; with the gate free it
+        // is raised instead of parked.
+        assert!(matches!(
+            cx.update(|cx| raise_auth_sheet(cx, b)),
+            SheetOutcome::Raised
+        ));
+        assert_eq!(
+            app.update(cx, |app, _| app.ssh_prompt.routed_host()),
+            Some(second)
+        );
+    }
+
+    /// BANNER. A banner answers itself and has no sheet, so it must not take
+    /// the machine's place in the queue: the old path returned `Raised`
+    /// without ever recording a `routed_host`, and the gate was never given
+    /// back — every later machine parked behind a prompt nobody had.
+    #[gpui::test]
+    fn a_banner_shows_without_holding_the_machines_place(cx: &mut gpui::TestAppContext) {
+        let (app, _vcx) = window_on_a_local_workspace(cx);
+        let banner_host = HostId(0x5eed_0004);
+        let asking_host = HostId(0x5eed_0005);
+        let (password, _rx, _asker) =
+            remote_connect::PendingAuth::for_test(asking_host, password_prompt("later-box"));
+        let (banner, _brx, _basker) = remote_connect::PendingAuth::for_test(
+            banner_host,
+            crate::daemon::protocol::AuthPromptKind::Banner {
+                text: "authorized use only".into(),
+            },
+        );
+        {
+            let _turn = remote_connect::claim_mailbox();
+            // The mailbox is a stack: posting the password first makes the
+            // banner the first one pumped, which is the order that used to
+            // leave it holding the gate.
+            remote_connect::post_pending_auth(password);
+            remote_connect::post_pending_auth(banner);
+            cx.update(|cx| pump_auth_sheets_unlocked(cx));
+        }
+
+        assert!(
+            app.update(cx, |app, _| app
+                .ssh_prompt
+                .banners()
+                .iter()
+                .any(|text| text == "authorized use only")),
+            "the banner is on screen"
+        );
+        assert_eq!(
+            cx.update(|cx| cx.default_global::<RemoteLinks>().auth.holder()),
+            Some(asking_host),
+            "the banner never took the machine's place"
+        );
+        assert_eq!(
+            app.update(cx, |app, _| app.ssh_prompt.routed_host()),
+            Some(asking_host),
+            "and the password behind it is up in the next tick, not 120s later"
+        );
+    }
+
+    /// NO_WINDOW. With no window to raise the prompt in, the attempt is failed
+    /// now, with a reason — not left holding the gate while the far end waits
+    /// out `LoginGraceTime` and then reports "authentication cancelled".
+    #[gpui::test]
+    fn a_prompt_with_no_window_fails_the_attempt_now(cx: &mut gpui::TestAppContext) {
+        let host = HostId(0x5eed_0006);
+        let (pending, rx, _asker) =
+            remote_connect::PendingAuth::for_test(host, password_prompt("nowhere-box"));
+        cx.update(|cx| {
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews::default(),
+            );
+            crate::ui::windows::WindowRegistry::init(cx);
+        });
+
+        let started = Instant::now();
+        let outcome = cx.update(|cx| raise_auth_sheet(cx, pending));
+        assert!(matches!(outcome, SheetOutcome::Lost));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "delivery failure is immediate, not a two-minute wait"
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+            crate::daemon::protocol::AuthResponse::Cancelled,
+            "the attempt is told at once that nobody could answer"
+        );
+        assert_eq!(
+            cx.update(|cx| cx.default_global::<RemoteLinks>().auth.holder()),
+            None,
+            "and the gate is not held by a prompt that never went up"
+        );
+    }
+
+    /// NO_WINDOW's precondition. A connect from the switcher has no workspace
+    /// open on that machine, and the supervisor used to stop on its very first
+    /// tick — leaving nobody at all to deliver (or fail) the prompt. The pump
+    /// stays up for as long as the attempt is on the wire.
+    #[gpui::test]
+    fn a_connect_with_no_workspace_keeps_the_pump_up(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::core::config::pin_test_config_dir();
+            cx.set_global(crate::core::config::Config::default());
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews::default(),
+            );
+            crate::ui::windows::WindowRegistry::init(cx);
+
+            cx.default_global::<RemoteLinks>()
+                .auth_window
+                .insert(HostId(0x5eed_0010), WorkspaceId::new());
+            assert!(
+                pump_tick(cx),
+                "the attempt is still waiting on a prompt, so the pump stays up"
+            );
+            cx.default_global::<RemoteLinks>().auth_window.clear();
+            assert!(!pump_tick(cx), "and with the attempt over it stops again");
+        });
+    }
+
+    /// CANCEL. While the strip says Connecting, Cancel clears the flow, takes
+    /// down whatever was asking, and a result that lands afterwards finds
+    /// nothing to finish.
+    #[gpui::test]
+    fn cancelling_a_connect_clears_it_and_discards_a_late_result(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx) = window_on_a_local_workspace(cx);
+        let target = RemoteTarget::Alias {
+            alias: "cancel-box".into(),
+        };
+        let host = target.host_id();
+        let (pending, rx, _asker) =
+            remote_connect::PendingAuth::for_test(host, password_prompt("cancel-box"));
+
+        app.update(cx, |app, cx| {
+            app.connect = Some(ConnectFlow::Connecting {
+                choice: HostChoice {
+                    target: target.clone(),
+                    label: "cancel-box".into(),
+                    detail: String::new(),
+                },
+            });
+            cx.default_global::<RemoteLinks>()
+                .auth_window
+                .insert(host, app.workspace);
+            assert!(cx.default_global::<RemoteLinks>().auth.request(host));
+        });
+        assert!(matches!(
+            cx.update(|cx| raise_auth_sheet(cx, pending)),
+            SheetOutcome::Raised
+        ));
+        assert!(app.update(cx, |app, _| app.ssh_prompt.is_up()));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.cancel_connect(window, cx);
+
+            assert!(app.connect.is_none());
+            assert!(!app.ssh_prompt.is_up(), "no overlay left behind");
+            assert_eq!(app.ssh_prompt.routed_host(), None);
+            assert!(
+                !cx.default_global::<RemoteLinks>()
+                    .auth_window
+                    .contains_key(&host)
+            );
+            assert_eq!(cx.default_global::<RemoteLinks>().auth.holder(), None);
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            crate::daemon::protocol::AuthResponse::Cancelled
+        );
+
+        // The background attempt cannot be interrupted; its answer arrives
+        // whenever it arrives. With the flow gone, it is spent on nothing.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.finish_connect(host, Err("cancelled late".into()), window, cx);
+            assert!(app.connect.is_none(), "a late result must not resurrect it");
+        });
+    }
+
+    /// A result belongs to the attempt that produced it. Cancel one connect,
+    /// start another, and the first one's answer lands: it used to be read as
+    /// the *current* flow's result — the new machine marked failed and the
+    /// window its own prompt needed thrown away.
+    #[gpui::test]
+    fn a_late_result_from_a_cancelled_connect_does_not_land_on_the_next_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, mut vcx) = window_on_a_local_workspace(cx);
+        let cancelled = RemoteTarget::Alias {
+            alias: "cancelled-box".into(),
+        };
+        let next = RemoteTarget::Alias {
+            alias: "next-box".into(),
+        };
+        let (cancelled_host, next_host) = (cancelled.host_id(), next.host_id());
+        let choice = |target: &RemoteTarget, label: &str| HostChoice {
+            target: target.clone(),
+            label: label.into(),
+            detail: String::new(),
+        };
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.connect = Some(ConnectFlow::Connecting {
+                choice: choice(&cancelled, "cancelled-box"),
+            });
+            cx.default_global::<RemoteLinks>()
+                .auth_window
+                .insert(cancelled_host, app.workspace);
+            app.cancel_connect(window, cx);
+            assert!(app.connect.is_none());
+
+            // The user is already connecting somewhere else.
+            app.connect = Some(ConnectFlow::Connecting {
+                choice: choice(&next, "next-box"),
+            });
+            cx.default_global::<RemoteLinks>()
+                .auth_window
+                .insert(next_host, app.workspace);
+
+            // The cancelled attempt's answer arrives now.
+            app.finish_connect(cancelled_host, Err("too late".into()), window, cx);
+
+            match app.connect.as_ref() {
+                Some(ConnectFlow::Connecting { choice }) => {
+                    assert_eq!(choice.target, next, "B is still the one in flight")
+                }
+                _ => panic!("the late result must not finish B's attempt"),
+            }
+            assert!(
+                cx.default_global::<RemoteLinks>()
+                    .auth_window
+                    .contains_key(&next_host),
+                "and B's prompt still has the window that started it"
+            );
+        });
+    }
+
+    /// STALE_QUEUE. A prompt whose attempt gave up while it was still queued
+    /// must not be handed the gate when the sheet in front of it closes. The
+    /// pump used to drop it and leave its place in the queue behind, so the
+    /// next release promoted a host with nothing to show and the third machine
+    /// waited forever.
+    #[gpui::test]
+    fn a_queued_prompt_that_gave_up_is_never_promoted(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx) = window_on_a_local_workspace(cx);
+        let held = HostId(0x5eed_0007);
+        let gone = HostId(0x5eed_0008);
+        let next = HostId(0x5eed_0009);
+        let (first, _rx, _asker) =
+            remote_connect::PendingAuth::for_test(held, password_prompt("held"));
+
+        assert!(cx.update(|cx| cx.default_global::<RemoteLinks>().auth.request(held)));
+        assert!(matches!(
+            cx.update(|cx| raise_auth_sheet(cx, first)),
+            SheetOutcome::Raised
+        ));
+        assert!(
+            !cx.update(|cx| cx.default_global::<RemoteLinks>().auth.request(gone)),
+            "the second machine queues behind the sheet on screen"
+        );
+        assert_eq!(
+            cx.update(|cx| cx.default_global::<RemoteLinks>().auth.waiting()),
+            1
+        );
+
+        // ...and its attempt gives up before it ever holds the sheet.
+        let (abandoned, _arx, asker) =
+            remote_connect::PendingAuth::for_test(gone, password_prompt("gone-box"));
+        drop(asker);
+        assert!(abandoned.is_abandoned());
+        {
+            let _turn = remote_connect::claim_mailbox();
+            remote_connect::post_pending_auth(abandoned);
+            cx.update(|cx| pump_auth_sheets_unlocked(cx));
+        }
+        assert_eq!(
+            cx.update(|cx| cx.default_global::<RemoteLinks>().auth.waiting()),
+            0,
+            "the dead prompt gave up its place, it did not just vanish from it"
+        );
+
+        // Closing the sheet on screen promotes nobody.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.cancel_ssh_prompt(window, cx)
+        });
+        assert_eq!(
+            cx.update(|cx| cx.default_global::<RemoteLinks>().auth.holder()),
+            None
+        );
+
+        // So the third machine can raise its sheet.
+        let (third, _trx, _tasker) =
+            remote_connect::PendingAuth::for_test(next, password_prompt("next-box"));
+        assert!(cx.update(|cx| cx.default_global::<RemoteLinks>().auth.request(next)));
+        assert!(matches!(
+            cx.update(|cx| raise_auth_sheet(cx, third)),
+            SheetOutcome::Raised
+        ));
+        assert_eq!(
+            app.update(cx, |app, _| app.ssh_prompt.routed_host()),
+            Some(next)
+        );
     }
 }

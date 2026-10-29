@@ -1185,6 +1185,25 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// The switcher's Cancel on a connect still in flight. It is only offered
+    /// for this window's own attempt, and it goes through the same path as the
+    /// remote strip's Cancel — there is one way to call a connect off.
+    fn switcher_cancel_connect(
+        &mut self,
+        target: &RemoteTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mine = self
+            .connect
+            .as_ref()
+            .and_then(ConnectFlow::choice)
+            .is_some_and(|choice| &choice.target == target);
+        if mine {
+            self.cancel_connect(window, cx);
+        }
+    }
+
     fn switcher_disconnect(&mut self, target: &RemoteTarget, cx: &mut Context<Self>) {
         crate::ui::remote_workspace::RemoteLinks::disconnect(cx, target.host_id());
         if self
@@ -2038,6 +2057,12 @@ impl Tty7App {
                 out.push(self.render_error_band(group, &error, cx));
             } else if matches!(group.link, Link::Connecting | Link::Reconnecting { .. }) {
                 let theme = cx.theme();
+                let cancellable_target = group.target.clone().filter(|_| {
+                    self.connect
+                        .as_ref()
+                        .and_then(ConnectFlow::choice)
+                        .is_some_and(|choice| Some(&choice.target) == group.target.as_ref())
+                });
                 out.push(
                     h_flex()
                         .items_center()
@@ -2055,6 +2080,8 @@ impl Tty7App {
                         )
                         .child(
                             div()
+                                .flex_1()
+                                .min_w_0()
                                 .text_size(gpui::rems(11. / 16.))
                                 .text_color(theme.muted_foreground)
                                 .truncate()
@@ -2063,6 +2090,18 @@ impl Tty7App {
                                     &[("machine", &group.label)],
                                 )),
                         )
+                        .when_some(cancellable_target, |row, target| {
+                            let id = gpui::ElementId::from("switcher-cancel-connect");
+                            row.child(
+                                Button::new((id, group.key.clone()))
+                                    .label(t(L10nKey::RemoteActionCancel))
+                                    .xsmall()
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.switcher_cancel_connect(&target, window, cx);
+                                    })),
+                            )
+                        })
                         .into_any_element(),
                 );
             }

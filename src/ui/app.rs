@@ -10448,14 +10448,18 @@ impl Render for Tty7App {
                 .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
                     this.child(el)
                 })
+                .children(self.render_switcher(window, cx))
                 // Same reason, and the ssh prompt has more claim to it than any
                 // of them: nothing in the window can proceed until the password
                 // is answered, so the scrim has to cover the whole window and
-                // not stop at the terminal area.
+                // not stop at the terminal area. After the switcher on purpose:
+                // a connect started from the switcher asks for its password
+                // while the switcher is still up, and the sheet — with the
+                // focused field the user is typing into — has to be on top of
+                // the switcher's own scrim, not under it.
                 .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
                     this.child(el)
                 })
-                .children(self.render_switcher(window, cx))
                 .when_some(self.search.clone(), |this, search| this.child(search))
                 .children(gpui_component::Root::render_notification_layer(window, cx));
         let root = Self::with_editor_text_commands(root, cx);

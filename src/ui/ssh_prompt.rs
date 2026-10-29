@@ -294,6 +294,30 @@ pub(crate) struct SshPromptState {
 }
 
 impl SshPromptState {
+    /// Whether a sheet is on screen — a pane's own or a routed one.
+    #[cfg(test)]
+    pub(crate) fn is_up(&self) -> bool {
+        self.model.is_some()
+    }
+
+    /// The machine that asked the routed sheet on screen, when the sheet is a
+    /// routed one. `None` for a pane's own prompt and for an empty prompt.
+    #[cfg(test)]
+    pub(crate) fn routed_host(&self) -> Option<tty7_core::host::HostId> {
+        self.routed_host
+    }
+
+    /// The banners stacked above the sheet, oldest first.
+    #[cfg(test)]
+    pub(crate) fn banners(&self) -> &[String] {
+        &self.banners
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_input(&self) -> Option<Entity<InputState>> {
+        self.inputs.first().cloned()
+    }
+
     pub(crate) fn new(cx: &mut Context<Tty7App>) -> Self {
         Self {
             pane: None,
@@ -319,6 +343,7 @@ impl SshPromptState {
         self.inputs.clear();
         self.remember = false;
         self._subs.clear();
+        self.routed_host = None;
         if let Some(pending) = self.routed.take() {
             pending.answer(AuthResponse::Cancelled);
         }
@@ -415,6 +440,16 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> crate::ui::remote_workspace::SheetOutcome {
         use crate::ui::remote_workspace::SheetOutcome;
+        // A banner is not a question. It stacks above whatever sheet is up,
+        // needs no input and answers itself, so it must be delivered even then
+        // — and it must never take the machine's place at the head of the
+        // queue, which is the gate leak that parked every later password.
+        if let AuthPromptKind::Banner { text } = &pending.prompt {
+            self.ssh_prompt.banners.push(text.clone());
+            pending.answer(AuthResponse::Cancelled);
+            cx.notify();
+            return SheetOutcome::Raised;
+        }
         if self.ssh_prompt.model.is_some() {
             return SheetOutcome::GiveBack(pending);
         }
@@ -423,9 +458,8 @@ impl Tty7App {
             pending.endpoint.clone(),
             pending.auto_supplied_password,
         ) else {
-            if let AuthPromptKind::Banner { text } = &pending.prompt {
-                self.ssh_prompt.banners.push(text.clone());
-            }
+            // Only a banner has no model, and banners returned above; this is
+            // the belt-and-braces answer for a prompt kind that grows one.
             pending.answer(AuthResponse::Cancelled);
             cx.notify();
             return SheetOutcome::Raised;
@@ -483,6 +517,47 @@ impl Tty7App {
             return;
         }
         self.dismiss_and_advance(window, cx);
+    }
+
+    /// The pane this sheet belongs to is not in any tab any more. Its terminal
+    /// cannot answer and nobody can reach it, so the sheet would sit there for
+    /// the rest of the session — and, since the sheet is rendered whether or
+    /// not its pane has focus, it would cover every later routed prompt.
+    pub(crate) fn pane_auth_orphaned(&self) -> bool {
+        let Some(pane) = self.ssh_prompt.pane.as_ref() else {
+            return false;
+        };
+        if self.ssh_prompt.model.is_none() {
+            return false;
+        }
+        !self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.pane.terminals())
+            .any(|view| view.entity_id() == pane.entity_id())
+    }
+
+    pub(crate) fn clear_orphaned_pane_prompt(&mut self, cx: &mut Context<Self>) {
+        if !self.pane_auth_orphaned() {
+            return;
+        }
+        self.ssh_prompt.clear();
+        cx.notify();
+    }
+
+    /// Call off the routed sheet on screen when it belongs to `host` — the
+    /// connect it was asked by has been cancelled, and leaving the question up
+    /// would invite an answer into an attempt nobody is watching.
+    pub(crate) fn cancel_routed_auth(
+        &mut self,
+        host: tty7_core::host::HostId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ssh_prompt.routed_host != Some(host) {
+            return;
+        }
+        self.cancel_ssh_prompt(window, cx);
     }
 
     pub(crate) fn submit_ssh_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -681,18 +756,10 @@ impl Tty7App {
 
     pub(crate) fn render_ssh_prompt_overlay(
         &self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if self.ssh_prompt.model.is_none() && self.ssh_prompt.banners.is_empty() {
-            return None;
-        }
-        let focused_pane_id = self
-            .tabs
-            .get(self.active)
-            .and_then(|t| t.pane.focused_or_first(window, cx))
-            .map(|p| p.read(cx).pane_id);
-        if self.ssh_prompt.pane_id.is_some() && focused_pane_id != self.ssh_prompt.pane_id {
             return None;
         }
 
@@ -1517,5 +1584,47 @@ mod focus_tests {
                 .unwrap(),
             "dismissing the last prompt must hand focus back to the app"
         );
+    }
+
+    /// A pane's sheet used to be painted only while that pane had focus, so
+    /// switching tabs made the question — and the fact that it was still
+    /// pending — disappear: the routed prompts behind it parked forever, and
+    /// the login the user thought they had cancelled kept waiting. The sheet
+    /// is the question being asked; it is shown until it is answered.
+    #[gpui::test]
+    fn the_sheet_stays_up_when_its_pane_is_not_the_focused_one(cx: &mut TestAppContext) {
+        let (window, _vcx) = harness(cx);
+        window
+            .update(cx, |app, window, cx| {
+                app.ssh_prompt.model = Some(host_key_sheet());
+                app.ssh_prompt.pane_id = Some(4242);
+                assert!(
+                    app.render_ssh_prompt_overlay(window, cx).is_some(),
+                    "a pane that lost focus still has a question on screen"
+                );
+            })
+            .unwrap();
+    }
+
+    /// ...but a pane that no longer exists cannot answer, and a sheet left up
+    /// for it would cover every routed prompt from then on. The pump clears
+    /// those; this is the check it uses.
+    #[gpui::test]
+    fn a_sheet_whose_pane_is_gone_is_cleared(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, _window, cx| {
+            let pane = app.tabs[0].pane.terminals()[0].clone();
+            app.ssh_prompt.pane = Some(pane);
+            app.ssh_prompt.model = Some(host_key_sheet());
+            assert!(!app.pane_auth_orphaned(), "the pane is still on screen");
+
+            app.tabs.clear();
+            assert!(app.pane_auth_orphaned(), "the tab that held it is gone");
+            app.clear_orphaned_pane_prompt(cx);
+            assert!(
+                app.ssh_prompt.model.is_none(),
+                "nothing can answer it, so it comes down"
+            );
+        });
     }
 }
