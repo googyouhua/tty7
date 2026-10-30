@@ -95,6 +95,10 @@ impl ConnPool {
         self.live().next().is_some()
     }
 
+    fn live_count(&self) -> usize {
+        self.live().count()
+    }
+
     fn add(&mut self, conn: &Arc<SshConnection>) {
         self.prune();
         self.conns.push(Arc::downgrade(conn));
@@ -112,6 +116,13 @@ type ConnSlot = Arc<tokio::sync::Mutex<ConnPool>>;
 /// out to be full. Each refusal takes that connection out of rotation for a
 /// while, so this only bounds a pathological server, not ordinary use.
 const MAX_SATURATED_RETRIES: usize = 8;
+
+/// How many connections one machine may have open at once before a route that
+/// finds them all full gives up instead of dialling another.
+///
+/// See the refusal in `open_connection_reusing`: past this, the honest answer is
+/// that the far end's `MaxSessions` is too small, not another authentication.
+const MAX_CONNECTIONS_PER_KEY: usize = 3;
 
 pub struct SshManager {
     runtime: tokio::runtime::Runtime,
@@ -760,9 +771,26 @@ impl SshManager {
                         return Ok((conn, true));
                     }
                     if guard.any_live() {
+                        // Full connections are a fact about the far end, not a
+                        // thing to route around forever: an sshd caps sessions
+                        // per connection (MaxSessions, ten by default), so a
+                        // machine with more panes than that fills connections one
+                        // at a time. Dialling a few more is legitimate; dialling
+                        // without end is not — every extra connection costs a
+                        // fresh authentication, and a prompt per attempt on a
+                        // host with no key is how a connect turns into a storm of
+                        // password sheets nobody asked for.
+                        let live = guard.live_count();
+                        if live >= MAX_CONNECTIONS_PER_KEY {
+                            anyhow::bail!(
+                                "ssh {key:?}: every one of {live} connections is at the server's \
+                                 session limit — the far end's sshd MaxSessions is too small for \
+                                 this machine's panes"
+                            );
+                        }
                         log::info!(
                             "ssh {key:?}: every connection is at the server's session limit; \
-                             dialling another beside them"
+                             dialling another beside them ({live} open)"
                         );
                     }
                     Some(guard)

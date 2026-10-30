@@ -2637,6 +2637,7 @@ fn pump_auth_sheets_unlocked(cx: &mut gpui::App) {
     while let Some(pending) = remote_connect::take_pending_auth() {
         inbox.push(pending);
     }
+    give_up_on_stale_parked(cx);
     if let Ok(mut parked) = PARKED.lock() {
         inbox.append(&mut parked);
     }
@@ -2676,6 +2677,13 @@ fn pump_auth_sheets_unlocked(cx: &mut gpui::App) {
             continue;
         }
         if !cx.default_global::<RemoteLinks>().auth.request(host) {
+            // Parked: another machine's sheet is up. Say who, because a gate
+            // that is held with nothing on screen is the shape of a window that
+            // looks frozen while the far end waits out its grace time.
+            log::warn!(
+                "auth prompt for {host:?} parked: {:?} holds the sheet queue",
+                cx.default_global::<RemoteLinks>().auth.holder()
+            );
             park(pending);
             continue;
         }
@@ -2845,9 +2853,49 @@ fn cancel_parked(host: HostId, attempt: Option<remote_connect::AttemptId>) {
 
 static PARKED: Mutex<Vec<remote_connect::PendingAuth>> = Mutex::new(Vec::new());
 
-fn park(pending: remote_connect::PendingAuth) {
+fn park(mut pending: remote_connect::PendingAuth) {
+    if pending.parked_since.is_none() {
+        pending.parked_since = Some(std::time::Instant::now());
+    }
     if let Ok(mut parked) = PARKED.lock() {
         parked.push(pending);
+    }
+}
+
+/// Give up on prompts that have waited behind another machine's sheet for
+/// longer than anyone could still be typing.
+///
+/// A parked prompt is invisible: the window shows nothing, the asker sits on its
+/// two-minute timeout, and the far end eventually reports "authentication
+/// cancelled" — from the keyboard side that is a freeze with no dialog. The
+/// sheet that holds the queue is not touched here; only the ones waiting behind
+/// it give up, and they give up loudly.
+fn give_up_on_stale_parked(cx: &mut gpui::App) {
+    let holder = cx.default_global::<RemoteLinks>().auth.holder();
+    let Ok(mut parked) = PARKED.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let all: Vec<_> = parked.drain(..).collect();
+    let (stale, waiting): (Vec<_>, Vec<_>) = all.into_iter().partition(|pending| {
+        pending.parked_since.is_some_and(|since| {
+            now.saturating_duration_since(since) > remote_connect::PARKED_GIVE_UP
+        })
+    });
+    *parked = waiting;
+    drop(parked);
+    for pending in stale {
+        let waited = pending
+            .parked_since
+            .map(|since| now.saturating_duration_since(since))
+            .unwrap_or_default();
+        log::warn!(
+            "auth prompt for {:?} gave up after {}s parked behind {:?} — nothing on screen to answer",
+            pending.host,
+            waited.as_secs(),
+            holder
+        );
+        pending.answer(crate::daemon::protocol::AuthResponse::Cancelled);
     }
 }
 
@@ -4502,6 +4550,40 @@ mod tests {
         assert_eq!(
             app.update(cx, |app, _| app.ssh_prompt.routed_host()),
             Some(second)
+        );
+    }
+
+    /// A prompt parked behind a sheet nobody can answer used to sit out the far
+    /// end's whole two-minute grace time with nothing on screen: from the
+    /// keyboard it was a frozen window, and the log said only "authentication
+    /// cancelled" two minutes later. It gives up on its own now, loudly.
+    #[gpui::test]
+    fn a_prompt_parked_behind_a_dead_sheet_gives_up(cx: &mut gpui::TestAppContext) {
+        let (_app, _vcx) = window_on_a_local_workspace(cx);
+        let holder = HostId(0x5eed_0006);
+        let waiting = HostId(0x5eed_0007);
+        assert!(cx.update(|cx| { cx.default_global::<RemoteLinks>().auth.request(holder) }));
+
+        let (pending, rx, _asker) =
+            remote_connect::PendingAuth::for_test(waiting, password_prompt("late-box"));
+        let mut pending = pending;
+        pending.parked_since = Some(
+            std::time::Instant::now() - remote_connect::PARKED_GIVE_UP - Duration::from_secs(1),
+        );
+        park(pending);
+        cx.update(give_up_on_stale_parked);
+
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_millis(200)),
+                Ok(crate::daemon::protocol::AuthResponse::Cancelled)
+            ),
+            "the parked prompt must stop its asker, not wait out the grace time"
+        );
+        assert_eq!(
+            cx.update(|cx| cx.default_global::<RemoteLinks>().auth.holder()),
+            Some(holder),
+            "the sheet that holds the queue is not the one that gives up"
         );
     }
 

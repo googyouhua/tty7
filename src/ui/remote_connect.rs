@@ -349,6 +349,13 @@ pub struct Connected {
 /// frames restart the clock on their own, because every one of them is a read.
 const ROUTE_ACK_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long a prompt may wait behind another machine's sheet before it gives up.
+///
+/// Long enough for someone to finish typing one password; short enough that a
+/// gate held by a sheet nobody can reach fails its route instead of leaving the
+/// window looking frozen for the far end's whole two-minute grace time.
+pub const PARKED_GIVE_UP: Duration = Duration::from_secs(60);
+
 /// The phase a connect is in, so a stall can say what it was waiting on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectStage {
@@ -865,6 +872,11 @@ pub struct PendingAuth {
     /// itself dials) — those cannot be tied to an attempt and are answered by
     /// whoever is at the keyboard.
     pub attempt: Option<AttemptId>,
+    /// When the sheet queue made this prompt wait behind another machine's
+    /// sheet, if it is waiting at all. A prompt parked behind a sheet nobody can
+    /// answer gives up after [`PARKED_GIVE_UP`] rather than sitting out the far
+    /// end's two-minute grace time with nothing on screen to explain the wait.
+    pub parked_since: Option<Instant>,
     reply: std::sync::mpsc::SyncSender<AuthResponse>,
     /// Alive for exactly as long as someone is waiting on `reply`. The asker
     /// holds the only strong count and drops it the moment it stops waiting —
@@ -908,6 +920,7 @@ impl PendingAuth {
             endpoint: None,
             auto_supplied_password: false,
             attempt: None,
+            parked_since: None,
             reply,
             asker: Arc::downgrade(&asker),
         };
@@ -1006,6 +1019,7 @@ fn ask_routed(
             endpoint,
             auto_supplied_password,
             attempt: current_attempt(host),
+            parked_since: None,
             reply: tx,
             asker: Arc::downgrade(&asker),
         });
