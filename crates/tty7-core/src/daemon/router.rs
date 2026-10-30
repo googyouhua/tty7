@@ -1098,6 +1098,30 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn negotiate_gives_up_on_a_peer_that_never_answers() {
+        use std::os::unix::net::UnixStream;
+
+        // A peer that takes the route header and then says nothing is the shape
+        // of the connect that used to hang for as long as the process lived:
+        // this read has no deadline of its own, so the caller's socket deadline
+        // is the only thing between "still connecting" and "failed".
+        let (mut ours, _theirs) = UnixStream::pair().expect("a socket pair");
+        ours.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("a deadline on the client end");
+
+        let err = negotiate(&mut ours, &RouteHeader::local_stdio("/bin/true", &[]))
+            .expect_err("a silent peer must not route anywhere");
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "expected a read deadline, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn negotiate_answers_a_consent_question_and_then_takes_the_ack() {
         use std::os::unix::net::UnixStream;
 

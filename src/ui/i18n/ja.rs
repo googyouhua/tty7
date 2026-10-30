@@ -1739,6 +1739,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "{error}\n\nそこで実行中のセッションは古いビルドのままです。セッションがなくなっている場合は、再接続時にこのビルドのサーバーが起動します"
         }
         L10nKey::RemoteHostUnreachable => "{machine} に到達できませんでした: {error}",
+        L10nKey::RemoteConnectTimedOut => "{machine}: 接続がタイムアウトしました ({stage})",
         L10nKey::RemoteInstallTitle => "「{machine}」に tty7 serverをインストールしますか？",
         L10nKey::RemoteInstallDetail => {
             "tty7 はサーバーバイナリを {machine} に書き込み、{machine} でワークスペースをホストできるようにします。{machine} 上の他のものには触れず、sudo も使いません。\n\n{path_label}\u{2003}{path}\n{version_label}\u{2003}{version}\n{size_label}\u{2003}{size}\n{from_label}\u{2003}{from}\n{sha_label}\u{2003}{sha256}\n\n{silent_upgrades}"

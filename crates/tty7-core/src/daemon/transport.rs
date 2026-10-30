@@ -7,6 +7,18 @@ pub use imp_unix::*;
 #[cfg(windows)]
 pub use imp_windows::*;
 
+/// Put a read deadline on a control stream, or take it off again with `None`.
+///
+/// The connect phases that wait for a peer which may never speak — the route
+/// acknowledgement and the control hello — pass a deadline here, so a silent far
+/// end ends the attempt instead of parking it for as long as the process lives.
+/// Everything after those phases (the reader thread, subscriptions, keepalives)
+/// wants blocking reads, so whoever arms a deadline has to clear it again before
+/// handing the stream on.
+pub fn set_read_timeout(stream: &Stream, timeout: Option<std::time::Duration>) -> io::Result<()> {
+    stream.set_read_timeout(timeout)
+}
+
 /// Deal with an endpoint someone left behind, so the bind after it can only be
 /// refused for a reason worth reporting.
 ///

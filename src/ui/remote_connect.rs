@@ -339,11 +339,110 @@ pub struct Connected {
     pub rows: Vec<RemoteWorkspaceRow>,
 }
 
+/// How long the far end gets to acknowledge the route before the attempt is
+/// failed.
+///
+/// This is the one connect wait with no deadline of its own: the far end may
+/// still be starting a server, installing one, or asking for credentials, and a
+/// peer that takes the header and then goes quiet used to park the attempt — and
+/// the window's spinner — for as long as the process lived. Install progress
+/// frames restart the clock on their own, because every one of them is a read.
+const ROUTE_ACK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The phase a connect is in, so a stall can say what it was waiting on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectStage {
+    Starting,
+    Routing,
+    Hello,
+    Listing,
+    Finishing,
+}
+
+impl ConnectStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            ConnectStage::Starting => "starting the daemon",
+            ConnectStage::Routing => "waiting for the route",
+            ConnectStage::Hello => "waiting for the control hello",
+            ConnectStage::Listing => "listing workspaces",
+            ConnectStage::Finishing => "finishing the connect",
+        }
+    }
+}
+
+static CONNECT_STAGE: OnceLock<Mutex<Option<(ConnectStage, String, Instant)>>> = OnceLock::new();
+
+/// Record the phase the next connect is in. The stall watchdog reads this when
+/// the UI thread stops beating, which is the only way to tell a frozen window
+/// from a slow one after the fact.
+pub fn note_stage(stage: ConnectStage, label: &str) {
+    let slot = CONNECT_STAGE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut slot) = slot.lock() {
+        *slot = Some((stage, label.to_string(), Instant::now()));
+    }
+}
+
+/// The phase of the newest connect, with how long it has been in it.
+pub fn stage_snapshot() -> Option<(ConnectStage, String, Duration)> {
+    CONNECT_STAGE
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|slot| slot.clone()))
+        .map(|(stage, label, since)| (stage, label, since.elapsed()))
+}
+
+/// Forget the in-flight phase: the attempt this named is over.
+pub fn clear_stage() {
+    if let Some(slot) = CONNECT_STAGE.get()
+        && let Ok(mut slot) = slot.lock()
+    {
+        *slot = None;
+    }
+}
+
+/// The message for a connect whose whole attempt ran past its budget.
+pub fn attempt_timed_out(label: &str) -> String {
+    let stage = stage_snapshot()
+        .map(|(stage, _, waited)| format!("{} — {}s", stage.label(), waited.as_secs()))
+        .unwrap_or_else(|| ConnectStage::Starting.label().to_string());
+    t_fmt(
+        L10nKey::RemoteConnectTimedOut,
+        &[("machine", label), ("stage", &stage)],
+    )
+}
+
+/// Arms a read deadline for the length of one connect phase, and takes it off
+/// again however that phase ends.
+///
+/// The reader thread that takes the stream over afterwards must see blocking
+/// reads: left armed, an idle link would look like a silent peer and tear itself
+/// down on the first quiet minute.
+struct ReadDeadline(crate::daemon::transport::Stream);
+
+impl ReadDeadline {
+    fn arm(stream: &crate::daemon::transport::Stream, timeout: Duration) -> io::Result<Self> {
+        // A duplicate rather than a borrow: the deadline has to outlive the call
+        // that needs `&mut stream`, and the socket option is shared with the
+        // duplicate because both name the same file description.
+        let handle = stream.try_clone()?;
+        crate::daemon::transport::set_read_timeout(&handle, Some(timeout))?;
+        Ok(Self(handle))
+    }
+}
+
+impl Drop for ReadDeadline {
+    fn drop(&mut self) {
+        let _ = crate::daemon::transport::set_read_timeout(&self.0, None);
+    }
+}
+
 pub fn connect_blocking(
     target: &RemoteTarget,
     header: RouteHeader,
     label: &str,
 ) -> Result<Connected, String> {
+    note_stage(ConnectStage::Starting, label);
+    let started = Instant::now();
     note_origin(&header.target, target);
     crate::daemon::spawn::ensure_running().map_err(|e| {
         t_fmt(
@@ -360,13 +459,28 @@ pub fn connect_blocking(
     })?;
 
     let mut stream = stream;
-    crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+    note_stage(ConnectStage::Routing, label);
+    let routed_at = Instant::now();
+    let deadline = ReadDeadline::arm(&stream, ROUTE_ACK_TIMEOUT).map_err(|e| {
         t_fmt(
             L10nKey::RemoteHostUnreachable,
             &[("machine", label), ("error", &e.to_string())],
         )
     })?;
+    let negotiated = crate::daemon::router::negotiate(&mut stream, &header);
+    drop(deadline);
+    negotiated.map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteHostUnreachable,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
+    log::info!(
+        "connect to {label}: routed in {}ms",
+        routed_at.elapsed().as_millis()
+    );
 
+    note_stage(ConnectStage::Hello, label);
     let hello = ControlHello::host_rpc(new_session_token(), client_hostname());
     let host = handshake(stream, &target.connection_key(), &hello).map_err(|e| {
         t_fmt(
@@ -375,14 +489,20 @@ pub fn connect_blocking(
         )
     })?;
 
+    note_stage(ConnectStage::Listing, label);
     let rows = list_workspaces(&host).map_err(|e| {
         t_fmt(
             L10nKey::RemoteWorkspaceListFailed,
             &[("machine", label), ("error", &e.to_string())],
         )
     })?;
+    note_stage(ConnectStage::Finishing, label);
     let home = host.home();
     refresh_agent_hooks_once(&host, &home);
+    log::info!(
+        "connect to {label}: ready in {}ms",
+        started.elapsed().as_millis()
+    );
     Ok(Connected { host, home, rows })
 }
 
@@ -1004,7 +1124,16 @@ pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), S
             &[("error", &e.to_string())],
         )
     })?;
-    let ack = crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+    note_stage(ConnectStage::Routing, label);
+    let deadline = ReadDeadline::arm(&stream, ROUTE_ACK_TIMEOUT).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteServerRestartFailed,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
+    let ack = crate::daemon::router::negotiate(&mut stream, &header);
+    drop(deadline);
+    let ack = ack.map_err(|e| {
         t_fmt(
             L10nKey::RemoteServerRestartFailed,
             &[("machine", label), ("error", &e.to_string())],

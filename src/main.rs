@@ -837,6 +837,7 @@ fn main() {
         gpui_component::init(cx);
         register_bundled_fonts(cx);
         crate::ui::prompt::install(cx);
+        crate::ui::stall::install(cx);
         cx.activate(true);
         #[cfg(target_os = "macos")]
         set_dock_icon_for_bare_binary();

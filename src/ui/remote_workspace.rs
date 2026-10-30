@@ -14,6 +14,14 @@ use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 
+/// The longest a single connect attempt may hold a window on "connecting".
+///
+/// Past the 120s an auth prompt is allowed to wait, with room for the phases on
+/// either side of it: long enough that nobody's typed password is thrown away,
+/// short enough that a peer which dribbles just inside each phase bound still
+/// cannot own the window indefinitely.
+const CONNECT_ATTEMPT_LIMIT: Duration = Duration::from_secs(150);
+
 pub enum ConnectFlow {
     Connecting {
         choice: HostChoice,
@@ -706,10 +714,22 @@ impl Tty7App {
         remote_connect::clear_install_progress(host_id);
         self.watch_for_install_consent(host_id, cx);
         cx.spawn(async move |this, cx| {
-            let result = cx
+            // Every phase inside the connect bounds itself, but a peer that
+            // answers just inside each bound must not be able to hold the window
+            // on "connecting" for minutes on end. This caps the whole attempt; a
+            // task left behind here ends when its socket does.
+            let timeout_label = label.clone();
+            let work = cx
                 .background_executor()
-                .spawn(async move { remote_connect::connect_blocking(&target, header, &label) })
-                .await;
+                .spawn(async move { remote_connect::connect_blocking(&target, header, &label) });
+            let result = smol::future::or(work, async {
+                cx.background_executor().timer(CONNECT_ATTEMPT_LIMIT).await;
+                Err(remote_connect::attempt_timed_out(&timeout_label))
+            })
+            .await;
+            // The phase this named is over, whichever way it went; a stale one
+            // would blame the next stall on a connect nobody is running.
+            remote_connect::clear_stage();
             // Retired here rather than in `finish_connect`, which bows out
             // early whenever `connect` has moved on — a disconnect from the
             // switcher, or entering another workspace, both of which can land
