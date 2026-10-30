@@ -2552,6 +2552,10 @@ fn relink_dead_panes(
             })
             .collect();
         let mut misses = 0usize;
+        // One line for the batch instead of one per pane: nine panes failing
+        // for the same reason is one fact about the machine, and the first
+        // error is the one that says which.
+        let mut first_error: Option<String> = None;
         for (view, opened, pane_id, size, cell_w, cell_h) in attempts {
             match opened.await {
                 Ok((stream, buffered)) => {
@@ -2562,6 +2566,7 @@ fn relink_dead_panes(
                         Ok(()) => log::info!("pane {pane_id} came back on its own"),
                         Err(e) => {
                             misses += 1;
+                            first_error.get_or_insert_with(|| e.to_string());
                             view.update(cx, |view, _| view.relink_settled());
                             log::warn!("pane {pane_id} re-attached but could not be adopted: {e}");
                         }
@@ -2573,10 +2578,17 @@ fn relink_dead_panes(
                 }
                 Err(e) => {
                     misses += 1;
+                    first_error.get_or_insert_with(|| e.to_string());
                     view.update(cx, |view, _| view.relink_settled());
                     log::warn!("could not relink pane {pane_id}: {e}");
                 }
             }
+        }
+        if misses > 0 {
+            log::warn!(
+                "{misses} pane(s) of workspace {workspace} are still down{}",
+                first_error.map(|e| format!(": {e}")).unwrap_or_default()
+            );
         }
         cx.update(|cx| note_pane_relink_outcome(cx, workspace, misses));
     })
