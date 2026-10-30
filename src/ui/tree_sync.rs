@@ -2863,6 +2863,14 @@ fn settle_hydration(
         "a session rebuilt from the tree names every tab it holds"
     );
     log::info!("rebuilding {wanted} tab(s) of workspace {client_ws} from its machine's tree");
+    // This is the one connect phase that runs on the UI thread: naming it is
+    // what turns a stall here from "no connect was in flight" into the rebuild
+    // that caused it.
+    let _stage = crate::ui::remote_connect::StageGuard;
+    crate::ui::remote_connect::note_stage(
+        crate::ui::remote_connect::ConnectStage::Adopting,
+        &client_ws.to_string(),
+    );
     let _ = handle.update(cx, move |_, window, cx| {
         app.update(cx, |app, cx| {
             app.adopt_workspace(client_ws, session, window, cx)

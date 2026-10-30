@@ -364,6 +364,10 @@ pub enum ConnectStage {
     Hello,
     Listing,
     Finishing,
+    /// The link is up and the window is turning the machine's tree into tabs.
+    /// This one runs on the UI thread, so it is the phase a stall is most likely
+    /// to be caught in.
+    Adopting,
 }
 
 impl ConnectStage {
@@ -374,6 +378,7 @@ impl ConnectStage {
             ConnectStage::Hello => "waiting for the control hello",
             ConnectStage::Listing => "listing workspaces",
             ConnectStage::Finishing => "finishing the connect",
+            ConnectStage::Adopting => "building the workspace",
         }
     }
 }
@@ -404,6 +409,17 @@ pub fn clear_stage() {
         && let Ok(mut slot) = slot.lock()
     {
         *slot = None;
+    }
+}
+
+/// Clears the in-flight phase when the call it marks returns, however it
+/// returns. Without it a phase outlives its attempt, and the watchdog then
+/// blames a stall on a connect that finished half a minute ago.
+pub(crate) struct StageGuard;
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        clear_stage();
     }
 }
 
@@ -448,6 +464,7 @@ pub fn connect_blocking(
     header: RouteHeader,
     label: &str,
 ) -> Result<Connected, String> {
+    let _stage = StageGuard;
     note_stage(ConnectStage::Starting, label);
     let started = Instant::now();
     note_origin(&header.target, target);
