@@ -1798,6 +1798,7 @@ impl RemoteLinks {
 }
 
 fn pump_tick(cx: &mut gpui::App) -> bool {
+    let started = Instant::now();
     drain_events(cx);
     pump_auth_sheets(cx);
 
@@ -1955,6 +1956,19 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
 
     if changed {
         cx.refresh_windows();
+    }
+    // A tick that takes a noticeable slice of the 250 ms it sleeps between runs
+    // is the one cost that grows with how much is connected without ever showing
+    // up as a connect failure: every machine, workspace and dead pane is walked
+    // four times a second, on the UI thread. Say so when it gets there, with the
+    // size of the walk.
+    let spent = started.elapsed();
+    if spent > Duration::from_millis(50) {
+        log::warn!(
+            "supervisor tick took {}ms over {} machine(s)",
+            spent.as_millis(),
+            cx.default_global::<RemoteLinks>().machines.len()
+        );
     }
     true
 }
