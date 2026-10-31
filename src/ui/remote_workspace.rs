@@ -368,6 +368,16 @@ pub const MAX_PANE_ATTEMPTS: u32 = 6;
 /// question about someone else's machine, not a retry of our own failure.
 pub const PARKED_RECHECK: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// How long a machine that ran out of attempts is left alone before it is looked
+/// at again.
+///
+/// The attempts stop so that nothing is spending a connect, a prompt and a
+/// rebuild every few seconds; they do not stop so that a machine which comes
+/// back — a reboot, a raised `MaxSessions`, a network that returns — is left
+/// disconnected until someone notices. One look a minute is quiet enough to be
+/// invisible and quick enough to reconnect on its own.
+pub const FAILED_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Backoff {
     attempt: u32,
@@ -1927,6 +1937,24 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
                     }
                     return;
                 }
+                // Given up on: the reason stays on the strip, and the machine is
+                // looked at again on a slow clock rather than every few seconds.
+                // "Stop retrying" has to mean quiet, not abandoned — a machine
+                // that comes back after a reboot, or whose sshd was raised, must
+                // reconnect on its own the way it always did.
+                if matches!(link.state, LinkState::Failed(_)) {
+                    match link.next_attempt {
+                        None => link.next_attempt = Some(now + FAILED_RECHECK),
+                        Some(at) if at <= now => {
+                            due = true;
+                            link.next_attempt = None;
+                            changed = true;
+                            link.state = LinkState::Reconnecting;
+                        }
+                        Some(_) => {}
+                    }
+                    return;
+                }
                 if !matches!(link.state, LinkState::Reconnecting) {
                     changed = true;
                     link.state = LinkState::Reconnecting;
@@ -2435,9 +2463,12 @@ fn finish_attempt(
             // state but `Mismatched` back to `Reconnecting` on its next tick.
             // This is what actually stops the clock, and `retry_now` and the
             // switcher's own connect are what start it again.
-            if declined || spent || terminal {
+            // A cancelled password is the user's answer and stays answered;
+            // running out of attempts is not, so those only slow down.
+            if declined {
                 cx.default_global::<RemoteLinks>().suspended.insert(host);
             }
+            let _ = (spent, terminal);
             if spent {
                 log::warn!(
                     "stopped reconnecting to {label} after {MAX_RECONNECT_ATTEMPTS} attempts: {e}"
