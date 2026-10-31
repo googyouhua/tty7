@@ -328,6 +328,22 @@ pub(crate) fn ssh_profiles_by_frecency(cx: &gpui::App) -> Vec<SshProfile> {
     profiles
 }
 
+/// The last spec resolved for each profile, for a few seconds.
+///
+/// Resolving one reads the OS credential store, and a window putting its panes
+/// back asks for the same profile once per pane: nine keychain reads in a row,
+/// on the UI thread, to arrive at nine identical answers. That burst is the
+/// whole reason for the window; it is short enough that a password the user has
+/// just changed is not hidden behind it for long.
+static RESOLVED: std::sync::Mutex<
+    Vec<(
+        uuid::Uuid,
+        std::time::Instant,
+        Box<crate::daemon::protocol::NativeSshSpec>,
+    )>,
+> = std::sync::Mutex::new(Vec::new());
+const RESOLVED_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(crate) fn resolve_persisted_ssh_spec(
     spec: Box<crate::daemon::protocol::NativeSshSpec>,
     cx: &gpui::App,
@@ -339,13 +355,27 @@ pub(crate) fn resolve_persisted_ssh_spec(
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .and_then(|id| cfg.ssh_profiles.iter().find(|p| p.id == id).cloned());
     match profile {
-        Some(p) => Box::new(build_native_ssh_spec(
-            &p,
-            &cfg.ssh_profiles,
-            &OsCredentialStore,
-            cfg.verify_host_keys,
-            &cfg.onekey_entries,
-        )),
+        Some(p) => {
+            if let Ok(cached) = RESOLVED.lock()
+                && let Some((_, _, resolved)) = cached
+                    .iter()
+                    .find(|(id, at, _)| *id == p.id && at.elapsed() <= RESOLVED_FOR)
+            {
+                return resolved.clone();
+            }
+            let resolved = Box::new(build_native_ssh_spec(
+                &p,
+                &cfg.ssh_profiles,
+                &OsCredentialStore,
+                cfg.verify_host_keys,
+                &cfg.onekey_entries,
+            ));
+            if let Ok(mut cache) = RESOLVED.lock() {
+                cache.retain(|(id, at, _)| *id != p.id && at.elapsed() < RESOLVED_FOR);
+                cache.push((p.id, std::time::Instant::now(), resolved.clone()));
+            }
+            resolved
+        }
         None => spec,
     }
 }
