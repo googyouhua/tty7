@@ -345,6 +345,21 @@ pub(crate) enum StripAction {
 pub const RECONNECT_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
 pub const RECONNECT_CAP: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How many times one machine is dialled before the supervisor stops and leaves
+/// the reason on screen.
+///
+/// Retrying forever is what turns a machine that cannot be reached into a window
+/// that never settles: every attempt costs a connect, a prompt and a rebuild,
+/// and nothing on the far end changes because we asked again. The user's Retry
+/// starts the count over; so does a fresh connect.
+pub const MAX_RECONNECT_ATTEMPTS: u32 = 6;
+
+/// The same for panes. A pane that keeps failing to attach will not come back
+/// without something changing on the machine — notably an sshd whose
+/// `MaxSessions` is too small for the workspace — so the batch gives up rather
+/// than spending a route every half minute for the rest of the session.
+pub const MAX_PANE_ATTEMPTS: u32 = 6;
+
 /// How long a link parked on a dialect refusal waits before looking again.
 ///
 /// Not a backoff — it never grows, and it is two orders of magnitude off the
@@ -1476,6 +1491,10 @@ struct PaneRetry {
     /// until it reports back, or one slow attempt would be joined by a new
     /// one every 250 ms tick.
     inflight: bool,
+    /// The attempts ran out and the batch was called off. Said once, so a
+    /// machine that cannot take its panes does not fill the log with the same
+    /// refusal every half minute.
+    gave_up: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1696,6 +1715,13 @@ impl RemoteLinks {
     /// reconnect already scheduled, and the band would go on showing the
     /// supervisor's old reason the whole time.
     pub(crate) fn retry_machine_now(cx: &mut gpui::App, host: HostId) {
+        // The user's Retry is also the answer to panes that ran out of attempts:
+        // the same refusal that stopped them may be what changed.
+        for (workspace, _) in workspaces_on(cx, host) {
+            cx.default_global::<RemoteLinks>()
+                .pane_retries
+                .remove(&workspace);
+        }
         let links = cx.default_global::<RemoteLinks>();
         links.suspended.remove(&host);
         let link = links.machines.entry(host).or_insert(MachineLink {
@@ -2338,6 +2364,7 @@ fn finish_attempt(
             log::info!("reconnected to {label}");
         }
         Err(e) => {
+            let mut spent = false;
             // A dialect refusal is not a transient failure. Both builds are
             // fixed, so the next attempt fails identically and the one after
             // that too; all the backoff buys is a strip that counts to thirty
@@ -2373,6 +2400,13 @@ fn finish_attempt(
                     // a first try still in flight is attempt 1 on the strip,
                     // not attempt 2. A parked look stays off the backoff.
                     link.backoff.advance();
+                    // Out of patience: the far end has answered wrong this many
+                    // times in a row, and asking again is not what changes its
+                    // answer. The strip keeps the reason and the Retry button.
+                    if link.backoff.attempt() >= MAX_RECONNECT_ATTEMPTS {
+                        link.state = LinkState::Failed(e.clone());
+                        spent = true;
+                    }
                 }
                 link.next_attempt = None;
                 link.last_error = Some(e.clone());
@@ -2381,8 +2415,13 @@ fn finish_attempt(
             // state but `Mismatched` back to `Reconnecting` on its next tick.
             // This is what actually stops the clock, and `retry_now` and the
             // switcher's own connect are what start it again.
-            if declined {
+            if declined || spent {
                 cx.default_global::<RemoteLinks>().suspended.insert(host);
+            }
+            if spent {
+                log::warn!(
+                    "stopped reconnecting to {label} after {MAX_RECONNECT_ATTEMPTS} attempts: {e}"
+                );
             }
         }
     }
@@ -2475,20 +2514,38 @@ fn pump_pane_relinks(cx: &mut gpui::App, host: HostId) {
             }
             continue;
         }
-        let due = {
+        let (due, gave_up) = {
             let retry = cx
                 .default_global::<RemoteLinks>()
                 .pane_retries
                 .entry(id)
                 .or_default();
-            match (retry.inflight, retry.next_attempt) {
-                (true, _) => false,
-                // First sighting: ask right away. The backoff only starts
-                // once an attempt has actually come back wrong.
-                (false, None) => true,
-                (false, Some(at)) => at <= now,
+            if retry.inflight {
+                (false, false)
+            } else if retry.backoff.attempt() >= MAX_PANE_ATTEMPTS {
+                // Out of patience: this machine has refused these panes this
+                // many times running and nothing here changed its answer. Leave
+                // them dead — the strip says why — until the user retries, the
+                // link comes back, or the pane is closed.
+                let first = !retry.gave_up;
+                retry.gave_up = true;
+                (false, first)
+            } else {
+                retry.gave_up = false;
+                match retry.next_attempt {
+                    // First sighting: ask right away. The backoff only starts
+                    // once an attempt has actually come back wrong.
+                    None => (true, false),
+                    Some(at) => (at <= now, false),
+                }
             }
         };
+        if gave_up {
+            log::warn!(
+                "giving up on {} pane(s) of workspace {id} after {MAX_PANE_ATTEMPTS} attempts",
+                dead.len()
+            );
+        }
         if due {
             relink_dead_panes(cx, id, dead);
         }
