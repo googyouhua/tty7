@@ -2061,11 +2061,29 @@ impl Tty7App {
     pub(crate) fn adopt_workspace(
         &mut self,
         id: WorkspaceId,
-        session: Session,
+        mut session: Session,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         crate::ui::stall::crumb("adopting a workspace's tabs");
+        // A window opening onto a machine builds the tab it is about to show and
+        // leaves the rest asleep. Ten pane views in one frame is the first frame
+        // of the session — the window stops answering while every terminal sets
+        // itself up — and ten panes are also ten SSH sessions on a machine whose
+        // sshd may not have ten to give. They wake when they are first looked
+        // at, which is when their screens, and their sessions, are actually
+        // needed.
+        if self.tabs.is_empty() && session.tabs.len() > 1 {
+            let active = session.active.min(session.tabs.len() - 1);
+            let mut asleep = 0;
+            for (index, tab) in session.tabs.iter_mut().enumerate() {
+                if index != active && !tab.hibernated {
+                    tab.hibernated = true;
+                    asleep += 1;
+                }
+            }
+            log::info!("opening with 1 tab awake and {asleep} asleep until they are looked at");
+        }
         let previous_host = self.spawn_host(cx);
         self.workspace = id;
         self.rebind_host(previous_host, cx);
