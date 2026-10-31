@@ -513,24 +513,18 @@ impl SshManager {
             // machine. Where the far end refuses forwarding this falls through
             // to the bridge below, which is where it stood before.
             RouteChannel::Pane => {
-                let socket = match (reuse.as_deref(), probed_env.as_ref()) {
-                    (Some(name), Some(env)) => {
-                        let resolved = match env.home.as_deref().filter(|h| !h.is_empty()) {
-                            Some(home) => remote_link::env_for_instance(env, home, name),
-                            None => env.clone(),
-                        };
-                        remote_link::remote_pane_socket(&resolved)
-                    }
-                    _ => probed_env
-                        .as_ref()
-                        .and_then(remote_link::remote_pane_socket),
-                };
-                match socket {
-                    Some(socket) => RemoteEntry::StreamLocal { socket },
-                    None => RemoteEntry::SessionExec {
-                        command: command.clone(),
-                    },
-                }
+                // The control route already worked out where this machine's
+                // daemon lives, and the pane endpoint is its neighbour; the
+                // control branch below remembers that under its own instance
+                // key. Nothing remembered means the control path is a stdio
+                // bridge rather than a socket, so panes keep the
+                // process-per-pane bridge.
+                let pane_instance = format!("{instance_key}#pane");
+                let command = command.clone();
+                conn.remote_entry_or_init(&pane_instance, || async move {
+                    RemoteEntry::SessionExec { command }
+                })
+                .await
             }
             RouteChannel::Control => match remote_link::fixed_entry(&installed, &command) {
                 Some(entry) => entry,
@@ -555,6 +549,20 @@ impl SshManager {
                 }
             },
         };
+
+        // A pane rides the control socket's neighbour when there is one: a
+        // direct-streamlocal channel is a channel, not a session, so
+        // `MaxSessions` stops counting panes at all.
+        if setup.channel == RouteChannel::Control
+            && let RemoteEntry::StreamLocal { socket } = &entry
+            && let Some(pane) = remote_link::pane_socket_beside(socket)
+        {
+            conn.set_remote_entry(
+                &format!("{instance_key}#pane"),
+                RemoteEntry::StreamLocal { socket: pane },
+            )
+            .await;
+        }
 
         if let RemoteEntry::StreamLocal { socket } = &entry {
             let mut opened = conn.open_direct_streamlocal(socket).await;

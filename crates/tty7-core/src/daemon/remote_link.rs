@@ -240,6 +240,17 @@ pub fn remote_pane_socket(env: &RemoteEnv) -> Option<String> {
         .find(|candidate| fits(candidate))
 }
 
+/// The pane socket that belongs beside a control socket.
+///
+/// A pane wants the daemon's own endpoint, which lives in the same directory as
+/// the control socket it already knows. Deriving it beats probing for `$HOME`:
+/// a probe costs a session channel, and a session channel is exactly what the
+/// pane route is trying to stop spending.
+pub fn pane_socket_beside(control_socket: &str) -> Option<String> {
+    let (dir, _) = control_socket.rsplit_once('/')?;
+    Some(posix_join(dir, "daemon.sock"))
+}
+
 pub fn remote_control_socket(env: &RemoteEnv) -> Option<String> {
     if let Some(explicit) = env.control_sock.as_deref().filter(|s| !s.is_empty()) {
         return Some(explicit.to_string());
@@ -384,6 +395,16 @@ impl std::fmt::Debug for RemoteLink {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn the_pane_socket_sits_beside_the_control_socket() {
+        assert_eq!(
+            pane_socket_beside("/root/.config/tty7/control.sock").as_deref(),
+            Some("/root/.config/tty7/daemon.sock"),
+            "the pane endpoint is the control socket's neighbour"
+        );
+        assert_eq!(pane_socket_beside("no-slash"), None);
+    }
 
     #[test]
     fn the_pane_socket_is_the_daemons_own() {
