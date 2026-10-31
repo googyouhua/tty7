@@ -1830,6 +1830,7 @@ impl Tty7App {
     }
 
     pub(crate) fn save_session(&self, cx: &mut App) {
+        crate::ui::stall::crumb("saving the session");
         for view in self.tabs.iter().flat_map(|tab| tab.pane.terminals()) {
             let Some(owner) = view.read(cx).owner_workspace() else {
                 continue;
@@ -2061,24 +2062,77 @@ impl Tty7App {
     pub(crate) fn adopt_workspace(
         &mut self,
         id: WorkspaceId,
-        session: Session,
+        mut session: Session,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        crate::ui::stall::crumb("adopting a workspace's tabs");
+        // A window opening onto a machine builds the tab it is about to show and
+        // leaves the rest asleep for the moment; the loop at the bottom of this
+        // function wakes them, a few frames later. Ten pane views in one frame is
+        // the first frame of the session — the window stops answering while every
+        // terminal sets itself up — and waking them in order costs nothing that
+        // anyone sees.
+        if self.tabs.is_empty() && session.tabs.len() > 1 {
+            let active = session.active.min(session.tabs.len() - 1);
+            let mut asleep = 0;
+            for (index, tab) in session.tabs.iter_mut().enumerate() {
+                if index != active && !tab.hibernated {
+                    tab.hibernated = true;
+                    asleep += 1;
+                }
+            }
+            log::info!("opening with 1 tab awake; {asleep} more follow one at a time");
+        }
         let previous_host = self.spawn_host(cx);
         self.workspace = id;
         self.rebind_host(previous_host, cx);
         self.refresh_shells(cx);
         let font_size = self.font_size;
         let pane_ws = self.window_workspace(cx);
-        let (tabs, active, dropped) = tabs_from_session(
-            pane_ws.as_ref(),
-            self.workspace,
-            Some(session),
-            font_size,
-            window,
-            cx,
-        );
+        // The tree a pull answers with is usually the one this window already
+        // shows, plus a tab someone just made. Rebuilding all of them to add one
+        // tears down every pane view in the window — nine of them on a nine-tab
+        // workspace — and that is the pause people feel as the window freezing
+        // while a tab is created. When the tabs on screen are a prefix of the
+        // pull's, build only the tail.
+        let held: Vec<tty7_core::core::machine::TabId> =
+            self.tabs.iter().map(|t| t.tree_id.get()).collect();
+        let wanted: Vec<tty7_core::core::machine::TabId> =
+            session.tabs.iter().filter_map(|t| t.tree_id).collect();
+        let appends = !held.is_empty()
+            && wanted.len() == session.tabs.len()
+            && wanted.len() > held.len()
+            && wanted.starts_with(&held);
+        let (tabs, active, dropped) = if appends {
+            let active_wanted = session.active;
+            let mut tail = session;
+            tail.tabs = tail.tabs.split_off(held.len());
+            tail.active = active_wanted
+                .saturating_sub(held.len())
+                .min(tail.tabs.len().saturating_sub(1));
+            let (fresh, _, dropped) = tabs_from_session(
+                pane_ws.as_ref(),
+                self.workspace,
+                Some(tail),
+                font_size,
+                window,
+                cx,
+            );
+            let mut tabs = std::mem::take(&mut self.tabs);
+            tabs.extend(fresh);
+            let active = active_wanted.min(tabs.len().saturating_sub(1));
+            (tabs, active, dropped)
+        } else {
+            tabs_from_session(
+                pane_ws.as_ref(),
+                self.workspace,
+                Some(session),
+                font_size,
+                window,
+                cx,
+            )
+        };
         if dropped > 0 {
             window.push_notification(
                 gpui_component::notification::Notification::warning(t_plural(
@@ -2092,10 +2146,48 @@ impl Tty7App {
         self.tabs = tabs;
         self.active = active;
         self.maximized = None;
+        crate::ui::stall::crumb("focusing the active tab");
         self.wake_active_if_asleep(window, cx);
         self.save_session(cx);
         crate::ui::windows::refresh_menu(cx);
         self.focus_active(window, cx);
+        // Every sleeping tab wakes on its own, one at a time. Building ten panes
+        // in the frame that opens the window is what makes entering a machine
+        // feel like a freeze, and a far end that answers slowly has no business
+        // holding the window for it; a tab that fills in 120 ms later still looks
+        // like it was already there.
+        // Named by tree id rather than position: the window can be switched to
+        // another workspace, or have tabs closed, while this runs, and waking
+        // the tab that has since taken index `n` would be waking a stranger.
+        let sleeping: Vec<tty7_core::core::machine::TabId> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.is_asleep())
+            .map(|tab| tab.tree_id.get())
+            .collect();
+        if !sleeping.is_empty() {
+            log::info!("waking {} sleeping tab(s) one at a time", sleeping.len());
+            cx.spawn(async move |this, cx| {
+                for tab in sleeping {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(120))
+                        .await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if this.workspace != id {
+                            return;
+                        }
+                        if let Some(index) = this
+                            .tabs
+                            .iter()
+                            .position(|t| t.tree_id.get() == tab && t.is_asleep())
+                        {
+                            let _ = this.wake_tab(index, window, cx);
+                        }
+                    });
+                }
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -5507,6 +5599,7 @@ impl Tty7App {
         let Some(asleep) = self.tabs.get_mut(index).and_then(|t| t.asleep.take()) else {
             return true;
         };
+        crate::ui::stall::crumb("waking a tab");
         let pane_ws = self.window_workspace(cx);
         let layout = redial_native_ssh(&asleep.layout);
         // No listing: every pane in here was stopped on purpose, so the attach
@@ -9542,6 +9635,7 @@ impl ForwardRoute {
 
 impl Render for Tty7App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ui::stall::crumb("painting the window");
         #[cfg(test)]
         render_probe::record();
         let prof = crate::ui::perf::enabled().then(std::time::Instant::now);
@@ -10448,14 +10542,18 @@ impl Render for Tty7App {
                 .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
                     this.child(el)
                 })
+                .children(self.render_switcher(window, cx))
                 // Same reason, and the ssh prompt has more claim to it than any
                 // of them: nothing in the window can proceed until the password
                 // is answered, so the scrim has to cover the whole window and
-                // not stop at the terminal area.
+                // not stop at the terminal area. After the switcher on purpose:
+                // a connect started from the switcher asks for its password
+                // while the switcher is still up, and the sheet — with the
+                // focused field the user is typing into — has to be on top of
+                // the switcher's own scrim, not under it.
                 .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
                     this.child(el)
                 })
-                .children(self.render_switcher(window, cx))
                 .when_some(self.search.clone(), |this, search| this.child(search))
                 .children(gpui_component::Root::render_notification_layer(window, cx));
         let root = Self::with_editor_text_commands(root, cx);

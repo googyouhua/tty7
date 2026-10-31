@@ -1370,6 +1370,7 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
         hydrate_with(cx, client_ws, adopt, showing);
         return;
     }
+    crate::ui::stall::crumb("syncing the window with the tree");
     adopt_tab_ids(app, cx);
     let (desired, desired_active, mut held) = desired_tabs(app, cx);
     let machine_ws = tree_workspace_id(cx, client_ws);
@@ -2862,7 +2863,30 @@ fn settle_hydration(
         wanted,
         "a session rebuilt from the tree names every tab it holds"
     );
+    // The pull answered with the layout this window is already showing: the
+    // same tabs, in the same order. Rebuilding would tear down every pane view
+    // and put the same nine back — a second and a half of the UI thread, and
+    // every rebuilt pane dials its route again — to arrive where it started.
+    // What a reconnect actually needs is the panes' links, which the relink pump
+    // owns; the views themselves are already the ones the tree describes.
+    let shown = tabs_on_screen(cx, client_ws);
+    if shown == wanted_ids {
+        log::info!(
+            "workspace {client_ws}: the window already shows all {wanted} tab(s); not rebuilding"
+        );
+        settle_rebuild(cx, client_ws, wanted, &wanted_ids, &shown);
+        return true;
+    }
+    crate::ui::stall::crumb("rebuilding the workspace's tabs");
     log::info!("rebuilding {wanted} tab(s) of workspace {client_ws} from its machine's tree");
+    // This is the one connect phase that runs on the UI thread: naming it is
+    // what turns a stall here from "no connect was in flight" into the rebuild
+    // that caused it.
+    let _stage = crate::ui::remote_connect::StageGuard;
+    crate::ui::remote_connect::note_stage(
+        crate::ui::remote_connect::ConnectStage::Adopting,
+        &client_ws.to_string(),
+    );
     let _ = handle.update(cx, move |_, window, cx| {
         app.update(cx, |app, cx| {
             app.adopt_workspace(client_ws, session, window, cx)

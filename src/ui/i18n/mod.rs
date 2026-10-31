@@ -1432,6 +1432,7 @@ l10n_keys! {
     RemoteRestartFailedTitle,
     RemoteRestartFailedBody,
     RemoteHostUnreachable,
+    RemoteConnectTimedOut,
     RemoteInstallTitle,
     RemoteInstallDetail,
     RemoteInstallPathLabel,

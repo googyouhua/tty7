@@ -339,11 +339,140 @@ pub struct Connected {
     pub rows: Vec<RemoteWorkspaceRow>,
 }
 
+/// How long the far end gets to acknowledge the route before the attempt is
+/// failed.
+///
+/// This is the one connect wait with no deadline of its own: the far end may
+/// still be starting a server, installing one, or asking for credentials, and a
+/// peer that takes the header and then goes quiet used to park the attempt — and
+/// the window's spinner — for as long as the process lived. Install progress
+/// frames restart the clock on their own, because every one of them is a read.
+const ROUTE_ACK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a prompt may wait behind another machine's sheet before it gives up.
+///
+/// Long enough for someone to finish typing one password; short enough that a
+/// gate held by a sheet nobody can reach fails its route instead of leaving the
+/// window looking frozen for the far end's whole two-minute grace time.
+pub const PARKED_GIVE_UP: Duration = Duration::from_secs(60);
+
+/// The phase a connect is in, so a stall can say what it was waiting on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectStage {
+    Starting,
+    Routing,
+    Hello,
+    Listing,
+    Finishing,
+    /// The link is up and the window is turning the machine's tree into tabs.
+    /// This one runs on the UI thread, so it is the phase a stall is most likely
+    /// to be caught in.
+    Adopting,
+}
+
+impl ConnectStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            ConnectStage::Starting => "starting the daemon",
+            ConnectStage::Routing => "waiting for the route",
+            ConnectStage::Hello => "waiting for the control hello",
+            ConnectStage::Listing => "listing workspaces",
+            ConnectStage::Finishing => "finishing the connect",
+            ConnectStage::Adopting => "building the workspace",
+        }
+    }
+}
+
+static CONNECT_STAGE: OnceLock<Mutex<Option<(ConnectStage, String, Instant)>>> = OnceLock::new();
+
+/// Record the phase the next connect is in. The stall watchdog reads this when
+/// the UI thread stops beating, which is the only way to tell a frozen window
+/// from a slow one after the fact.
+pub fn note_stage(stage: ConnectStage, label: &str) {
+    let slot = CONNECT_STAGE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut slot) = slot.lock() {
+        *slot = Some((stage, label.to_string(), Instant::now()));
+    }
+}
+
+/// The phase of the newest connect, with how long it has been in it.
+pub fn stage_snapshot() -> Option<(ConnectStage, String, Duration)> {
+    CONNECT_STAGE
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|slot| slot.clone()))
+        .map(|(stage, label, since)| (stage, label, since.elapsed()))
+}
+
+/// Forget the in-flight phase: the attempt this named is over.
+pub fn clear_stage() {
+    if let Some(slot) = CONNECT_STAGE.get()
+        && let Ok(mut slot) = slot.lock()
+    {
+        *slot = None;
+    }
+}
+
+/// Clears the in-flight phase when the call it marks returns, however it
+/// returns. Without it a phase outlives its attempt, and the watchdog then
+/// blames a stall on a connect that finished half a minute ago.
+pub(crate) struct StageGuard;
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        clear_stage();
+    }
+}
+
+/// The message for a connect whose whole attempt ran past its budget.
+///
+/// The phase goes to the log, not the sentence: it is a protocol word
+/// ("waiting for the control hello") that has no translation of its own, and a
+/// person who needs it is reading the log anyway.
+pub fn attempt_timed_out(label: &str) -> String {
+    match stage_snapshot() {
+        Some((stage, machine, waited)) => log::warn!(
+            "connect to {machine} timed out after {}s in {}",
+            waited.as_secs(),
+            stage.label()
+        ),
+        None => log::warn!("connect to {label} timed out with no phase recorded"),
+    }
+    t_fmt(L10nKey::RemoteConnectTimedOut, &[("machine", label)])
+}
+
+/// Arms a read deadline for the length of one connect phase, and takes it off
+/// again however that phase ends.
+///
+/// The reader thread that takes the stream over afterwards must see blocking
+/// reads: left armed, an idle link would look like a silent peer and tear itself
+/// down on the first quiet minute.
+struct ReadDeadline(crate::daemon::transport::Stream);
+
+impl ReadDeadline {
+    fn arm(stream: &crate::daemon::transport::Stream, timeout: Duration) -> io::Result<Self> {
+        // A duplicate rather than a borrow: the deadline has to outlive the call
+        // that needs `&mut stream`, and the socket option is shared with the
+        // duplicate because both name the same file description.
+        let handle = stream.try_clone()?;
+        crate::daemon::transport::set_read_timeout(&handle, Some(timeout))?;
+        Ok(Self(handle))
+    }
+}
+
+impl Drop for ReadDeadline {
+    fn drop(&mut self) {
+        let _ = crate::daemon::transport::set_read_timeout(&self.0, None);
+    }
+}
+
 pub fn connect_blocking(
     target: &RemoteTarget,
     header: RouteHeader,
     label: &str,
 ) -> Result<Connected, String> {
+    let _stage = StageGuard;
+    note_stage(ConnectStage::Starting, label);
+    let started = Instant::now();
     note_origin(&header.target, target);
     crate::daemon::spawn::ensure_running().map_err(|e| {
         t_fmt(
@@ -360,13 +489,28 @@ pub fn connect_blocking(
     })?;
 
     let mut stream = stream;
-    crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+    note_stage(ConnectStage::Routing, label);
+    let routed_at = Instant::now();
+    let deadline = ReadDeadline::arm(&stream, ROUTE_ACK_TIMEOUT).map_err(|e| {
         t_fmt(
             L10nKey::RemoteHostUnreachable,
             &[("machine", label), ("error", &e.to_string())],
         )
     })?;
+    let negotiated = crate::daemon::router::negotiate(&mut stream, &header);
+    drop(deadline);
+    negotiated.map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteHostUnreachable,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
+    log::info!(
+        "connect to {label}: routed in {}ms",
+        routed_at.elapsed().as_millis()
+    );
 
+    note_stage(ConnectStage::Hello, label);
     let hello = ControlHello::host_rpc(new_session_token(), client_hostname());
     let host = handshake(stream, &target.connection_key(), &hello).map_err(|e| {
         t_fmt(
@@ -375,14 +519,20 @@ pub fn connect_blocking(
         )
     })?;
 
+    note_stage(ConnectStage::Listing, label);
     let rows = list_workspaces(&host).map_err(|e| {
         t_fmt(
             L10nKey::RemoteWorkspaceListFailed,
             &[("machine", label), ("error", &e.to_string())],
         )
     })?;
+    note_stage(ConnectStage::Finishing, label);
     let home = host.home();
     refresh_agent_hooks_once(&host, &home);
+    log::info!(
+        "connect to {label}: ready in {}ms",
+        started.elapsed().as_millis()
+    );
     Ok(Connected { host, home, rows })
 }
 
@@ -587,6 +737,51 @@ pub fn human_bytes(n: u64) -> String {
 
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Which connect an authentication prompt belongs to.
+///
+/// The same machine can be connected to twice in a row — the first attempt
+/// cancelled while it is still on the wire, the second already dialling — and a
+/// password asked by one, or a result that arrives late for one, must not be
+/// spent on the other. The counter is process-wide and never wraps in any
+/// session's lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AttemptId(u64);
+
+static NEXT_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_attempt() -> AttemptId {
+    AttemptId(NEXT_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The attempt currently on the wire for each machine, if one is.
+///
+/// The router builds a prompt on a daemon thread with no window and no flow to
+/// look at, so this is how a `PendingAuth` learns which connect asked it. A
+/// prompt for a cancelled attempt is then answered into nothing instead of into
+/// whichever connect happens to be current when the user types.
+static ATTEMPT_BY_HOST: std::sync::LazyLock<Mutex<HashMap<HostId, AttemptId>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn note_attempt(host: HostId, attempt: AttemptId) {
+    if let Ok(mut map) = ATTEMPT_BY_HOST.lock() {
+        map.insert(host, attempt);
+    }
+}
+
+/// Forget `attempt` only if it is still the one on the wire. A retired attempt
+/// must not take a newer one's place with it.
+pub(crate) fn retire_attempt(host: HostId, attempt: AttemptId) {
+    if let Ok(mut map) = ATTEMPT_BY_HOST.lock()
+        && map.get(&host) == Some(&attempt)
+    {
+        map.remove(&host);
+    }
+}
+
+pub(crate) fn current_attempt(host: HostId) -> Option<AttemptId> {
+    ATTEMPT_BY_HOST.lock().ok()?.get(&host).copied()
+}
+
 pub struct PendingInstall {
     pub request: InstallRequest,
     reply: std::sync::mpsc::SyncSender<InstallDecision>,
@@ -661,6 +856,25 @@ pub fn take_pending_install() -> Option<PendingInstall> {
     MAILBOX.lock().ok()?.pop()
 }
 
+/// Drop the install-consent question this machine is waiting on, if one is.
+///
+/// A connect that was called off must not later pop a modal about installing a
+/// server for it — and must not leave the far end waiting on that answer.
+pub fn cancel_pending_install(host: HostId) {
+    let Ok(mut mailbox) = MAILBOX.lock() else {
+        return;
+    };
+    let all: Vec<PendingInstall> = mailbox.drain(..).collect();
+    let (ours, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| {
+        origin_host(&p.request.host).unwrap_or_else(|| HostId::from_connection_key(&p.request.host))
+            == host
+    });
+    *mailbox = rest;
+    for pending in ours {
+        pending.answer(InstallDecision::Decline);
+    }
+}
+
 pub struct PendingAuth {
     pub host: HostId,
     pub prompt: AuthPromptKind,
@@ -676,6 +890,16 @@ pub struct PendingAuth {
     /// The route already carried a stored password into this attempt, so a
     /// password prompt arriving anyway means the server turned it down.
     pub auto_supplied_password: bool,
+    /// The connect that asked this, when one was on the wire for the machine.
+    /// `None` for a prompt raised outside a client connect (a route the GUI
+    /// itself dials) — those cannot be tied to an attempt and are answered by
+    /// whoever is at the keyboard.
+    pub attempt: Option<AttemptId>,
+    /// When the sheet queue made this prompt wait behind another machine's
+    /// sheet, if it is waiting at all. A prompt parked behind a sheet nobody can
+    /// answer gives up after [`PARKED_GIVE_UP`] rather than sitting out the far
+    /// end's two-minute grace time with nothing on screen to explain the wait.
+    pub parked_since: Option<Instant>,
     reply: std::sync::mpsc::SyncSender<AuthResponse>,
     /// Alive for exactly as long as someone is waiting on `reply`. The asker
     /// holds the only strong count and drops it the moment it stops waiting —
@@ -718,6 +942,8 @@ impl PendingAuth {
             prompt,
             endpoint: None,
             auto_supplied_password: false,
+            attempt: None,
+            parked_since: None,
             reply,
             asker: Arc::downgrade(&asker),
         };
@@ -815,6 +1041,8 @@ fn ask_routed(
             prompt: prompt.clone(),
             endpoint,
             auto_supplied_password,
+            attempt: current_attempt(host),
+            parked_since: None,
             reply: tx,
             asker: Arc::downgrade(&asker),
         });
@@ -824,6 +1052,35 @@ fn ask_routed(
 
 pub fn take_pending_auth() -> Option<PendingAuth> {
     AUTH_MAILBOX.lock().ok()?.pop()
+}
+
+/// Answer every prompt this attempt still has in the mailbox with `Cancelled`.
+///
+/// A connect that was called off may have asked its question microseconds
+/// before the pump could raise it. Left in the mailbox it would be raised on
+/// the next tick — for an attempt nobody is watching — and, worse, the asker
+/// would go on waiting for an answer nobody wants to give. Prompted by a
+/// different attempt for the same machine is none of this one's business.
+pub fn cancel_pending_auth(host: HostId, attempt: AttemptId) {
+    cancel_pending_auth_where(|p| p.host == host && p.attempt == Some(attempt));
+}
+
+/// The same, for every prompt the machine has, whatever attempt asked it. Used
+/// when the machine is disconnected outright: there is nothing left to answer.
+pub fn cancel_pending_auth_for_host(host: HostId) {
+    cancel_pending_auth_where(|p| p.host == host);
+}
+
+fn cancel_pending_auth_where(mut theirs: impl FnMut(&PendingAuth) -> bool) {
+    let Ok(mut mailbox) = AUTH_MAILBOX.lock() else {
+        return;
+    };
+    let all: Vec<PendingAuth> = mailbox.drain(..).collect();
+    let (ours, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| theirs(p));
+    *mailbox = rest;
+    for pending in ours {
+        pending.answer(AuthResponse::Cancelled);
+    }
 }
 
 #[cfg(test)]
@@ -891,6 +1148,7 @@ pub fn dialect_complaint(error: &str, machine: &str) -> Option<String> {
 }
 
 pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), String> {
+    let _stage = StageGuard;
     let action = header.action;
     crate::daemon::spawn::ensure_running().map_err(|e| {
         t_fmt(
@@ -904,7 +1162,16 @@ pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), S
             &[("error", &e.to_string())],
         )
     })?;
-    let ack = crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+    note_stage(ConnectStage::Routing, label);
+    let deadline = ReadDeadline::arm(&stream, ROUTE_ACK_TIMEOUT).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteServerRestartFailed,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
+    let ack = crate::daemon::router::negotiate(&mut stream, &header);
+    drop(deadline);
+    let ack = ack.map_err(|e| {
         t_fmt(
             L10nKey::RemoteServerRestartFailed,
             &[("machine", label), ("error", &e.to_string())],

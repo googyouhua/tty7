@@ -200,6 +200,25 @@ impl RemoteEnv {
     }
 }
 
+/// The pane socket that belongs beside a control socket.
+///
+/// A pane wants the daemon's own endpoint, which lives in the same directory as
+/// the control socket it already knows. Deriving it beats probing for `$HOME`:
+/// a probe costs a session channel, and a session channel is exactly what the
+/// pane route is trying to stop spending.
+///
+/// Both layouts are handled, because the two endpoints are named apart when the
+/// paths get long: `<dir>/control.sock` sits beside `<dir>/daemon.sock`, while
+/// `tty7-<hash>-control.sock` sits beside `tty7-<hash>.sock`.
+pub fn pane_socket_beside(control_socket: &str) -> Option<String> {
+    let (dir, name) = control_socket.rsplit_once('/')?;
+    let pane = match name.strip_suffix("-control.sock") {
+        Some(stem) => format!("{stem}.sock"),
+        None => "daemon.sock".to_string(),
+    };
+    Some(posix_join(dir, &pane))
+}
+
 pub fn remote_control_socket(env: &RemoteEnv) -> Option<String> {
     if let Some(explicit) = env.control_sock.as_deref().filter(|s| !s.is_empty()) {
         return Some(explicit.to_string());
@@ -344,6 +363,21 @@ impl std::fmt::Debug for RemoteLink {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn the_pane_socket_sits_beside_the_control_socket() {
+        assert_eq!(
+            pane_socket_beside("/root/.config/tty7/control.sock").as_deref(),
+            Some("/root/.config/tty7/daemon.sock"),
+            "the pane endpoint is the control socket's neighbour"
+        );
+        assert_eq!(
+            pane_socket_beside("/run/user/1000/tty7-0123456789abcdef-control.sock").as_deref(),
+            Some("/run/user/1000/tty7-0123456789abcdef.sock"),
+            "the long-path layout keeps its hashed stem"
+        );
+        assert_eq!(pane_socket_beside("no-slash"), None);
+    }
 
     #[test]
     fn only_a_pane_link_asks_for_the_pane_socket() {
