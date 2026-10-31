@@ -1370,6 +1370,7 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
         hydrate_with(cx, client_ws, adopt, showing);
         return;
     }
+    crate::ui::stall::crumb("syncing the window with the tree");
     adopt_tab_ids(app, cx);
     let (desired, desired_active, mut held) = desired_tabs(app, cx);
     let machine_ws = tree_workspace_id(cx, client_ws);

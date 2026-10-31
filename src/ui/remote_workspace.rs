@@ -1808,6 +1808,7 @@ impl RemoteLinks {
 }
 
 fn pump_tick(cx: &mut gpui::App) -> bool {
+    crate::ui::stall::crumb("supervisor tick");
     let started = Instant::now();
     drain_events(cx);
     pump_auth_sheets(cx);
@@ -2189,6 +2190,7 @@ fn workspaces_on(cx: &gpui::App, host: HostId) -> Vec<(WorkspaceId, String)> {
 }
 
 pub(crate) fn drain_events(cx: &mut gpui::App) {
+    crate::ui::stall::crumb("draining control events");
     let events = match EVENTS.lock() {
         Ok(mut queue) => std::mem::take(&mut *queue),
         Err(_) => return,

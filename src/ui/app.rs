@@ -1830,6 +1830,7 @@ impl Tty7App {
     }
 
     pub(crate) fn save_session(&self, cx: &mut App) {
+        crate::ui::stall::crumb("saving the session");
         for view in self.tabs.iter().flat_map(|tab| tab.pane.terminals()) {
             let Some(owner) = view.read(cx).owner_workspace() else {
                 continue;
@@ -5604,6 +5605,7 @@ impl Tty7App {
         let Some(asleep) = self.tabs.get_mut(index).and_then(|t| t.asleep.take()) else {
             return true;
         };
+        crate::ui::stall::crumb("waking a tab");
         let pane_ws = self.window_workspace(cx);
         let layout = redial_native_ssh(&asleep.layout);
         // No listing: every pane in here was stopped on purpose, so the attach
