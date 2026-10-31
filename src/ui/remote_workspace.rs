@@ -2398,6 +2398,7 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
     if panes.is_empty() {
         return;
     }
+    crate::ui::stall::crumb("relinking every pane of the workspace");
     log::info!("relinking {} pane(s) of workspace {workspace}", panes.len());
     for view in panes {
         // Claimed before the dial so the pump's sweep, which runs every
@@ -2528,6 +2529,7 @@ fn relink_dead_panes(
     // Claimed pane by pane as well as workspace by workspace: the machine
     // supervisor's own `relink_panes` reads the same flag, and two `Attach`es
     // for one pane_id do not queue — the daemon's second one kicks the first.
+    crate::ui::stall::crumb("opening the dead panes' links");
     let plans: Vec<_> = panes
         .iter()
         .map(|view| {

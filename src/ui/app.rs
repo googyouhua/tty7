@@ -2065,6 +2065,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        crate::ui::stall::crumb("adopting a workspace's tabs");
         let previous_host = self.spawn_host(cx);
         self.workspace = id;
         self.rebind_host(previous_host, cx);
@@ -2127,6 +2128,7 @@ impl Tty7App {
         self.tabs = tabs;
         self.active = active;
         self.maximized = None;
+        crate::ui::stall::crumb("focusing the active tab");
         self.wake_active_if_asleep(window, cx);
         self.save_session(cx);
         crate::ui::windows::refresh_menu(cx);
@@ -9577,6 +9579,7 @@ impl ForwardRoute {
 
 impl Render for Tty7App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ui::stall::crumb("painting the window");
         #[cfg(test)]
         render_probe::record();
         let prof = crate::ui::perf::enabled().then(std::time::Instant::now);

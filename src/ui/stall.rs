@@ -30,6 +30,46 @@ static CLOCK: OnceLock<Instant> = OnceLock::new();
 static BEAT_MS: AtomicU64 = AtomicU64::new(0);
 static INSTALLED: OnceLock<()> = OnceLock::new();
 
+/// The last few things the UI thread started, oldest first.
+///
+/// A duration on its own says the window stopped answering but not what it was
+/// doing; with these, the line names the work. Kept tiny and only written where
+/// a stall has actually been seen, so the cost is one lock per frame at worst.
+const CRUMBS: usize = 8;
+
+struct Bread {
+    next: usize,
+    ring: [&'static str; CRUMBS],
+}
+
+static BREAD: std::sync::Mutex<Bread> = std::sync::Mutex::new(Bread {
+    next: 0,
+    ring: [""; CRUMBS],
+});
+
+/// Record that the UI thread is about to do `what`.
+pub fn crumb(what: &'static str) {
+    if let Ok(mut bread) = BREAD.lock() {
+        let at = bread.next;
+        bread.ring[at] = what;
+        bread.next = (at + 1) % CRUMBS;
+    }
+}
+
+fn recent() -> String {
+    let Ok(bread) = BREAD.lock() else {
+        return String::new();
+    };
+    let mut out: Vec<&'static str> = Vec::with_capacity(CRUMBS);
+    for step in 0..CRUMBS {
+        let item = bread.ring[(bread.next + step) % CRUMBS];
+        if !item.is_empty() {
+            out.push(item);
+        }
+    }
+    out.join(" -> ")
+}
+
 fn clock() -> &'static Instant {
     CLOCK.get_or_init(Instant::now)
 }
@@ -77,9 +117,10 @@ pub fn install(cx: &mut App) {
                 if stalled.is_none() {
                     stalled = Some(Instant::now());
                     log::warn!(
-                        "ui thread stalled for {}ms — {}",
+                        "ui thread stalled for {}ms - {} - last: {}",
                         quiet.as_millis(),
-                        in_flight()
+                        in_flight(),
+                        recent()
                     );
                 }
             }
@@ -111,5 +152,19 @@ mod tests {
         // reads as the time since the clock started, and that the arithmetic
         // does not wrap into something enormous.
         assert!(quiet_for() < Duration::from_secs(60));
+    }
+
+    #[test]
+    fn the_crumbs_read_oldest_first() {
+        crumb("crumb test one");
+        crumb("crumb test two");
+        let trail = recent();
+        let first = trail
+            .find("crumb test one")
+            .expect("the first crumb is kept");
+        let second = trail
+            .find("crumb test two")
+            .expect("the second crumb is kept");
+        assert!(first < second, "the newest crumb reads last: {trail}");
     }
 }

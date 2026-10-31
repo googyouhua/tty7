@@ -2876,6 +2876,7 @@ fn settle_hydration(
         settle_rebuild(cx, client_ws, wanted, &wanted_ids, &shown);
         return true;
     }
+    crate::ui::stall::crumb("rebuilding the workspace's tabs");
     log::info!("rebuilding {wanted} tab(s) of workspace {client_ws} from its machine's tree");
     // This is the one connect phase that runs on the UI thread: naming it is
     // what turns a stall here from "no connect was in flight" into the rebuild
