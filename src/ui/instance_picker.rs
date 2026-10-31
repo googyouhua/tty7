@@ -427,6 +427,9 @@ pub struct InstancePicker {
     list_scroll: ScrollHandle,
     focus: FocusHandle,
     relaunch_failed: bool,
+    /// Only the Windows relaunch reads it; elsewhere the picker continues
+    /// in-process and never needs the arguments again.
+    #[cfg_attr(not(windows), allow(dead_code))]
     passthrough: Vec<OsString>,
     result: Arc<Mutex<Option<Option<PickerSelection>>>>,
     _sub: Subscription,
