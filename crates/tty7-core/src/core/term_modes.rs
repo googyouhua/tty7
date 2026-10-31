@@ -125,6 +125,15 @@ impl KeyboardStacks {
         self.reload();
     }
 
+    /// Both stacks emptied and no flags in effect, on whichever screen is up
+    /// — what `Term::reset_keyboard_modes` leaves in the client's emulator.
+    fn clear(&mut self) {
+        *self = Self {
+            on_alt: self.on_alt,
+            ..Self::default()
+        };
+    }
+
     /// The bytes that rebuild these stacks on a fresh emulator, around `dec`
     /// (mode sets that may include the switch to the alternate screen).
     ///
@@ -175,10 +184,19 @@ pub struct TerminalModes {
     on: Vec<u16>,
     state: State,
     params: Vec<u8>,
-    /// `CSI ? 996 n` queries seen and not yet taken — see
-    /// [`Self::take_color_scheme_queries`].
-    color_scheme_queries: usize,
+    /// Queries seen and not yet taken — see [`Self::take_queries`].
+    queries: Vec<Query>,
     keyboard: KeyboardStacks,
+}
+
+/// A query whose answer the program waits on, which the tracker spots so
+/// whoever owns the pane's input can answer it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Query {
+    /// `CSI c` / `CSI 0 c`: primary device attributes.
+    DeviceAttributes,
+    /// `CSI ? 996 n`: is the colour scheme dark or light?
+    ColorScheme,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,10 +234,11 @@ impl TerminalModes {
         self.on.contains(&mode)
     }
 
-    /// How many `CSI ? 996 n` (which scheme is on?) queries were fed since the
-    /// last call. The tracker only counts them; answering is the caller's job.
-    pub fn take_color_scheme_queries(&mut self) -> usize {
-        std::mem::take(&mut self.color_scheme_queries)
+    /// The queries fed since the last call, in the order they were asked.
+    /// Every feeder must take them, or they pile up; answering is the
+    /// caller's job.
+    pub fn take_queries(&mut self) -> Vec<Query> {
+        std::mem::take(&mut self.queries)
     }
 
     /// The bytes that put a freshly reset terminal back into these modes, or
@@ -389,7 +408,13 @@ impl TerminalModes {
                     }
                     b'n' => {
                         if marker == b'?' && self.params == b"996" {
-                            self.color_scheme_queries += 1;
+                            self.queries.push(Query::ColorScheme);
+                        }
+                        self.state = State::Text;
+                    }
+                    b'c' => {
+                        if marker == 0 && matches!(self.params.as_slice(), b"" | b"0") {
+                            self.queries.push(Query::DeviceAttributes);
                         }
                         self.state = State::Text;
                     }
@@ -420,9 +445,15 @@ impl TerminalModes {
     /// terminal again, so whatever program switched 2031 on is gone — possibly
     /// killed before it could send `?2031l`. A report after that would be
     /// typed into the shell's command line.
+    ///
+    /// The same goes for the kitty keyboard stacks, on both screens: the
+    /// client clears them at the prompt (`Term::reset_keyboard_modes`), so a
+    /// replay prelude built from flags a dead program pushed before the mark
+    /// would hand them straight back to the next program (#1155).
     fn osc_end(&mut self) {
         if matches!(self.params.as_slice(), b"133;A" | b"133;B" | b"133;D") {
             self.on.retain(|m| *m != COLOR_SCHEME_UPDATES);
+            self.keyboard.clear();
         }
         self.params.clear();
         self.state = State::Text;
@@ -713,6 +744,38 @@ mod tests {
         );
     }
 
+    /// #1155: a prompt mark forgets what the program before it pushed, on
+    /// both screens, but not what is pushed after it.
+    #[test]
+    fn a_shell_prompt_clears_both_kitty_keyboard_stacks() {
+        for mark in [
+            &b"\x1b]133;A\x07"[..],
+            b"\x1b]133;B\x1b\\",
+            b"\x1b]133;D;0\x07",
+        ] {
+            let mut bytes = b"\x1b[>1u\x1b[?1049h\x1b[>7u".to_vec();
+            bytes.extend_from_slice(mark);
+            let k = keyboard(&bytes);
+            assert_eq!(
+                k,
+                KeyboardStacks {
+                    on_alt: true,
+                    ..KeyboardStacks::default()
+                },
+                "the screen stays where it was; only the flags go"
+            );
+            bytes.extend_from_slice(b"\x1b[>1u");
+            let k = keyboard(&bytes);
+            assert_eq!((k.alternate.as_slice(), k.active), (&[1][..], 1));
+        }
+        assert_eq!(keyboard(b"\x1b[>1u\x1b]133;C\x07").active, 1);
+
+        // A replay prelude cut past the mark has nothing left to restore.
+        let mut head = TerminalModes::new();
+        head.feed(b"\x1b[>7u\x1b]133;A\x07");
+        assert!(head.restore_bytes().is_none());
+    }
+
     #[test]
     fn bracketed_paste_reads_as_the_shell_last_left_it() {
         // zle switches it on to read a line and off again before running it,
@@ -726,17 +789,30 @@ mod tests {
     }
 
     #[test]
-    fn follows_colour_scheme_updates_and_counts_its_queries() {
+    fn spots_primary_device_attribute_queries() {
+        let mut modes = TerminalModes::new();
+        modes.feed(b"\x1b]11;?\x07\x1b[");
+        modes.feed(b"c\x1b[0c\x1b[>c\x1b[=c\x1b[?6c");
+        assert_eq!(
+            modes.take_queries(),
+            [Query::DeviceAttributes; 2],
+            "a split DA1 counts, DA2, DA3 and a DA1 reply do not"
+        );
+        assert!(modes.take_queries().is_empty());
+    }
+
+    #[test]
+    fn follows_colour_scheme_updates_and_spots_its_queries() {
         let mut modes = TerminalModes::new();
         modes.feed(b"\x1b[?2031h\x1b[?99");
         assert!(modes.is_on(COLOR_SCHEME_UPDATES));
         modes.feed(b"6n\x1b[?996n\x1b[996n\x1b[?997;1n");
         assert_eq!(
-            modes.take_color_scheme_queries(),
-            2,
+            modes.take_queries(),
+            [Query::ColorScheme; 2],
             "a split query counts, a non-private one does not"
         );
-        assert_eq!(modes.take_color_scheme_queries(), 0);
+        assert!(modes.take_queries().is_empty());
         modes.feed(b"\x1b[?2031l");
         assert!(!modes.is_on(COLOR_SCHEME_UPDATES));
     }

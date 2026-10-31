@@ -17,8 +17,14 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Daemon {
+        Self::start_with(|_| {})
+    }
+
+    fn start_with(configure: impl FnOnce(&mut Command)) -> Daemon {
         let dir = tempfile::TempDir::new().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_tty7-server"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tty7-server"));
+        configure(&mut command);
+        let child = command
             .arg("--daemon")
             .arg("--config-dir")
             .arg(dir.path())
@@ -139,6 +145,62 @@ fn collect_until(session: &mut tty7_core::client::PaneSession, marker: &[u8]) ->
 }
 
 #[test]
+#[cfg(unix)]
+fn a_gui_file_limit_does_not_break_mobile_input_with_many_desktop_panes() {
+    use std::os::unix::process::CommandExt;
+
+    let daemon = Daemon::start_with(|command| unsafe {
+        // Launch Services on macOS normally gives an app a soft limit of
+        // 256. Set only this child to that limit; keep the runner unchanged.
+        command.pre_exec(|| {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            limit.rlim_cur = 256.min(limit.rlim_max);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    });
+    let panes = daemon.panes();
+    let mut desktops = Vec::new();
+    for n in 0..60 {
+        let pane = panes
+            .spawn(None, size(), Some(interactive_shell()), None, None)
+            .unwrap_or_else(|e| panic!("desktop pane {}: {e}", n + 1));
+        desktops.push(pane);
+    }
+    let id = desktops[0].pane_id();
+    for round in 0..3 {
+        let mut phone = panes.observe(id, size()).expect("phone can open the pane");
+        phone.set_recv_timeout(Some(STREAM_WITHIN)).unwrap();
+        let marker = format!("mobile-still-works-{round}");
+        panes
+            .send_input(
+                id,
+                format!("printf 'mobile-%s\\n' still-works-{round}\r").as_bytes(),
+            )
+            .expect("phone input is acknowledged beside the desktop connections");
+        collect_until(&mut phone, marker.as_bytes());
+        phone.detach().unwrap();
+    }
+    // The desktop's existing connection still types and receives output too.
+    desktops[0].set_recv_timeout(Some(STREAM_WITHIN)).unwrap();
+    desktops[0]
+        .input(b"printf 'desktop-%s\\n' still-works\r")
+        .unwrap();
+    collect_until(&mut desktops[0], b"desktop-still-works");
+    for pane in desktops {
+        pane.kill().unwrap();
+    }
+}
+
+#[test]
 fn send_input_reaches_the_shell_without_displacing_the_controller() {
     let daemon = Daemon::start();
     let panes = daemon.panes();
@@ -198,10 +260,11 @@ fn send_input_to_a_dead_pane_answers_an_error() {
     let err = panes
         .send_input(pane_id, b"echo too_late\r")
         .expect_err("input into an exited pane must fail");
-    // The pane record may already be reaped by the time the input arrives,
-    // so either refusal counts — what matters is that late input fails.
+    // The session's end lets the server reap the dead pane, so input that
+    // arrives after the reap finds no pane at all; both are refusals.
+    let err = err.to_string();
     assert!(
-        err.to_string().contains("not running") || err.to_string().contains("no such pane"),
+        err.contains("not running") || err.contains("no such pane"),
         "the refusal was {err}"
     );
 }

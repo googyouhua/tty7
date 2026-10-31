@@ -15,7 +15,7 @@ use crate::core::clipboard::{
 };
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
-use crate::core::term_modes::TerminalModes;
+use crate::core::term_modes::{Query, TerminalModes};
 use crate::daemon::protocol::{
     AuthResponse, COMMAND_BLOCK_CAP, CommandBlock, DaemonMsg, LeaseRequest, MAX_FRAME,
     NativeSshSpec, PaneInfo, RemoteContext, RemoteKind, ShellSpec, WinSize,
@@ -548,6 +548,31 @@ fn pane_environment(
     env
 }
 
+/// zsh integration works by pointing `ZDOTDIR` at tty7's redirector dir, which
+/// then sources the user's own startup files from `TTY7_USER_ZDOTDIR`. A
+/// `ZDOTDIR` in the configured `env` block is applied after that and used to
+/// win outright: zsh read the user's files directly and the pane came up with
+/// no prompt marks, no editor, no suggestions. When the redirector is in
+/// place, the configured value is where the user's files live, so it goes
+/// where the redirector looks for them instead.
+fn reroute_configured_zdotdir(
+    env: Vec<(String, String)>,
+    zsh_integration: bool,
+) -> Vec<(String, String)> {
+    if !zsh_integration {
+        return env;
+    }
+    env.into_iter()
+        .map(|(k, v)| {
+            if k == "ZDOTDIR" {
+                ("TTY7_USER_ZDOTDIR".to_string(), v)
+            } else {
+                (k, v)
+            }
+        })
+        .collect()
+}
+
 fn apply_common_command_setup(
     cmd: &mut CommandBuilder,
     initial_cwd: &Option<PathBuf>,
@@ -602,7 +627,15 @@ fn apply_common_command_setup(
     }
 
     let dark = crate::core::machine::appearance().dark;
-    for (k, v) in pane_environment(&extra_env, dark, pane, workspace, shell) {
+    let injected_zdotdir = cmd
+        .get_env("ZDOTDIR")
+        .and_then(|z| z.to_str())
+        .filter(|z| shell_integration::is_our_zdotdir(z))
+        .map(str::to_owned);
+    for (k, v) in reroute_configured_zdotdir(
+        pane_environment(&extra_env, dark, pane, workspace, shell),
+        injected_zdotdir.is_some(),
+    ) {
         cmd.env(k, v);
     }
 
@@ -1214,6 +1247,10 @@ impl DeathReporter {
         st.alive = false;
         st.exit_code = code;
         let pane = st.id;
+        log::info!(
+            "pane {pane} exited; exit_code={code:?} shutdown_requested={}",
+            shutting_down.load(Ordering::SeqCst)
+        );
         if shutting_down.load(Ordering::SeqCst) {
             drop(st);
             crate::core::machine::observe_pane(pane, |p| p.live = false);
@@ -1779,8 +1816,11 @@ pub fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
 /// - `2004` is bracketed paste: a paste into a shell that does not know the
 ///   protocol arrives with `ESC[200~` typed around it.
 /// - `1` is DECCKM, which sends the arrow keys as `ESC O A` instead of `ESC[A`.
-/// - `CSI = 0 ; 1 u` sets the kitty keyboard flags to none, the same reset
-///   `stale_mode_resets` in the client uses.
+/// - `CSI = 0 ; 1 u` sets the kitty keyboard flags in effect to none. It
+///   leaves their stacks alone — no sequence clears those — so a pop could
+///   still bring a dead program's flags back; the new shell's first prompt
+///   mark is what clears the stacks (`Term::reset_keyboard_modes` in the
+///   client, `TerminalModes` here).
 ///
 /// Deliberately absent: `1007` (alternate scroll), which this emulator has *on*
 /// by default, so clearing it would walk away from the default rather than back
@@ -1843,6 +1883,7 @@ impl DaemonPane {
 
         let child = pair.slave.spawn_command(spawn.cmd)?;
         let shell_pid = child.process_id();
+        log::info!("pane {id} child started; child_pid={shell_pid:?}");
         let child = Arc::new(Mutex::new(child));
 
         drop(pair.slave);
@@ -2515,6 +2556,7 @@ impl DaemonPane {
                             note_block_marks(&mut st, bytes, &block_marks);
                             record_output(&mut st, bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
+                            let owed = detached_queries(&mut st);
                             apply_signals(&mut st, signals);
                             if let Some(remote) = remote {
                                 apply_remote_context(&mut st, remote);
@@ -2550,6 +2592,7 @@ impl DaemonPane {
                             let alive = st.alive;
                             let facts_after = may_change_facts.then(|| observed_facts(&st));
                             drop(st);
+                            answer_queries(&writer, &owed);
                             if !shutting_down.load(Ordering::SeqCst)
                                 && let (Some(before), Some(after)) = (facts_before, facts_after)
                                 && facts_changed(&before, &after)
@@ -3120,7 +3163,14 @@ impl Drop for DaemonPane {
         self.hangup();
         if let PaneBackend::Pty(p) = &self.backend {
             if let Ok(mut child) = p.child.lock() {
-                let _ = child.wait();
+                match child.wait() {
+                    Ok(status) => log::info!(
+                        "pane {} child exited; child_pid={:?} status={status}",
+                        self.id,
+                        p.shell_pid
+                    ),
+                    Err(e) => log::warn!("pane {} child wait failed: {e}", self.id),
+                }
             }
         }
         if let Some(handle) = self.reader.lock().unwrap().take() {
@@ -3421,6 +3471,8 @@ impl ReplayRing {
             let in_a = take.min(a.len());
             self.head_modes.feed(&a[..in_a]);
             self.head_modes.feed(&b[..take - in_a]);
+            // Long since asked; kept, they would pile up for the pane's life.
+            self.head_modes.take_queries();
             front.bytes.drain(..take);
             self.len -= take;
             if !front.bytes.is_empty() || self.segments.len() == 1 {
@@ -3457,6 +3509,8 @@ impl ReplayRing {
             modes.feed(a);
             modes.feed(b);
         }
+        // Asked long ago: a pane adopting these would answer them again.
+        modes.take_queries();
         modes
     }
 
@@ -3477,6 +3531,49 @@ impl ReplayRing {
 fn record_output(st: &mut PaneState, bytes: &[u8]) {
     st.ring.append(bytes);
     st.modes.feed(bytes);
+}
+
+/// A pane with no client attached has nobody to answer its queries, and a
+/// replay drops replies, so one asked then is never answered. Programs wait on
+/// these: Claude Code ends its OSC 11 theme check with DA1 and hangs on it,
+/// skipping every later check, so the theme flips tty7 reports never reach it.
+///
+/// Returns the queries the daemon owes an answer to. With a client attached
+/// the client answers, so none are owed. Read under the state lock; the
+/// answers are written by [`answer_queries`] after it is released, because a
+/// pty whose program is not reading its input blocks the write, and nothing
+/// else that needs this pane's state should wait on that.
+fn detached_queries(st: &mut PaneState) -> Vec<Query> {
+    let asked = st.modes.take_queries();
+    if st.subscriber.is_some() {
+        Vec::new()
+    } else {
+        asked
+    }
+}
+
+/// What a client's emulator would have answered `query` with, `dark` being
+/// the theme the window last drew.
+fn detached_reply(query: Query, dark: bool) -> &'static [u8] {
+    match query {
+        // alacritty_terminal's `identify_terminal`: a VT102.
+        Query::DeviceAttributes => b"\x1b[?6c",
+        Query::ColorScheme if dark => b"\x1b[?997;1n",
+        Query::ColorScheme => b"\x1b[?997;2n",
+    }
+}
+
+fn answer_queries(writer: &Mutex<Box<dyn Write + Send>>, owed: &[Query]) {
+    if owed.is_empty() {
+        return;
+    }
+    let dark = owed.contains(&Query::ColorScheme) && crate::core::machine::appearance().dark;
+    if let Ok(mut writer) = writer.lock() {
+        for &query in owed {
+            let _ = writer.write_all(detached_reply(query, dark));
+        }
+        let _ = writer.flush();
+    }
 }
 
 /// Everything a client needs to rebuild the pane's screen and status, in the
@@ -3902,7 +3999,9 @@ fn settle_interrupt(st: &mut PaneState, armed_at: u64) {
     let Some(sess) = st.agent_session.as_mut().filter(|s| s.mid_turn()) else {
         return;
     };
+    let before = sess.status;
     sess.assume_interrupted();
+    sess.note_transition(Some(before), unix_ms());
     notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
 
@@ -3922,7 +4021,9 @@ fn expire_stale_agent(st: &mut PaneState, now: std::time::Instant) {
         return;
     }
     if let Some(sess) = st.agent_session.as_mut() {
+        let before = sess.status;
         sess.assume_stale();
+        sess.note_transition(Some(before), unix_ms());
     }
     notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
@@ -3938,6 +4039,7 @@ fn apply_agent_signals(
         return;
     }
     let before = st.agent_session.clone();
+    let now_ms = unix_ms();
 
     for event in &events {
         // A hook names the agent that emitted it. Once this pane has a
@@ -3954,9 +4056,14 @@ fn apply_agent_signals(
         }
         st.agent_clock.generation = st.agent_clock.generation.wrapping_add(1);
         st.agent_clock.last_event = Some(std::time::Instant::now());
-        st.agent_session
-            .get_or_insert_with(AgentSessionState::default)
-            .apply_event(event);
+        // Stamped per event: a status that moves and comes back within one
+        // batch (Done, a new prompt, Done again) began a fresh spell.
+        let sess = st
+            .agent_session
+            .get_or_insert_with(AgentSessionState::default);
+        let was = sess.status;
+        sess.apply_event(event);
+        sess.note_transition(Some(was), now_ms);
     }
 
     if let Some(body) = notification
@@ -3974,6 +4081,11 @@ fn apply_agent_signals(
         && sess.launch_argv.is_none()
     {
         sess.launch_argv = Some(argv.clone());
+    }
+
+    // The notification-only path, and a session this batch created.
+    if let Some(sess) = st.agent_session.as_mut() {
+        sess.note_transition(before.as_ref().map(|b| b.status), now_ms);
     }
 
     if st.agent_session != before {
@@ -4068,6 +4180,17 @@ fn apply_title_cwd(st: &mut PaneState, fresh_report: bool, now: std::time::Insta
     }
     notify(st, DaemonMsg::Cwd(path.clone()));
     st.cwd = Some(path);
+}
+
+/// Wall-clock milliseconds, for the [`AgentSessionState::since_ms`] stamp a
+/// client reads back as an age. Not an `Instant`: the stamp crosses the
+/// socket and survives a handoff to the next daemon.
+///
+/// [`AgentSessionState::since_ms`]: crate::core::cli_agent::AgentSessionState::since_ms
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// The `/proc` fallback for a shell that stopped reporting OSC 7 — a nested
@@ -5321,6 +5444,28 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(argv, vec!["/bin/fish", "-C", "echo ready"]);
+    }
+
+    #[test]
+    fn a_configured_zdotdir_feeds_the_redirector_instead_of_replacing_it() {
+        let env = vec![
+            ("ZDOTDIR".to_string(), "/home/a/.config/zsh".to_string()),
+            ("EDITOR".to_string(), "vi".to_string()),
+        ];
+
+        let rerouted = reroute_configured_zdotdir(env.clone(), true);
+        assert_eq!(
+            rerouted,
+            vec![
+                (
+                    "TTY7_USER_ZDOTDIR".to_string(),
+                    "/home/a/.config/zsh".to_string()
+                ),
+                ("EDITOR".to_string(), "vi".to_string()),
+            ]
+        );
+        // Without the redirector there is nothing to protect.
+        assert_eq!(reroute_configured_zdotdir(env.clone(), false), env);
     }
 
     #[test]
@@ -7307,6 +7452,41 @@ mod tests {
     }
 
     #[test]
+    fn a_status_that_leaves_and_returns_in_one_batch_is_restamped() {
+        use crate::core::cli_agent::{AgentEvent, AgentEventKind, AgentSessionState, AgentStatus};
+
+        let event = |kind| AgentEvent {
+            agent: None,
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            source: None,
+            readout: Default::default(),
+        };
+        let mut st = test_state(true);
+        st.agent_session = Some(AgentSessionState {
+            status: AgentStatus::Done,
+            since_ms: Some(1),
+            ..Default::default()
+        });
+        apply_agent_signals(
+            &mut st,
+            vec![
+                event(AgentEventKind::PromptSubmit),
+                event(AgentEventKind::Stop),
+            ],
+            None,
+        );
+        let sess = st.agent_session.as_ref().unwrap();
+        assert_eq!(sess.status, AgentStatus::Done);
+        assert!(
+            sess.since_ms.is_some_and(|ms| ms > 1),
+            "a new turn finished, so its Done is not the old one"
+        );
+    }
+
+    #[test]
     fn observed_facts_prefer_the_sessions_argv_and_carry_its_status() {
         use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 
@@ -7490,6 +7670,75 @@ mod tests {
         withdraw_observations();
     }
 
+    /// Claude Code ends its OSC 11 theme query with DA1 and waits for both.
+    /// Started in a pane no window shows (an agent woken at launch), it got
+    /// neither and never checked the theme again.
+    #[test]
+    fn a_detached_pane_answers_its_queries_and_an_attached_one_leaves_them_to_the_client() {
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let writer: Mutex<Box<dyn Write + Send>> = Mutex::new(Box::new(sink.clone()));
+        let mut st = test_state(true);
+        let da1 = detached_reply(Query::DeviceAttributes, false);
+        let read = |st: &mut PaneState, bytes: &[u8]| {
+            record_output(st, bytes);
+            answer_queries(&writer, &detached_queries(st));
+            std::mem::take(&mut *sink.0.lock().unwrap())
+        };
+
+        assert_eq!(
+            read(&mut st, b"\x1b]11;?\x07\x1b[c\x1b[0c"),
+            [da1, da1].concat()
+        );
+        assert!(read(&mut st, b"\x1b[").is_empty());
+        assert_eq!(
+            read(&mut st, b"c"),
+            da1,
+            "split across reads, answered once"
+        );
+
+        let (tx, _rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+        assert!(
+            read(&mut st, b"\x1b[c\x1b[?996n").is_empty(),
+            "the client answers"
+        );
+        assert!(read(&mut st, b"\x1b[").is_empty());
+        st.subscriber = None;
+        assert_eq!(
+            read(&mut st, b"c"),
+            da1,
+            "split across a detach, answered once"
+        );
+        assert!(read(&mut st, b"\x1b[").is_empty());
+        let (tx, _rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+        assert!(
+            read(&mut st, b"c").is_empty(),
+            "split across an attach, the client's"
+        );
+        assert!(
+            st.ring.modes().take_queries().is_empty(),
+            "a handoff refolding the ring does not ask again"
+        );
+    }
+
+    #[test]
+    fn a_detached_colour_scheme_query_reports_the_theme_the_window_last_drew() {
+        assert_eq!(detached_reply(Query::ColorScheme, true), b"\x1b[?997;1n");
+        assert_eq!(detached_reply(Query::ColorScheme, false), b"\x1b[?997;2n");
+    }
+
     #[test]
     fn sentinel_events_drive_agent_session_state() {
         use crate::core::cli_agent::{AgentStatus, CLIAgent};
@@ -7628,6 +7877,7 @@ mod tests {
             turns: 0,
             inferred: false,
             readout: Default::default(),
+            since_ms: None,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

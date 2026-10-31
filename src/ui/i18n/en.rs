@@ -1877,6 +1877,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdCopySessionIdSubtitle => "the coding agent's own session id",
         L10nKey::CmdNewAgentTab => "New Agent Tab",
         L10nKey::CmdNewAgentTabSubtitle => "open the coding agent you used last in a new tab",
+        L10nKey::CmdNextAgentNeedingAttention => "Agent: Go to Next Needing Attention",
+        L10nKey::CmdNextAgentNeedingAttentionSubtitle => {
+            "waiting agents first, oldest first, then finished turns you have not read"
+        }
+        L10nKey::AppNoAgentNeedsAttention => "No agent in your open windows needs you.",
+        L10nKey::AgentWaitingFor => "waiting {age}",
+        L10nKey::AgeUnderMinute => "<1m",
+        L10nKey::AgeMinutes => "{count}m",
+        L10nKey::AgeHours => "{count}h",
+        L10nKey::AgeDays => "{count}d",
         L10nKey::CmdForkSession => "Fork Session",
         L10nKey::CmdForkSessionSubtitle => "branch this agent session into a new tab",
         L10nKey::CmdMarkTabAsUnread => "Mark Tab as Unread",
@@ -2002,6 +2012,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdQuickConnectSaveProfile => "Save \"{target}\" as profile…",
         L10nKey::CmdRecent => "Recent",
         L10nKey::AppRestartServerTitle => "Restart tty7 server?",
+        L10nKey::AppRestartServerAfterUpdateDetail => {
+            "tty7 was updated to {ours}; the server still runs {build}. It can swap itself for this build in place and keep your shells, but panes on tty7's built-in SSH client would close. Swap now, or later from Settings."
+        }
         L10nKey::AppRestartServerFailed => "Could not restart tty7 server: {error}",
         L10nKey::AppRestartServerMismatchDetail => {
             "tty7 server holding your shells speaks protocol {protocol} (build v{build}); this app speaks {ours}, so your tabs are out of reach.\n\nQuit: nothing changes — tty7 server and your shells keep running.\nRestart: tabs come back with fresh shells; anything running now is killed."

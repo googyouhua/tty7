@@ -254,6 +254,75 @@ pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
 
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 48.;
 
+/// The rule every title-bar row carries along its bottom edge.
+///
+/// `TitleBar` itself draws one (`gpui-component`'s own `.border_b_1()`), and
+/// taffy sizes a node by its border box, so the bar's content box is this one
+/// point short of its height and `items_center` puts a tile's centre half a
+/// point above the bar's middle. Every row that stands in for the title bar
+/// has to carry the same point — in a transparent ink where the row shows no
+/// rule of its own — or its tiles land half a point below the traffic lights
+/// and below the strip they are meant to read as one line with: one device
+/// pixel on a Retina panel, and visible precisely because the two are side by
+/// side in the same band.
+pub(crate) const TITLE_BAR_BORDER: f32 = 1.;
+
+/// The line the traffic lights and every [`title_strip_row`]'s contents sit
+/// on, from the top of the window's content.
+///
+/// The lights hang from a point, not a centre, so macOS gives this back through
+/// `theme::traffic_light_position` less half the system button's height.
+pub(crate) const TITLE_STRIP_CENTRE: f32 = (TITLE_BAR_HEIGHT - TITLE_BAR_BORDER) / 2.;
+
+pub(crate) fn title_strip_centre() -> gpui::Pixels {
+    gpui::px(TITLE_STRIP_CENTRE)
+}
+
+/// Split the title bar's bottom edge between the rule a row draws and the
+/// padding that stands in for the part of it the rule does not reach.
+fn title_strip_rule_and_pad(rule: gpui::Pixels) -> (gpui::Pixels, gpui::Pixels) {
+    let border = rule.min(gpui::px(TITLE_BAR_BORDER));
+    (border, gpui::px(TITLE_BAR_BORDER - border.as_f32()))
+}
+
+/// The centre of the box a row built by [`title_strip_row`] gives its contents:
+/// the bar's height, less whatever its bottom edge spends on rule and padding.
+#[cfg(test)]
+fn title_strip_content_centre(rule: gpui::Pixels) -> gpui::Pixels {
+    let (border, pad) = title_strip_rule_and_pad(rule);
+    gpui::px((TITLE_BAR_HEIGHT - border.as_f32() - pad.as_f32()) / 2.)
+}
+
+/// Give a row the title bar's geometry: its height, its vertical centring, and
+/// a bottom edge that leaves the content box the height
+/// [`title_strip_centre`] assumes.
+///
+/// A method rather than a function, because a row's own chain — its insets, its
+/// tiles, its drag band — is what the file is about, and this is one more link in
+/// it. Calling it mid-chain keeps the row readable instead of burying it in an
+/// argument.
+///
+/// `rule` is the border the row wants. A row standing in for the title bar with
+/// no visible rule passes [`TITLE_BAR_BORDER`] in a transparent ink, so the point
+/// is spent on the box and not on the paint. A row that draws its own thinner
+/// hairline keeps that hairline — it stays flush with the box's bottom edge
+/// either way — and makes up the difference as padding, which is what keeps its
+/// tiles on the same line as the lights over them.
+pub(crate) trait TitleStripRow: Sized {
+    fn title_strip_row(self, rule: gpui::Pixels, ink: gpui::Hsla) -> Self;
+}
+
+impl<R: gpui::Styled> TitleStripRow for R {
+    fn title_strip_row(self, rule: gpui::Pixels, ink: gpui::Hsla) -> Self {
+        let (border, pad) = title_strip_rule_and_pad(rule);
+        self.h(gpui::px(TITLE_BAR_HEIGHT))
+            .items_center()
+            .border_b(border)
+            .border_color(ink)
+            .pb(pad)
+    }
+}
+
 /// Work to run against the settings window once it has been built.
 type SettingsFollowUp = Box<dyn FnOnce(&mut Tty7App, &mut Window, &mut Context<Tty7App>)>;
 
@@ -294,7 +363,11 @@ pub(crate) fn tile_trailing_inset() -> f32 {
     (CONTENT_INSET - TILE_PAD).max(TILE_EDGE_GAP)
 }
 
-pub(crate) const TITLE_BAR_LEAD: f32 = if cfg!(target_os = "macos") { 80. } else { 12. };
+pub(crate) const TITLE_BAR_LEAD: f32 = if cfg!(target_os = "macos") {
+    crate::ui::theme::TRAFFIC_LIGHTS_LEAD
+} else {
+    12.
+};
 
 pub(crate) const WINDOW_CONTROLS_W: f32 = if cfg!(target_os = "macos") { 0. } else { 102. };
 
@@ -683,6 +756,9 @@ impl Tab {
             .unwrap_or_default()
     }
 
+    /// [`Self::leaf_title`] together with what a `~` in it would mean — one
+    /// leaf lookup, so the title and the home shortening it can never come
+    /// from different panes (#580).
     /// This tab as the shared label ladder reads it, together with what a `~`
     /// in whatever it ends up named would mean.
     ///
@@ -828,6 +904,23 @@ impl Tab {
                     && v.agent_result_unread()
             })
             .count()
+    }
+
+    /// "waiting 3m", counted from when the tab's longest-waiting agent began
+    /// waiting on the user. `None` when no agent in it is waiting, or none of
+    /// those that are came from a daemon that stamps the time.
+    /// `now_ms` is the same clock [`Tty7App::agent_rows`] reads, so the switcher
+    /// and the tray agree on the age.
+    pub(crate) fn agent_waited(&self, now_ms: u64, cx: &App) -> Option<String> {
+        use crate::core::cli_agent::AgentStatus;
+        self.pane
+            .terminals()
+            .into_iter()
+            .filter_map(|l| l.read(cx).agent_session())
+            .filter(|s| s.status == AgentStatus::Waiting)
+            .filter_map(|s| s.status_age_secs(now_ms))
+            .max()
+            .map(crate::ui::home::waiting_for)
     }
 }
 
@@ -1364,6 +1457,7 @@ impl Tty7App {
             app.save_session(cx);
         }
         Self::prompt_daemon_version_mismatch(window, cx);
+        Self::prompt_deferred_adoption(window, cx);
         crate::ui::remote_connect::register(cx);
         crate::ui::remote_connect::sweep_wsl(cx);
         Self::prompt_remote_daemon_mismatch(window, cx);
@@ -1443,6 +1537,37 @@ impl Tty7App {
             // than letting the state this prompt exists to prevent slip through
             // the gap.
             Err(_) => crate::daemon::spawn::note_daemon_mismatch(mismatch),
+        })
+        .detach();
+    }
+
+    /// The handoff `adopt_this_build` stepped back from at launch: the server
+    /// is on another build and holds native-SSH panes the swap would close.
+    /// The same dialog and the same action as Settings → Restart Server,
+    /// because it is the same thing; Cancel leaves the server as it is, and
+    /// Settings keeps offering it.
+    fn prompt_deferred_adoption(window: &mut Window, cx: &mut Context<Self>) {
+        let Some(build) = crate::daemon::spawn::take_deferred_adoption() else {
+            return;
+        };
+        let detail = t_fmt(
+            L10nKey::AppRestartServerAfterUpdateDetail,
+            &[("build", &build), ("ours", env!("CARGO_PKG_VERSION"))],
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            t(L10nKey::AppRestartServerTitle),
+            Some(&detail),
+            &crate::ui::confirm_answers(
+                t(L10nKey::AppRestart),
+                t(crate::ui::i18n::L10nKey::Cancel),
+            ),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if matches!(answer.await, Ok(0)) {
+                let _ = this.update_in(cx, |this, _window, cx| this.restart_daemon_confirmed(cx));
+            }
         })
         .detach();
     }
@@ -2342,15 +2467,20 @@ impl Tty7App {
 
     pub(crate) fn agent_rows(&self, cx: &App) -> Vec<crate::ui::tray::AgentRow> {
         use crate::core::cli_agent::AgentStatus;
+        let now_ms = crate::core::config::unix_now().saturating_mul(1000);
         let mut agents = Vec::new();
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let view = leaf.read(cx);
                 let Some(agent) = view.agent() else { continue };
-                let status = view
-                    .agent_session()
-                    .map(|s| s.status)
-                    .unwrap_or(AgentStatus::Idle);
+                let session = view.agent_session();
+                let status = session.as_ref().map_or(AgentStatus::Idle, |s| s.status);
+                let since_ms = session.as_ref().and_then(|s| s.since_ms);
+                let waited = session
+                    .as_ref()
+                    .filter(|s| s.status == AgentStatus::Waiting)
+                    .and_then(|s| s.status_age_secs(now_ms))
+                    .map(crate::ui::home::waiting_for);
                 let dir = view
                     .cwd()
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
@@ -2365,10 +2495,59 @@ impl Tty7App {
                     agent,
                     status,
                     detail,
+                    since_ms,
+                    unread: view.agent_result_unread(),
+                    waited,
                 });
             }
         }
         agents
+    }
+
+    /// Reveal the agent pane that has been waiting on the user longest, or
+    /// the next one after the focused pane on a repeated press
+    /// ([`crate::ui::tray::next_needing_attention`]). Every open window's
+    /// agents count, the same set the tray menu lists, and one in another
+    /// window is revealed there the way a tray pick would.
+    pub(crate) fn focus_next_agent_needing_attention(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // In window order, so ties break the same way whichever window the
+        // press lands in. This window's own rows are read from `self`: its
+        // entity is mid-update and cannot be read through the registry.
+        let me = cx.entity_id();
+        let mut rows = Vec::new();
+        let mut seen_self = false;
+        for (_, weak) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+            let Some(app) = weak.upgrade() else { continue };
+            if app.entity_id() == me {
+                seen_self = true;
+                rows.extend(self.agent_rows(cx));
+            } else {
+                rows.extend(app.read(cx).agent_rows(cx));
+            }
+        }
+        if !seen_self {
+            rows.extend(self.agent_rows(cx));
+        }
+        let current = self
+            .focused_leaf(window, cx)
+            .map(|leaf| leaf.entity_id().as_u64());
+        let Some(leaf_id) = crate::ui::tray::next_needing_attention(&rows, current) else {
+            window.push_notification(t(L10nKey::AppNoAgentNeedsAttention), cx);
+            return;
+        };
+        if self.owns_leaf(leaf_id) {
+            self.handle_tray_action(
+                crate::ui::tray::TrayAction::RevealPane { leaf_id },
+                window,
+                cx,
+            );
+        } else {
+            cx.defer(move |cx| crate::ui::tray::reveal_pane(leaf_id, cx));
+        }
     }
 
     pub(crate) fn handle_tray_action(
@@ -4493,7 +4672,7 @@ impl Tty7App {
         let before = self.tabs.len();
         self.new_tab_with_cwd(Some(cwd), None, window, cx);
         if self.tabs.len() == before {
-            log::warn!("no tab opened for {command:?}; not writing it to another pane");
+            log::warn!("no tab opened for requested command; not writing it to another pane");
             return;
         }
         if let Some(terminal) = self.focused_leaf(window, cx) {
@@ -7071,6 +7250,7 @@ impl Tty7App {
             HibernateTab => self.hibernate_tab(self.active, window, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
             NewAgentTab => self.new_agent_tab(window, cx),
+            FocusNextAgentNeedingAttention => self.focus_next_agent_needing_attention(window, cx),
             // Picked from the palette with ⌥ held, the way a New Tab menu row
             // is: a split beside the focused pane instead of a tab.
             LaunchAgent(agent) => {
@@ -7809,11 +7989,13 @@ impl Tty7App {
             ssh_collapsed_groups: std::collections::HashSet::new(),
             onekey_form: None,
             role_form: None,
+            ssh_list_scroll: gpui::ScrollHandle::new(),
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
             agent_hooks_states: crate::ui::settings::AgentHooksView::Loading,
             agent_hooks_seq: 0,
             agent_hooks_note: None,
             agent_query,
+            agent_list_scroll: gpui::ScrollHandle::new(),
             agent_show_all: false,
             agent_touched: std::collections::HashSet::new(),
             agent_busy: std::collections::HashSet::new(),
@@ -9293,7 +9475,9 @@ impl Tty7App {
         } else {
             "xdg-open"
         };
-        if let Err(e) = std::process::Command::new(opener).arg(&path).spawn() {
+        if let Err(e) =
+            tty7_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(&path))
+        {
             log::warn!("failed to open {}: {e}", path.display());
         }
     }
@@ -9777,8 +9961,11 @@ impl Render for Tty7App {
         // the chrome tiles and the docked document's header.
         let title_bar =
             if window_controls_drawn(window.is_fullscreen()) || cfg!(target_os = "macos") {
+                // `TitleBar` pads its own fixed 80pt; the lead is ours, since
+                // it follows where the traffic lights are put.
                 TitleBar::new()
                     .h(px(TITLE_BAR_HEIGHT))
+                    .pl(px(TITLE_BAR_LEAD))
                     .bg(cx.theme().transparent)
                     .border_color(cx.theme().transparent)
                     .child(strip)
@@ -9788,11 +9975,8 @@ impl Render for Tty7App {
                     .flex_shrink_0()
                     .flex()
                     .flex_row()
-                    .items_center()
-                    .h(px(TITLE_BAR_HEIGHT))
                     .pl(px(TITLE_BAR_LEAD))
-                    .border_b_1()
-                    .border_color(cx.theme().transparent)
+                    .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
                     .child(
                         div()
                             .flex()
@@ -10484,6 +10668,11 @@ impl Render for Tty7App {
                 }))
                 .on_action(
                     cx.listener(|this, _: &NewAgentTab, window, cx| this.new_agent_tab(window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &FocusNextAgentNeedingAttention, window, cx| {
+                        this.focus_next_agent_needing_attention(window, cx)
+                    }),
                 )
                 .on_action(cx.listener(|this, action: &LaunchAgent, window, cx| {
                     this.launch_agent(action.agent, SpawnWhere::NewTab, window, cx)
@@ -12028,11 +12217,12 @@ mod tests {
     use super::close_reason;
     use super::{
         CloseReason, DOCUMENT_MIN_W, Dir, OpenedFrom, Pane, Rename, TERMINAL_MIN_W,
-        TITLE_BAR_HEIGHT, Tab, TabAgentSession, clear_window_override_values, close_prompt,
-        document_column_px, inherited_start_dir, join_shell_args, leaf_shares_the_window_daemon,
-        mru_order, native_ssh_pane_alive, one_slot_move, pane_free_for, parse_ssh_connect_input,
-        parse_ssh_option_words, rename_outcome, side_panel_max, split_machine_held,
-        split_shell_args, step_in_order, strip_band, wd_path_saveable,
+        TITLE_BAR_BORDER, TITLE_BAR_HEIGHT, Tab, TabAgentSession, clear_window_override_values,
+        close_prompt, document_column_px, inherited_start_dir, join_shell_args,
+        leaf_shares_the_window_daemon, mru_order, native_ssh_pane_alive, one_slot_move,
+        pane_free_for, parse_ssh_connect_input, parse_ssh_option_words, rename_outcome,
+        side_panel_max, split_machine_held, split_shell_args, step_in_order, strip_band,
+        title_strip_centre, title_strip_content_centre, title_strip_rule_and_pad, wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
 
@@ -12083,6 +12273,38 @@ mod tests {
         // On: painted exactly while the pointer is over the bar.
         assert!(!super::titlebar_chrome_shown(true, false));
         assert!(super::titlebar_chrome_shown(true, true));
+    }
+
+    /// A title-bar row spends [`TITLE_BAR_BORDER`] of its height below its
+    /// contents, and there are two ways it does that: it carries the whole point
+    /// as a rule painted transparent (the strip's `TitleBar`, the rail's header,
+    /// the code panel's, the settings band), or it draws its own thinner hairline
+    /// and gives the rest back as padding (the diff overlay's 0.5pt rule). Both
+    /// have to leave the contents on the line the traffic lights hang on — the
+    /// rows sit side by side in the same band, and half a point of difference is
+    /// the one device pixel that reads as a step.
+    #[test]
+    fn a_rows_own_hairline_and_the_bars_invisible_rule_reach_the_same_centre() {
+        for rule in [px(0.), px(0.5), px(TITLE_BAR_BORDER), px(2.)] {
+            let (border, pad) = title_strip_rule_and_pad(rule);
+            assert!(
+                border.as_f32() <= TITLE_BAR_BORDER,
+                "a thicker rule than the bar's own point would push the contents \
+                 onto a line nothing else is on"
+            );
+            assert!(
+                pad.as_f32() >= 0.,
+                "negative padding is not padding, and taffy would swallow it"
+            );
+            assert_eq!(
+                title_strip_content_centre(rule),
+                title_strip_centre(),
+                "a rule of {} leaves the box short by {} of border and {} of padding",
+                rule.as_f32(),
+                border.as_f32(),
+                pad.as_f32()
+            );
+        }
     }
 
     #[test]
