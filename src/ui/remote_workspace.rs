@@ -2378,10 +2378,16 @@ fn finish_attempt(
             // Suspend the machine instead: the strip says why and offers
             // Retry, which is the user asking to be asked again.
             let declined = !parked && crate::daemon::ssh::is_auth_declined(&e);
+            // The far end saying it cannot take another session is arithmetic,
+            // not weather: the next attempt meets the same wall. Six tries at
+            // it only keeps a window busy that has nothing to show.
+            let terminal = !parked && !declined && terminal_remote_failure(&e);
             if parked {
                 log::warn!("{label} is served by a build this one cannot speak to: {e}");
             } else if declined {
                 log::info!("not reconnecting to {label}: {e}");
+            } else if terminal {
+                log::warn!("not reconnecting to {label}: {e}");
             } else {
                 log::warn!("reconnect to {label} failed: {e}");
             }
@@ -2389,12 +2395,12 @@ fn finish_attempt(
                 link.attempting = false;
                 link.state = if parked {
                     LinkState::Mismatched(e.clone())
-                } else if declined {
+                } else if declined || terminal {
                     LinkState::Failed(e.clone())
                 } else {
                     LinkState::Reconnecting
                 };
-                if !parked && !declined {
+                if !parked && !declined && !terminal {
                     // The counter is the number of attempts that came back
                     // wrong. It moves here, not when the pump schedules one:
                     // a first try still in flight is attempt 1 on the strip,
@@ -2415,7 +2421,7 @@ fn finish_attempt(
             // state but `Mismatched` back to `Reconnecting` on its next tick.
             // This is what actually stops the clock, and `retry_now` and the
             // switcher's own connect are what start it again.
-            if declined || spent {
+            if declined || spent || terminal {
                 cx.default_global::<RemoteLinks>().suspended.insert(host);
             }
             if spent {
@@ -2567,7 +2573,7 @@ fn relink_dead_panes(
         // Local can't happen for a workspace with a host; Unroutable means
         // the route stopped resolving, which is the machine supervisor's
         // problem — count it as a miss and let the clock run.
-        note_pane_relink_outcome(cx, workspace, panes.len());
+        note_pane_relink_outcome(cx, workspace, panes.len(), None);
         return;
     }
     {
@@ -2646,10 +2652,13 @@ fn relink_dead_panes(
         if misses > 0 {
             log::warn!(
                 "{misses} pane(s) of workspace {workspace} are still down{}",
-                first_error.map(|e| format!(": {e}")).unwrap_or_default()
+                first_error
+                    .as_deref()
+                    .map(|e| format!(": {e}"))
+                    .unwrap_or_default()
             );
         }
-        cx.update(|cx| note_pane_relink_outcome(cx, workspace, misses));
+        cx.update(|cx| note_pane_relink_outcome(cx, workspace, misses, first_error.as_deref()));
     })
     .detach();
 }
@@ -2657,10 +2666,28 @@ fn relink_dead_panes(
 /// Lands a batch's verdict on the workspace's retry clock: all found their
 /// way back (or are past asking) and the entry retires; any miss advances the
 /// backoff and books the next try.
-fn note_pane_relink_outcome(cx: &mut gpui::App, workspace: WorkspaceId, misses: usize) {
+fn note_pane_relink_outcome(
+    cx: &mut gpui::App,
+    workspace: WorkspaceId,
+    misses: usize,
+    error: Option<&str>,
+) {
     let links = cx.default_global::<RemoteLinks>();
     if misses == 0 {
         links.pane_retries.remove(&workspace);
+        return;
+    }
+    // A terminal refusal is not a slow start. Asking again in a second, and
+    // again every half minute, cannot change "the far end will not open another
+    // session" — it only keeps the window busy proving it. Stop here and leave
+    // the reason where the strip can say it.
+    if error.is_some_and(terminal_remote_failure) {
+        links.pane_retries.remove(&workspace);
+        log::warn!(
+            "not asking again for {} pane(s) of workspace {workspace}: {}",
+            misses,
+            error.unwrap_or_default()
+        );
         return;
     }
     let Some(retry) = links.pane_retries.get_mut(&workspace) else {
@@ -2669,6 +2696,18 @@ fn note_pane_relink_outcome(cx: &mut gpui::App, workspace: WorkspaceId, misses: 
     retry.inflight = false;
     let delay = retry.backoff.advance();
     retry.next_attempt = Some(Instant::now() + delay);
+}
+
+/// Whether asking the far end again could ever change its answer.
+///
+/// The session-limit refusal is the one that matters here: it is arithmetic
+/// (panes against `MaxSessions`), it is where a whole workspace of dead panes
+/// comes from, and the client used to answer it with another connection, then
+/// another, forever. Everything else — a reset link, a daemon still starting —
+/// is worth a second look.
+fn terminal_remote_failure(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("session limit") || lower.contains("maxsessions")
 }
 
 fn server_restarted(cx: &mut gpui::App, host: HostId, peer: &RemoteHost) -> bool {
@@ -3020,20 +3059,49 @@ mod tests {
                 .or_default()
                 .inflight = true;
 
-            note_pane_relink_outcome(cx, ws, 2);
+            note_pane_relink_outcome(cx, ws, 2, None);
             let links = cx.default_global::<RemoteLinks>();
             let retry = links.pane_retries.get(&ws).expect("a miss keeps the clock");
             assert!(!retry.inflight, "the batch reported back");
             assert_eq!(retry.backoff.attempt(), 1);
             assert!(retry.next_attempt.is_some(), "the next try is booked");
 
-            note_pane_relink_outcome(cx, ws, 0);
+            note_pane_relink_outcome(cx, ws, 0, None);
             assert!(
                 cx.default_global::<RemoteLinks>()
                     .pane_retries
                     .get(&ws)
                     .is_none(),
                 "every pane back means no clock left to run"
+            );
+        });
+    }
+
+    /// A refusal the far end will repeat is not worth a second ask: the session
+    /// limit is arithmetic, so the batch stops after the first answer instead of
+    /// climbing the backoff ladder for a minute.
+    #[gpui::test]
+    fn a_session_limit_refusal_retires_the_pane_clock_at_once(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            cx.default_global::<RemoteLinks>()
+                .pane_retries
+                .entry(ws)
+                .or_default()
+                .inflight = true;
+
+            note_pane_relink_outcome(
+                cx,
+                ws,
+                9,
+                Some("at the server's session limit (Failed to open channel)"),
+            );
+            assert!(
+                cx.default_global::<RemoteLinks>()
+                    .pane_retries
+                    .get(&ws)
+                    .is_none(),
+                "a full sshd is not asked again in a second"
             );
         });
     }
