@@ -1142,6 +1142,7 @@ pub fn dialect_complaint(error: &str, machine: &str) -> Option<String> {
 }
 
 pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), String> {
+    let _stage = StageGuard;
     let action = header.action;
     crate::daemon::spawn::ensure_running().map_err(|e| {
         t_fmt(

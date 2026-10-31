@@ -2470,7 +2470,6 @@ fn finish_attempt(
             if declined {
                 cx.default_global::<RemoteLinks>().suspended.insert(host);
             }
-            let _ = (spent, terminal);
             if spent {
                 log::warn!(
                     "stopped reconnecting to {label} after {MAX_RECONNECT_ATTEMPTS} attempts: {e}"

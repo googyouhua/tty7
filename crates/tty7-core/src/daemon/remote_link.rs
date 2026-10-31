@@ -200,52 +200,18 @@ impl RemoteEnv {
     }
 }
 
-/// Where the far end's *pane* endpoint lives — the socket a `--stdio --pane`
-/// bridge forwards to.
-///
-/// Panes used to reach it by spending an SSH session each, and `MaxSessions`
-/// counts exactly those: a machine with ten panes could not fit an sshd that
-/// allows ten however healthy it was. The socket itself takes any number of
-/// connections and a direct-streamlocal channel is a channel, not a session, so
-/// naming it here is what lets one connection carry a whole machine.
-///
-/// This mirrors `daemon::transport::socket_path_for` for an environment we
-/// probed instead of our own: `<config>/daemon.sock`, or the hashed name under
-/// the runtime dir when that path is too long for a socket.
-pub fn remote_pane_socket(env: &RemoteEnv) -> Option<String> {
-    let dir = match env.config_dir.as_deref().filter(|d| !d.is_empty()) {
-        Some(cfg) => cfg.to_string(),
-        None => {
-            let home = env.home.as_deref().filter(|h| !h.is_empty())?;
-            posix_join(&posix_join(home, ".config"), "tty7")
-        }
-    };
-    let runtime = env.xdg_runtime_dir.as_deref().filter(|d| !d.is_empty());
-
-    let inline = posix_join(&dir, "daemon.sock");
-    if fits(&inline) {
-        return Some(inline);
-    }
-
-    let name = format!("tty7-{:016x}.sock", crate::host::fnv1a64(dir.as_bytes()));
-    let tmp = env
-        .tmpdir
-        .as_deref()
-        .filter(|d| !d.is_empty())
-        .unwrap_or("/tmp");
-    [runtime, Some(tmp)]
-        .into_iter()
-        .flatten()
-        .map(|base| posix_join(base, &name))
-        .find(|candidate| fits(candidate))
-}
-
 /// The pane socket that belongs beside a control socket.
 ///
 /// A pane wants the daemon's own endpoint, which lives in the same directory as
 /// the control socket it already knows. Deriving it beats probing for `$HOME`:
 /// a probe costs a session channel, and a session channel is exactly what the
 /// pane route is trying to stop spending.
+///
+/// Only the ordinary layout is named this way. When the paths are too long both
+/// endpoints move to the runtime directory under *different* hashed names
+/// (`tty7-<hash>-control.sock` and `tty7-<hash>.sock`), so the derived name is a
+/// guess there: it fails to open and the caller falls back to the
+/// process-per-pane bridge, which is the behaviour that path had before.
 pub fn pane_socket_beside(control_socket: &str) -> Option<String> {
     let (dir, _) = control_socket.rsplit_once('/')?;
     Some(posix_join(dir, "daemon.sock"))
@@ -404,27 +370,6 @@ mod tests {
             "the pane endpoint is the control socket's neighbour"
         );
         assert_eq!(pane_socket_beside("no-slash"), None);
-    }
-
-    #[test]
-    fn the_pane_socket_is_the_daemons_own() {
-        let env = RemoteEnv {
-            home: Some("/home/me".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            remote_pane_socket(&env).as_deref(),
-            Some("/home/me/.config/tty7/daemon.sock"),
-            "a pane speaks to the daemon socket, not the control socket"
-        );
-        let named = RemoteEnv {
-            config_dir: Some("/srv/tty7".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            remote_pane_socket(&named).as_deref(),
-            Some("/srv/tty7/daemon.sock")
-        );
     }
 
     #[test]

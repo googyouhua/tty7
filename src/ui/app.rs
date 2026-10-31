@@ -2068,12 +2068,11 @@ impl Tty7App {
     ) {
         crate::ui::stall::crumb("adopting a workspace's tabs");
         // A window opening onto a machine builds the tab it is about to show and
-        // leaves the rest asleep. Ten pane views in one frame is the first frame
-        // of the session — the window stops answering while every terminal sets
-        // itself up — and ten panes are also ten SSH sessions on a machine whose
-        // sshd may not have ten to give. They wake when they are first looked
-        // at, which is when their screens, and their sessions, are actually
-        // needed.
+        // leaves the rest asleep for the moment; the loop at the bottom of this
+        // function wakes them, a few frames later. Ten pane views in one frame is
+        // the first frame of the session — the window stops answering while every
+        // terminal sets itself up — and waking them in order costs nothing that
+        // anyone sees.
         // `TTY7_WAKE_ALL=1` turns this off, which is the only way to reproduce
         // the all-at-once first frame on a machine that would otherwise open
         // one tab: the cost it is here to avoid is invisible from a debugger
@@ -2088,7 +2087,7 @@ impl Tty7App {
                     asleep += 1;
                 }
             }
-            log::info!("opening with 1 tab awake and {asleep} asleep until they are looked at");
+            log::info!("opening with 1 tab awake; {asleep} more follow one at a time");
         }
         let previous_host = self.spawn_host(cx);
         self.workspace = id;
