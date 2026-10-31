@@ -2071,14 +2071,49 @@ impl Tty7App {
         self.refresh_shells(cx);
         let font_size = self.font_size;
         let pane_ws = self.window_workspace(cx);
-        let (tabs, active, dropped) = tabs_from_session(
-            pane_ws.as_ref(),
-            self.workspace,
-            Some(session),
-            font_size,
-            window,
-            cx,
-        );
+        // The tree a pull answers with is usually the one this window already
+        // shows, plus a tab someone just made. Rebuilding all of them to add one
+        // tears down every pane view in the window — nine of them on a nine-tab
+        // workspace — and that is the pause people feel as the window freezing
+        // while a tab is created. When the tabs on screen are a prefix of the
+        // pull's, build only the tail.
+        let held: Vec<tty7_core::core::machine::TabId> =
+            self.tabs.iter().map(|t| t.tree_id.get()).collect();
+        let wanted: Vec<tty7_core::core::machine::TabId> =
+            session.tabs.iter().filter_map(|t| t.tree_id).collect();
+        let appends = !held.is_empty()
+            && wanted.len() == session.tabs.len()
+            && wanted.len() > held.len()
+            && wanted.starts_with(&held);
+        let (tabs, active, dropped) = if appends {
+            let active_wanted = session.active;
+            let mut tail = session;
+            tail.tabs = tail.tabs.split_off(held.len());
+            tail.active = active_wanted
+                .saturating_sub(held.len())
+                .min(tail.tabs.len().saturating_sub(1));
+            let (fresh, _, dropped) = tabs_from_session(
+                pane_ws.as_ref(),
+                self.workspace,
+                Some(tail),
+                font_size,
+                window,
+                cx,
+            );
+            let mut tabs = std::mem::take(&mut self.tabs);
+            tabs.extend(fresh);
+            let active = active_wanted.min(tabs.len().saturating_sub(1));
+            (tabs, active, dropped)
+        } else {
+            tabs_from_session(
+                pane_ws.as_ref(),
+                self.workspace,
+                Some(session),
+                font_size,
+                window,
+                cx,
+            )
+        };
         if dropped > 0 {
             window.push_notification(
                 gpui_component::notification::Notification::warning(t_plural(
