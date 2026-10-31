@@ -2156,6 +2156,43 @@ impl Tty7App {
         self.save_session(cx);
         crate::ui::windows::refresh_menu(cx);
         self.focus_active(window, cx);
+        // Every sleeping tab wakes on its own, one at a time. Building ten panes
+        // in the frame that opens the window is what makes entering a machine
+        // feel like a freeze, and a far end that answers slowly has no business
+        // holding the window for it; a tab that fills in 120 ms later still looks
+        // like it was already there.
+        // Named by tree id rather than position: the window can be switched to
+        // another workspace, or have tabs closed, while this runs, and waking
+        // the tab that has since taken index `n` would be waking a stranger.
+        let sleeping: Vec<tty7_core::core::machine::TabId> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.is_asleep())
+            .map(|tab| tab.tree_id.get())
+            .collect();
+        if !sleeping.is_empty() {
+            log::info!("waking {} sleeping tab(s) one at a time", sleeping.len());
+            cx.spawn(async move |this, cx| {
+                for tab in sleeping {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(120))
+                        .await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if this.workspace != id {
+                            return;
+                        }
+                        if let Some(index) = this
+                            .tabs
+                            .iter()
+                            .position(|t| t.tree_id.get() == tab && t.is_asleep())
+                        {
+                            let _ = this.wake_tab(index, window, cx);
+                        }
+                    });
+                }
+            })
+            .detach();
+        }
         cx.notify();
     }
 
