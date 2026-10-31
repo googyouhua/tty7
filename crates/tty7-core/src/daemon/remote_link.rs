@@ -207,14 +207,16 @@ impl RemoteEnv {
 /// a probe costs a session channel, and a session channel is exactly what the
 /// pane route is trying to stop spending.
 ///
-/// Only the ordinary layout is named this way. When the paths are too long both
-/// endpoints move to the runtime directory under *different* hashed names
-/// (`tty7-<hash>-control.sock` and `tty7-<hash>.sock`), so the derived name is a
-/// guess there: it fails to open and the caller falls back to the
-/// process-per-pane bridge, which is the behaviour that path had before.
+/// Both layouts are handled, because the two endpoints are named apart when the
+/// paths get long: `<dir>/control.sock` sits beside `<dir>/daemon.sock`, while
+/// `tty7-<hash>-control.sock` sits beside `tty7-<hash>.sock`.
 pub fn pane_socket_beside(control_socket: &str) -> Option<String> {
-    let (dir, _) = control_socket.rsplit_once('/')?;
-    Some(posix_join(dir, "daemon.sock"))
+    let (dir, name) = control_socket.rsplit_once('/')?;
+    let pane = match name.strip_suffix("-control.sock") {
+        Some(stem) => format!("{stem}.sock"),
+        None => "daemon.sock".to_string(),
+    };
+    Some(posix_join(dir, &pane))
 }
 
 pub fn remote_control_socket(env: &RemoteEnv) -> Option<String> {
@@ -368,6 +370,11 @@ mod tests {
             pane_socket_beside("/root/.config/tty7/control.sock").as_deref(),
             Some("/root/.config/tty7/daemon.sock"),
             "the pane endpoint is the control socket's neighbour"
+        );
+        assert_eq!(
+            pane_socket_beside("/run/user/1000/tty7-0123456789abcdef-control.sock").as_deref(),
+            Some("/run/user/1000/tty7-0123456789abcdef.sock"),
+            "the long-path layout keeps its hashed stem"
         );
         assert_eq!(pane_socket_beside("no-slash"), None);
     }

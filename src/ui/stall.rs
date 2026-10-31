@@ -116,8 +116,12 @@ pub fn install(cx: &mut App) {
                 // that only ended when the app did.
                 if stalled.is_none() {
                     stalled = Some(Instant::now());
+                    // "Missed beats", not "blocked": a foreground timer that is
+                    // not scheduled shows up the same way whether the work is
+                    // heavy or the loop was parked without a wakeup, and the two
+                    // want different answers.
                     log::warn!(
-                        "ui thread stalled for {}ms - {} - last: {}",
+                        "ui thread missed its beat for {}ms - {} - last: {}",
                         quiet.as_millis(),
                         in_flight(),
                         recent()

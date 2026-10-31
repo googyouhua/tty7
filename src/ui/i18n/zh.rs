@@ -1554,7 +1554,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
              那里仍在运行的会话用的还是旧版本。如果它们已经结束，重新连接就会启动此版本的 server。"
         }
         L10nKey::RemoteHostUnreachable => "无法连接到 {machine}：{error}",
-        L10nKey::RemoteConnectTimedOut => "{machine}：连接超时（{stage}），对端在这一阶段没有回应",
+        L10nKey::RemoteConnectTimedOut => "{machine}：连接超时，对端没有回应",
         L10nKey::RemoteInstallTitle => "在“{machine}”上安装 tty7 server？",
         L10nKey::RemoteInstallDetail => {
             "tty7 会将其 server 二进制文件写入 {machine}，以便本机可以在那里托管\

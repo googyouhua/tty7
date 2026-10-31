@@ -2073,12 +2073,7 @@ impl Tty7App {
         // the first frame of the session — the window stops answering while every
         // terminal sets itself up — and waking them in order costs nothing that
         // anyone sees.
-        // `TTY7_WAKE_ALL=1` turns this off, which is the only way to reproduce
-        // the all-at-once first frame on a machine that would otherwise open
-        // one tab: the cost it is here to avoid is invisible from a debugger
-        // that never makes the window do it.
-        let wake_all = std::env::var_os("TTY7_WAKE_ALL").is_some();
-        if self.tabs.is_empty() && session.tabs.len() > 1 && !wake_all {
+        if self.tabs.is_empty() && session.tabs.len() > 1 {
             let active = session.active.min(session.tabs.len() - 1);
             let mut asleep = 0;
             for (index, tab) in session.tabs.iter_mut().enumerate() {

@@ -424,14 +424,20 @@ impl Drop for StageGuard {
 }
 
 /// The message for a connect whose whole attempt ran past its budget.
+///
+/// The phase goes to the log, not the sentence: it is a protocol word
+/// ("waiting for the control hello") that has no translation of its own, and a
+/// person who needs it is reading the log anyway.
 pub fn attempt_timed_out(label: &str) -> String {
-    let stage = stage_snapshot()
-        .map(|(stage, _, waited)| format!("{} — {}s", stage.label(), waited.as_secs()))
-        .unwrap_or_else(|| ConnectStage::Starting.label().to_string());
-    t_fmt(
-        L10nKey::RemoteConnectTimedOut,
-        &[("machine", label), ("stage", &stage)],
-    )
+    match stage_snapshot() {
+        Some((stage, machine, waited)) => log::warn!(
+            "connect to {machine} timed out after {}s in {}",
+            waited.as_secs(),
+            stage.label()
+        ),
+        None => log::warn!("connect to {label} timed out with no phase recorded"),
+    }
+    t_fmt(L10nKey::RemoteConnectTimedOut, &[("machine", label)])
 }
 
 /// Arms a read deadline for the length of one connect phase, and takes it off

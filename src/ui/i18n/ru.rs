@@ -1917,7 +1917,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "{error}\n\nОставшиеся сеансы используют старую сборку. Если сеансов уже нет, переподключение запустит сервер этой сборки."
         }
         L10nKey::RemoteHostUnreachable => "не удалось подключиться к {machine}: {error}",
-        L10nKey::RemoteConnectTimedOut => "{machine}: время подключения истекло ({stage})",
+        L10nKey::RemoteConnectTimedOut => "{machine}: время подключения истекло",
         L10nKey::RemoteInstallTitle => "Установить сервер tty7 на «{machine}»?",
         L10nKey::RemoteInstallDetail => {
             "tty7 запишет исполняемый файл сервера на {machine}, чтобы открывать там рабочие области. Другие файлы на {machine} не меняются, sudo не используется.\n\n{path_label} {path}\n{version_label} {version}\n{size_label} {size}\n{from_label} {from}\n{sha_label} {sha256}\n\n{silent_upgrades}"

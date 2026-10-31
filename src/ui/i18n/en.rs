@@ -1673,9 +1673,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
              gone, reconnecting starts this build's server."
         }
         L10nKey::RemoteHostUnreachable => "could not reach {machine}: {error}",
-        L10nKey::RemoteConnectTimedOut => {
-            "{machine}: the connect timed out ({stage}) — nothing answered this phase"
-        }
+        L10nKey::RemoteConnectTimedOut => "{machine}: the connect timed out — nothing answered",
         L10nKey::RemoteInstallTitle => "Install tty7's server on \"{machine}\"?",
         L10nKey::RemoteInstallDetail => {
             "tty7 will write its server binary to {machine} so this machine can host \

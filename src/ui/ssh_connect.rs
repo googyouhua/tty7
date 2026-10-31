@@ -338,11 +338,22 @@ pub(crate) fn ssh_profiles_by_frecency(cx: &gpui::App) -> Vec<SshProfile> {
 static RESOLVED: std::sync::Mutex<
     Vec<(
         uuid::Uuid,
+        String,
         std::time::Instant,
         Box<crate::daemon::protocol::NativeSshSpec>,
     )>,
 > = std::sync::Mutex::new(Vec::new());
 const RESOLVED_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a resolved spec depends on. A profile edited between two panes of the
+/// same restore must not have its old spec handed to the second one, so the
+/// cache is keyed by these fields and not by the id alone.
+fn spec_key(p: &crate::core::ssh_profile::SshProfile) -> String {
+    format!(
+        "{}|{}|{}|{:?}|{:?}|{:?}",
+        p.host, p.port, p.user, p.auth, p.identity_files, p.onekey_entry_id
+    )
+}
 
 pub(crate) fn resolve_persisted_ssh_spec(
     spec: Box<crate::daemon::protocol::NativeSshSpec>,
@@ -356,10 +367,11 @@ pub(crate) fn resolve_persisted_ssh_spec(
         .and_then(|id| cfg.ssh_profiles.iter().find(|p| p.id == id).cloned());
     match profile {
         Some(p) => {
+            let key = spec_key(&p);
             if let Ok(cached) = RESOLVED.lock()
-                && let Some((_, _, resolved)) = cached
-                    .iter()
-                    .find(|(id, at, _)| *id == p.id && at.elapsed() <= RESOLVED_FOR)
+                && let Some((_, _, _, resolved)) = cached.iter().find(|(id, seen, at, _)| {
+                    *id == p.id && *seen == key && at.elapsed() <= RESOLVED_FOR
+                })
             {
                 return resolved.clone();
             }
@@ -371,8 +383,8 @@ pub(crate) fn resolve_persisted_ssh_spec(
                 &cfg.onekey_entries,
             ));
             if let Ok(mut cache) = RESOLVED.lock() {
-                cache.retain(|(id, at, _)| *id != p.id && at.elapsed() < RESOLVED_FOR);
-                cache.push((p.id, std::time::Instant::now(), resolved.clone()));
+                cache.retain(|(id, _, at, _)| *id != p.id && at.elapsed() < RESOLVED_FOR);
+                cache.push((p.id, key, std::time::Instant::now(), resolved.clone()));
             }
             resolved
         }
