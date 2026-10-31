@@ -504,9 +504,34 @@ impl SshManager {
         let command = setup.channel.bridge_command(&base);
 
         let entry = match setup.channel {
-            RouteChannel::Pane => RemoteEntry::SessionExec {
-                command: command.clone(),
-            },
+            // A pane used to cost one SSH *session* each: `session-exec` runs a
+            // `--stdio --pane` bridge per pane, and `MaxSessions` counts exactly
+            // those — ten panes could not fit an sshd that allows ten, however
+            // healthy the machine was. The daemon listens on its own socket (the
+            // one that bridge forwards to), and a direct-streamlocal channel is
+            // a channel, not a session, so one connection carries the whole
+            // machine. Where the far end refuses forwarding this falls through
+            // to the bridge below, which is where it stood before.
+            RouteChannel::Pane => {
+                let socket = match (reuse.as_deref(), probed_env.as_ref()) {
+                    (Some(name), Some(env)) => {
+                        let resolved = match env.home.as_deref().filter(|h| !h.is_empty()) {
+                            Some(home) => remote_link::env_for_instance(env, home, name),
+                            None => env.clone(),
+                        };
+                        remote_link::remote_pane_socket(&resolved)
+                    }
+                    _ => probed_env
+                        .as_ref()
+                        .and_then(remote_link::remote_pane_socket),
+                };
+                match socket {
+                    Some(socket) => RemoteEntry::StreamLocal { socket },
+                    None => RemoteEntry::SessionExec {
+                        command: command.clone(),
+                    },
+                }
+            }
             RouteChannel::Control => match remote_link::fixed_entry(&installed, &command) {
                 Some(entry) => entry,
                 None => {
