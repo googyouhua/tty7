@@ -1,10 +1,8 @@
 ---
 title: "强杀客户端后容器内进程的退出上界 (kill-9 bound)"
 ticket: 2
-status: built
+status: done
 baseline_revision: 0f259733d91a9a10258de951eca723299c584e50
-blocked_at: ""
-blocked_reason: ""
 ---
 
 ## Intent
