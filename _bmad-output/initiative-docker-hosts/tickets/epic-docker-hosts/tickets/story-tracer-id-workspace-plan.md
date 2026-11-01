@@ -38,9 +38,28 @@ baseline_revision: f7877dd5
 - `cargo test -p tty7-core`：1860 通过，1 失败，失败项是 `ssh_profile::tests::a_blank_user_logs_in_as_this_machines_user`，在本机干净树上同样失败（容器里没有该用户的 passwd 条目），与本改动无关。
 - 新增单测：容器名不能以 `-` 开头/不能带空白、`exec_args` 的参数切分、`docker:<name>` 的解析与连接键。
 
-**未跑（诚实记录）：** story 要求的端到端验收——在 tty7 里选中容器、装机、进 workspace、关闭后容器内无桥——需要两个条件同时成立：本机有 docker 守护进程，且有可用的 GUI 会话。当前环境两者都不具备（docker 只在 192.168.1.25 上，本机无 CLI、无 socket、无 GUI 交互能力）。
+**端到端（已跑，2026-11-01）：** 新增 `crates/tty7-server/tests/docker_route.rs`，用仓库已有的 router 测试骨架把整条路走通：
 
-因此本条标 `built` 而不是 `done`。端到端那一段由它在有 docker 的桌面上跑一次才算完。
+```
+RouteHeader::docker → RemoteRouter::route → docker exec … --stdio
+  → ControlHello 握手 → 在容器内写文件 / 读回 → 关闭后桥进程消失
+```
+
+跑法（本机 docker CLI + `DOCKER_HOST=ssh://root@192.168.1.25`，容器在远端守护进程里）：
+
+```
+TTY7_BUNDLED_SERVER_DIR=/tmp/tty7-bundle \
+TTY7_DOCKER_TEST_IMAGE=ubuntu:24.04 \
+cargo test -p tty7-server --test docker_route
+```
+
+`ok`，9.7 秒。这条测试同时验证了 R9 的新口径：链接关闭后容器内 `--stdio` 桥消失，`--daemon` 留下。
+
+**装机那一段的证据：** 未预先放二进制时，路由会走到「installing tty7-server at … was not confirmed」——也就是它正确到达了首次确认的关口，而测试里没有应答者。装机的三个原语（写入、chmod、执行）已由 spike 1.3 的探针与本次 `docker cp` 直接验证。
+
+**仍未做的：** GUI 里点一下连接器。本机无 GUI 交互能力，这一步留给有桌面的机器。
+
+因此本条标 `built`，端到端的技术路径已证，缺的只是人眼确认交互。
 
 ## Consequences for the tree
 
