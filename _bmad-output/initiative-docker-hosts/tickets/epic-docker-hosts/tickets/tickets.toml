@@ -1,0 +1,144 @@
+# next_id = 14
+
+[[entry]]
+id = 1
+type = "story"
+title = "tracer: 按容器名或 ID 接入、确认装机、进 workspace、断开后进程退出"
+description = "打通一条最薄的完整路径：手动输入容器名或 ID → 路由进容器 → 首次装机弹确认（拒绝时不写入）→ 进入 workspace → 关闭后容器内进程退出。列表、架构选择、目录回退这一轮都先走单一路径。需要一台有 docker 的机器，以及一个没有 sshd 的运行中容器（例如 `docker compose up -d` 起的开发容器）。"
+verify = "在有 docker 的机器上按容器名接入一个无 sshd 的容器：出现装机确认，拒绝时容器内无文件写入；允许后能在 pane 里执行命令；关闭 workspace 后 `docker exec <容器> pgrep -f tty7-server` 无输出。"
+covers = ["R1", "R3", "R9"]
+after = []
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 2
+type = "spike"
+title = "spike: 强杀客户端后容器内进程的退出上界"
+description = "阈值探测。测出 docker exec 通道在正常关闭、连接中断、kill -9 三种情形下，容器内 tty7-server 退出的时间上界。放在最前，因为这是全 epic 最不确定的一处。"
+verify = "给出三种情形各自的时间（或「不退出」），R9 的验收写上具体秒数。"
+covers = ["R9"]
+after = []
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 3
+type = "spike"
+title = "spike: 安装目录回退顺序"
+description = "阈值探测。在一组真实镜像上（root、非 root、只读 rootfs、noexec 挂载）测出「可写且可执行」的安装目录顺序。"
+verify = "产出一张表：每类镜像下按顺序尝试的路径、命中哪一个、失败原因；R5 的验收按这张表收紧。"
+covers = ["R5"]
+after = []
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "连接器列出本机运行中的容器，并拒绝远端 docker"
+description = "连接器新增容器分组，列出运行中的容器、可按容器名或镜像名搜索；DOCKER_HOST 指向远端时明确拒绝并说明只支持本机。列表刷新只发生在打开连接器时。"
+verify = "起停一个容器，连接器随之增减；搜镜像名能命中；设置 DOCKER_HOST 指向远端后得到明确说明，且本机容器仍可用。"
+covers = ["R1", "R11"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "完整 workspace 在容器内生效"
+description = "文件树、git 状态、diff、搜索都作用在容器内的文件系统上，tab 与 pane 布局在重开 tty7 后恢复。"
+verify = "在容器 workspace 里打开文件树看到的是容器内路径；改一个容器内文件后 git 面板显示该改动；重启 tty7 后 tab 与布局仍在。"
+covers = ["R2"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "按容器架构选择服务端程序"
+description = "装机前探测容器架构，选对应的静态 musl 资产；宿主与容器架构不同也要成功；没有对应资产时中止并点名是哪一侧不受支持。"
+verify = "在 arm64 宿主上接入 amd64 容器成功；接入一个未发布架构时，错误信息点名容器架构。"
+covers = ["R4"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "安装位置在没有写权限时回退"
+description = "按 spike 结论实现安装目录优先级；全部不可写时列出尝试过的路径。"
+verify = "只读 rootfs 容器与 noexec 挂载的容器各自装成功；全部不可写时错误消息列出尝试过的路径。"
+covers = ["R5"]
+after = [3]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "容器重建后认得出它、不再问、布局还在"
+description = "容器身份取容器名；确认过一次后不再询问装机，重建后自动重装（含跨架构重装）；重建后 tab 与布局保留，pane 明示已停止而不是空白。"
+verify = "对一个已接入的容器连续 3 次 compose down/up，每次重连零提问，连接器条目恒为 1，tab 布局保留，pane 显示已停止。"
+covers = ["R3", "R7"]
+after = [1, 6, 7]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 9
+type = "story"
+title = "容器停止、docker 未运行、容器被删除时的条目状态"
+description = "条目保留并标记不可用或找不到；容器恢复后自动回到可用，且不重新询问装机；被删除的条目等用户处置。"
+verify = "停掉容器，连接器里条目仍在且标不可用；重新启动后直接可用；删掉容器，条目标找不到。"
+covers = ["R8"]
+after = [1, 4, 8]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 10
+type = "story"
+title = "断开回收：容器内不留孤儿"
+description = "正常关闭、连接中断、客户端强杀三种情形都回收容器内进程；无法自行退出的残留由下次接入清理或报告。"
+verify = "100 次接入/关闭后容器内 pgrep 为空；kill -9 客户端后，在 spike 给出的秒数内 pgrep 为空。"
+covers = ["R9"]
+after = [1, 2]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 11
+type = "story"
+title = "七类失败各自说得清"
+description = "容器未运行、docker 未运行、容器内无 /bin/sh、架构无对应资产、无可写安装目录、装机被拒绝、装机后起不来——各自不同的可读原因与下一步，且都不无限等待。"
+verify = "逐条构造七种情形，每种都得到不同且含下一步的提示，且每种都在有限时间内结束。"
+covers = ["R10"]
+after = [1, 4, 6, 7, 9]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 12
+type = "story"
+title = "Refactor sweep"
+description = "清理前面 story 留下的重复与临时路径，范围在开工时按计划与评审结论确定；只做清理，不接新需求。"
+verify = "无遗留的临时分支或 TODO；重复实现已合并；全量测试通过。"
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 13
+type = "story"
+title = "端到端套件与接入开销门"
+description = "一条端到端链路覆盖发现、装机、workspace、重建、回收；同时测装机时长与交互开销是否随 pane 数增长。"
+verify = "端到端套件在指定环境通过；装机 p90 ≤ 15 秒；5 个 pane 与 1 个 pane 的单次交互开销无显著差异。"
+covers = ["R6"]
+after = [12]
+hitl = false
+risk = "medium"

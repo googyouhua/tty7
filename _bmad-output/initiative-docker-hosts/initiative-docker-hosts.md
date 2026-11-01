@@ -76,12 +76,11 @@ Tracer path：发现容器 → 首次确认装机 → 进入完整 workspace →
 - Assumption: A2 — pane 默认工作目录是容器内该用户的 `HOME`，不可用时回退 `/`。
 - Assumption: A3 — 容器被彻底删除后条目保留，由用户决定清理，v1 不提供删除入口。
 - Assumption: A4 — 现有 musl 双架构资产已覆盖容器场景，不为容器新增构建矩阵。
-- Open question: Q1 — Windows 上同名 WSL 发行版 `docker-desktop` 与同名容器并存时的区分是否足够；blocker 是 R1。
 - Open question: Q2 — 安装目录回退优先级的具体顺序，需在一组真实镜像上实测；blocker 是 R5。
 - Open question: Q3 — 客户端被强杀后容器内进程自行退出的时间上界，决定 R9 的可测阈值；blocker 是 R9。
 - Open question: Q4 — 同名不同镜像是否真的无需提示；blocker 是 R7（与 A1 同一条判断）。
 - Open question: Q5 — 是否需要「删除容器主机记录」的显式入口；blocker 是 R8。
-- Open question: Q6 — Windows 上 `docker` CLI 的发现方式；blocker 是 R1 在 Windows 的实现。
+- Open question: Q6 — 已后置 v2：Windows 上 `docker` CLI 的发现方式；见 epic Boundaries。
 - Decision: 2026-11-01 — 场景为「桌面端在宿主机、接入容器」，排除「tty7 跑在容器里连出去」与「server 在容器里被外部连入」两种拓扑。
 - Decision: 2026-11-01 — 要完整 workspace，不接受只做终端；容器定位为长期开发环境。
 - Decision: 2026-11-01 — 容器身份是容器名；重建即复用 workspace、保留 tab 与布局、pane 明示停止。
@@ -90,3 +89,4 @@ Tracer path：发现容器 → 首次确认装机 → 进入完整 workspace →
 - Decision: 2026-11-01 — 只切一条 epic。理由：R1-R11 落在同一批文件（`session.rs` 的 `RemoteTarget`、`router.rs` 的 `RouteTarget`/`origin_key`、`remote_connect.rs` 的发现、`install/` 的装机），没有部署边界，且只有一起交付才满足本 initiative 的 Outcome；把 R7/R8 单切会让第一条 epic 交付一个「每天重建就丢布局」的容器主机，正是 PRD 要消除的体验。
 - Decision: 2026-11-01 — 不设独立的平台基线 epic。理由：没有独立部署边界；基线（`docker` CLI 发现、容器枚举管道）由这条 epic 的头两条 story 承担。
 - Decision: 2026-11-01 — tracer 路径：发现容器 → 首次确认装机 → 进入 workspace → 断开回收；整条走通前不切后续 story。
+- Decision: 2026-11-01 — v1 只做 macOS / Linux。Q1（同名 `docker-desktop` 与容器并存）与 Q6（Windows 上 `docker` CLI 发现）一并后置 v2，不再是 R1 的 v1 阻塞项；判据是 epic 的 Boundaries。
