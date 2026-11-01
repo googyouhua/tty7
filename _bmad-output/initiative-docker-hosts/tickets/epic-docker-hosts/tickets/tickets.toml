@@ -104,9 +104,9 @@ risk = "low"
 [[entry]]
 id = 10
 type = "story"
-title = "断开回收：容器内不留孤儿"
-description = "正常关闭、连接中断、客户端强杀三种情形都回收容器内进程；无法自行退出的残留由下次接入清理或报告。"
-verify = "100 次接入/关闭后容器内 pgrep 为空；kill -9 客户端后，在 spike 给出的秒数内 pgrep 为空。"
+title = "断开回收：桥退出、daemon 不累积"
+description = "正常关闭、连接中断、客户端强杀三种情形下，该次连接的桥进程都在 1 秒内退出；容器内的常驻 daemon 只允许一个，被后续连接复用，不随连接次数累积。"
+verify = "100 次接入/关闭后容器内桥进程数为 0 且 daemon 数为 1；kill -9 客户端后 1 秒内桥进程消失。"
 covers = ["R9"]
 after = [1, 2]
 hitl = false
