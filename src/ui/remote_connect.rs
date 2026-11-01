@@ -1810,6 +1810,27 @@ mod tests {
     }
 
     #[test]
+    /// A container is found by its image as well as its name: the image is
+    /// what the user remembers when the name is a generated one.
+    #[test]
+    fn a_container_is_found_by_name_or_by_image() {
+        let rows = docker_choices(&[
+            ("api-dev".to_string(), "node:22-alpine".to_string()),
+            ("db".to_string(), "postgres:16".to_string()),
+        ]);
+        let found = filter_hosts(&rows, "api");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label, "api-dev");
+        assert_eq!(found[0].target.connection_key(), "docker:api-dev");
+
+        let by_image = filter_hosts(&rows, "postgres");
+        assert_eq!(by_image.len(), 1);
+        assert_eq!(by_image[0].label, "db");
+
+        assert!(filter_hosts(&rows, "nginx").is_empty());
+    }
+
+    #[test]
     fn a_wsl_row_names_the_distro_verbatim() {
         let rows = wsl_choices(&["Ubuntu-22.04".to_string(), "Arch".to_string()]);
         assert_eq!(rows.len(), 2);

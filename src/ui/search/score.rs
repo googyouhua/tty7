@@ -239,3 +239,20 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod docker_hosts_tab_tests {
+    use super::*;
+
+    /// The Hosts tab renders the container name as the title and the image as
+    /// the subtitle, so an image search has to travel through the subtitle.
+    #[test]
+    fn a_container_is_found_by_its_image_in_the_hosts_tab() {
+        let item = Item::new("api-dev", crate::ui::search::command::CommandKind::NewTab)
+            .with_subtitle("Docker · node:22-alpine");
+        assert!(item_score("node", &item).is_some());
+        assert!(item_score("node:22", &item).is_some());
+        assert!(item_score("api", &item).is_some());
+        assert!(item_score("postgres", &item).is_none());
+    }
+}
