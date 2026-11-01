@@ -236,7 +236,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.1-dev"
-source = "git+https://github.com/l0ng-ai/alacritty?rev=1276f128fbaa8832cbc66210675cbe8aeb570499#1276f128fbaa8832cbc66210675cbe8aeb570499"
+source = "git+https://github.com/l0ng-ai/alacritty?rev=fe249ca805b4813940fbaee3974357b7e73df30a#fe249ca805b4813940fbaee3974357b7e73df30a"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
@@ -11528,7 +11528,7 @@ dependencies = [
 
 [[package]]
 name = "tty7"
-version = "26.9.4"
+version = "26.10.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -11576,13 +11576,14 @@ dependencies = [
  "url",
  "uuid",
  "windows 0.58.0",
+ "windows-core 0.58.0",
  "windows-sys 0.61.2",
  "winresource",
 ]
 
 [[package]]
 name = "tty7-cli"
-version = "26.9.4"
+version = "26.10.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -11597,7 +11598,7 @@ dependencies = [
 
 [[package]]
 name = "tty7-core"
-version = "26.9.4"
+version = "26.10.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -11637,7 +11638,7 @@ dependencies = [
 
 [[package]]
 name = "tty7-gateway"
-version = "26.9.4"
+version = "26.10.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -11663,7 +11664,7 @@ dependencies = [
 
 [[package]]
 name = "tty7-mobile-client"
-version = "26.9.4"
+version = "26.10.0"
 dependencies = [
  "anyhow",
  "iroh",
@@ -11676,7 +11677,7 @@ dependencies = [
 
 [[package]]
 name = "tty7-mobile-proto"
-version = "26.9.4"
+version = "26.10.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -11686,7 +11687,7 @@ dependencies = [
 
 [[package]]
 name = "tty7-server"
-version = "26.9.4"
+version = "26.10.0"
 dependencies = [
  "libc",
  "tempfile",

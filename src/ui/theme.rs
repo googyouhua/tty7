@@ -11,7 +11,6 @@ use crate::terminal::view::{
     ClearScrollback, CopyText, CutText, FindInTerminal, FindNext, FindPrevious, PasteText,
     RedoEdit, SelectAll, UndoEdit,
 };
-use crate::ui::app::TITLE_BAR_HEIGHT;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::presets;
 use crate::ui::presets::Fill;
@@ -19,30 +18,37 @@ use crate::ui::presets::Fill;
 use std::sync::OnceLock;
 
 /// Where macOS puts the window's traffic lights over the tab strip: centred on
-/// the row of chrome tiles they share the bar with, and as far in from the left
-/// edge as they sit below the top, which is where AppKit's own toolbar windows
-/// put them (19 and 19 in a 52-point unified bar, 12 and 13 in a 40-point
-/// compact one). Nine points in is the plain 28-point title bar's inset, and
-/// in a 48-point bar it crowds the lights into the corner.
+/// the row of chrome tiles they share the bar with. `x` matches `y`, as AppKit's
+/// unified toolbar does (19 and 19 in a 52-point bar).
 ///
 /// `y` is the gap between the window's top edge and the *top* of the button
-/// frame, and macOS draws those buttons 14 points tall — so the lights' centre
-/// falls seven points below it. The tiles sit in the middle of the bar's
-/// content box instead, which is `TITLE_BAR_HEIGHT` less the hairline
-/// `TitleBar` draws along its bottom edge. Deriving the number from those two
-/// facts rather than writing it out is what keeps the lights on the tile line:
-/// the value the 40-point bar needed was rewritten by hand when the bar grew
-/// to 48, without the border in it, and left the lights half a point — one
-/// device pixel on a Retina panel — below everything beside them.
+/// frame, and macOS draws those buttons [`TRAFFIC_LIGHT_BUTTON_H`] tall — so the
+/// lights' centre falls half that below it. Deriving the number from
+/// [`crate::ui::app::title_strip_centre`], the line every title-bar row puts its
+/// contents on, is what keeps the lights on the tile line: the value the 40-point bar needed was
+/// rewritten by hand when the bar grew to 48, without the border in it, and left
+/// the lights half a point — one device pixel on a Retina panel — below
+/// everything beside them.
 pub(crate) fn traffic_light_position() -> Point<Pixels> {
-    // AppKit's own button frame, and the border `TitleBar` adds to the bar it
-    // wraps. Neither moves with the bar's height.
-    const BUTTON_H: f32 = 14.;
-    const BAR_BORDER: f32 = 1.;
-
-    let top = (TITLE_BAR_HEIGHT - BAR_BORDER - BUTTON_H) / 2.;
-    point(px(top), px(top))
+    point(px(TRAFFIC_LIGHT_INSET), px(TRAFFIC_LIGHT_INSET))
 }
+
+/// The height of AppKit's own standard-window-button frame, which is what the
+/// lights are drawn inside. It does not move with the bar's height.
+pub(crate) const TRAFFIC_LIGHT_BUTTON_H: f32 = 14.;
+
+// The same content centre drives both the native buttons and the rows beside
+// them. Keep the inset const so the leading reserve can follow it at compile
+// time instead of maintaining a second copy of the bar's border arithmetic.
+const TRAFFIC_LIGHT_INSET: f32 = crate::ui::app::TITLE_STRIP_CENTRE - TRAFFIC_LIGHT_BUTTON_H / 2.;
+
+/// Close to zoom: three 14-point buttons on a 20-point pitch.
+const TRAFFIC_LIGHTS_W: f32 = 54.;
+
+/// The room the lights take at the bar's leading edge on macOS: their span,
+/// with the inset they sit at on either side.
+pub(crate) const TRAFFIC_LIGHTS_LEAD: f32 =
+    TRAFFIC_LIGHT_INSET + TRAFFIC_LIGHTS_W + TRAFFIC_LIGHT_INSET;
 
 pub(crate) fn set_menus(cx: &mut App) {
     cx.set_menus([
@@ -84,6 +90,9 @@ pub(crate) fn set_menus(cx: &mut App) {
             MenuItem::action(t(L10nKey::AppMenuForkSession), ForkAgentSession),
             MenuItem::separator(),
             MenuItem::action(t(L10nKey::AppMenuClosePaneTab), CloseActiveTab),
+            // Where a Mac user looks for the way to put the window away; it
+            // is also the one path that works when another app has taken ⇧⌘W.
+            MenuItem::action(t(L10nKey::CmdCloseWindow), CloseWindow),
             MenuItem::action(t(L10nKey::AppMenuCloseOtherTabs), CloseOtherTabs),
             MenuItem::action(t(L10nKey::AppMenuCloseTabsRight), CloseTabsToTheRight),
             MenuItem::action(t(L10nKey::AppMenuReopenClosedTab), ReopenClosedTab),
@@ -313,6 +322,7 @@ pub(crate) const SYSTEM_MATERIAL_OPACITY: f32 = 0.82;
 /// 11 22H2 (build 22621), acrylic needs 1809 (build 17763); below that plain
 /// translucency is the best Windows can do. Pure function so the fallback
 /// table is unit-testable on every platform.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn windows_background_appearance(
     backdrop: WindowBackdrop,
     blur: bool,
@@ -373,6 +383,7 @@ pub(crate) fn windows_background_appearance(
 /// render identically — hiding them beats misrepresenting them. Below 1809
 /// (17763) there is no blur API at all, so only plain translucency is left.
 /// Pure function so the table is unit-testable on every platform.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn supported_backdrops_for(build: u32) -> &'static [WindowBackdrop] {
     if build >= 22_621 {
         &[
@@ -422,6 +433,7 @@ pub(crate) fn windows_build_number() -> u32 {
     })
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub(crate) fn resolved_background_appearance(
     backdrop: WindowBackdrop,
     blur: bool,
@@ -1091,15 +1103,27 @@ mod tests {
     use gpui::TestAppContext;
 
     /// The lights share a line with the chrome tiles they sit beside. gpui
-    /// hangs the top of the 14pt frame `y` below the window's top edge, so
-    /// their centre is seven points under that; the tiles are centred in the
-    /// bar's content box, its height less the hairline `TitleBar` draws along
-    /// the bottom. Sixteen and a half points today, out of the 48pt bar.
+    /// hangs the top of the button frame `y` below the window's top edge, so
+    /// their centre falls half a frame under that, and `title_strip_centre` is
+    /// where every title-bar row puts its contents. Sixteen and a half points
+    /// today, out of the 48pt bar.
     #[test]
     fn the_traffic_lights_sit_on_the_chrome_rows_centre() {
         let position = traffic_light_position();
         assert_eq!(position.x, position.y);
-        assert_eq!(position.y + px(7.), px((TITLE_BAR_HEIGHT - 1.) / 2.));
+        assert_eq!(
+            position.y + px(TRAFFIC_LIGHT_BUTTON_H / 2.),
+            crate::ui::app::title_strip_centre()
+        );
+    }
+
+    /// The strip, editor header and search band start at the lead, so the
+    /// lights have to end, with their inset after them, before it does.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_title_bar_lead_clears_the_traffic_lights() {
+        let right = traffic_light_position().x + px(TRAFFIC_LIGHTS_W);
+        assert!(right + px(TRAFFIC_LIGHT_INSET) <= px(crate::ui::app::TITLE_BAR_LEAD));
     }
 
     #[gpui::test]

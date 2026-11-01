@@ -106,6 +106,12 @@ is more than one. GitHub Enterprise hosts are not supported.
 - Each row carries a state glyph whose *shape* says open, closed, not planned,
   merged or draft; the number, author and last update; and the labels.
   **Click a label** to show only that label, and the × beside it to clear it.
+- Hovering a row adds a button to open it on github.com.
+- A pull request based on another listed pull request's branch is drawn in
+  its stack: the stack's rows sit together, each above the one it is based
+  on, joined by a line through their glyphs; pull requests based on the same
+  one branch off it in lanes side by side. Stacks show on the unfiltered
+  pull request list; a label filter lists rows without their branches.
 - **Click a row** for the detail: title, state, author, labels, the description
   and the conversation as Markdown. A pull request adds its branches, size and
   changed files — click a file to open its patch in the
@@ -167,9 +173,14 @@ and two thirds. **Document: Third / Half / Two-Thirds Width** in Search
 Everywhere do the same. On a narrow window the terminal's own floor stops the
 divider sooner.
 
-Right-click the document's header for **Fill window**, which is the old
-full-workspace overlay, unchanged. **Document: Fill Window** and **Document:
+Two cells at the end of the document's header switch it: the window with a
+column in it is **Dock beside terminal**, the filled one is **Fill window**, the
+old full-workspace overlay, unchanged. **Document: Fill Window** and **Document:
 Dock Beside Terminal** in Search Everywhere are the same switch.
+
+In **Fill window**, both the editor and diff headers show the current terminal's
+name on the left. Click it to dock the document beside the terminal, keeping
+the file or diff open.
 
 Fill or dock is **per tab**: read a long file over the whole window in one tab
 while an agent keeps half of another, and neither moves the other. A fresh tab

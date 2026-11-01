@@ -1,7 +1,7 @@
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Axis, Bounds, Context, FontWeight, MouseButton,
-    Pixels, SharedString, Window, canvas, deferred, div, ease_out_quint, linear_color_stop,
-    linear_gradient, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, App, Axis, Bounds, Context, Edges, FontWeight,
+    MouseButton, Pixels, SharedString, Window, canvas, deferred, div, ease_out_quint,
+    linear_color_stop, linear_gradient, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -633,6 +633,21 @@ pub(crate) fn hit_target(button: Button) -> Button {
 /// The narrowest a chip gets: its `min_w`, which flex-shrink cannot go under.
 const CHIP_MIN_W: f32 = 100.;
 
+/// How wide the tab strip is drawn: the content width less what the row
+/// reserves beside it (the lead, plus the window buttons or a docked column),
+/// never below `floor`.
+///
+/// Under Linux client-side decorations `viewport_w` measures the whole surface,
+/// shadow included, while the title bar row sits inside the frame padding —
+/// so both paddings come off before anything else does. Sizing the strip to
+/// the raw viewport overran the frame by exactly that much and clipped the
+/// close button (#1169). `window_paddings` answers `Edges::all(0)` under
+/// server-side decorations and on a maximized or tiled CSD window, so
+/// everywhere else this is the width the strip always had.
+fn strip_width(viewport_w: Pixels, pad: Edges<Pixels>, reserved: f32, floor: f32) -> Pixels {
+    (viewport_w - pad.left - pad.right - px(reserved)).max(px(floor))
+}
+
 /// The run of chips to draw when they cannot all fit.
 ///
 /// The row clips what overflows, so past a certain tab count the chips at the
@@ -776,10 +791,10 @@ const TITLEBAR_SEARCH_CLEAR_GAP: f32 = 8.;
 /// is drawn inside.
 ///
 /// The strip does not start at the terminal column's left edge. The title bar
-/// leaves a lead before it — 80pt on macOS for the traffic lights, whether or
+/// leaves a lead before it — `TRAFFIC_LIGHTS_LEAD` on macOS, for the traffic lights, whether or
 /// not the rail is standing in front of them, plus the bar's own inset in
 /// fullscreen; 12 elsewhere — and a box centred on the strip was centred that
-/// much too far right by half: 40pt on macOS, which is plainly visible with
+/// much too far right by half: 40pt on macOS then, which is plainly visible with
 /// the rail collapsed and the box standing alone in an empty bar (#1033).
 /// So the band reaches back over the lead, and its left edge is the column's.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -829,7 +844,7 @@ pub(crate) fn search_band(
 }
 
 /// How far the title bar's lead reaches before the tab strip starts: the room
-/// `TitleBar` leaves for the traffic lights on macOS, and the bar's own inset
+/// we have `TitleBar` leave for the traffic lights on macOS, and the bar's own inset
 /// that gpui-component adds to it in fullscreen, where the lights are gone but
 /// the room is not; `TITLE_BAR_LEAD` elsewhere, in both of the rows the strip
 /// can sit in.
@@ -1281,7 +1296,6 @@ pub(crate) fn agent_status_label(
 }
 
 pub(crate) const LIVE_DOT: u32 = 0x22C55E;
-
 pub(crate) const UNKNOWN_DOT: u32 = 0x9AA0A6;
 
 pub(crate) fn select_workspace_action(index: usize) -> Option<Box<dyn gpui::Action>> {
@@ -2333,11 +2347,21 @@ impl Tty7App {
         // under it showed through the file name while staying clickable.
         let document_w = self.document_dock_px(window, cx).unwrap_or(0.);
         let controls_w = crate::ui::app::window_controls_w(window.is_fullscreen());
+        let pad = gpui_component::window_paddings(window);
         let strip_w = if cfg!(target_os = "macos") {
-            (window.viewport_size().width - px(80. + panel_w + document_w)).max(px(160.))
+            strip_width(
+                window.viewport_size().width,
+                pad,
+                crate::ui::app::TITLE_BAR_LEAD + panel_w + document_w,
+                160.,
+            )
         } else {
-            (window.viewport_size().width - px(crate::ui::app::TITLE_BAR_LEAD + controls_w))
-                .max(px(140.))
+            strip_width(
+                window.viewport_size().width,
+                pad,
+                crate::ui::app::TITLE_BAR_LEAD + controls_w,
+                140.,
+            )
         };
         let chrome_band_w = (!cfg!(target_os = "macos") && self.right_panel_open(cx))
             .then(|| (self.right_panel_px(window, cx) - controls_w - 1.).max(0.));
@@ -3128,6 +3152,7 @@ mod ssh_host_row_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::TRAFFIC_LIGHTS_LEAD;
     use gpui::TestAppContext;
     use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
@@ -3156,6 +3181,25 @@ mod tests {
         crate::ui::i18n::set_locale("en");
     }
 
+    /// #1169: under Linux client-side decorations the viewport measures the
+    /// whole surface, shadow included, while the title bar row sits inside the
+    /// frame padding. A strip sized off the raw viewport overran the frame by
+    /// both paddings and pushed the close button out past the right edge.
+    #[test]
+    fn the_strip_and_window_buttons_fit_inside_the_csd_frame() {
+        let (lead, controls) = (12., 102.);
+        let pad = Edges::all(px(12.));
+        let strip = strip_width(px(1200.), pad, lead + controls, 140.);
+        assert!(
+            px(lead) + strip + px(controls) <= px(1200. - 12. - 12.),
+            "strip {strip:?} leaves the window buttons outside the frame"
+        );
+        // No frame padding (server-side decorations, macOS, Windows, or a
+        // maximized/tiled CSD window): the strip keeps the width it always had.
+        let bare = strip_width(px(1200.), Edges::all(px(0.)), lead + controls, 140.);
+        assert_eq!(bare, px(1200. - lead - controls));
+    }
+
     /// Where a band lands in the terminal column, for a strip that starts
     /// `lead` in and ends `strip_end` from the column's left edge.
     fn band_in_column(band: SearchBand, lead: f32, strip_end: f32) -> (f32, f32) {
@@ -3163,11 +3207,11 @@ mod tests {
     }
 
     /// #1033, with the reporter's window: 1946pt wide, the rail collapsed.
-    /// The strip starts 80pt in, after the traffic lights, and centred on it
+    /// The strip started 80pt in, after the traffic lights, and centred on it
     /// the box sat at 1013 — 40pt right of the window's middle at 973.
     #[test]
     fn with_the_rail_collapsed_on_macos_the_search_box_centres_on_the_window() {
-        let (w, lead) = (1946., 80.);
+        let (w, lead) = (1946., TRAFFIC_LIGHTS_LEAD);
         let band = search_band(true, lead, 0., 0., Some(58.), Some(49.));
         let (l, r) = band_in_column(band, lead, w);
         assert_eq!((l, r), (0., w));
@@ -3178,12 +3222,12 @@ mod tests {
     }
 
     /// With the rail open, the title bar sits in the terminal column but
-    /// still leaves the traffic lights' 80pt before the strip, over nothing
+    /// still leaves the traffic lights' lead before the strip, over nothing
     /// — the lights are over the rail. The band reaches back over that too,
     /// and centres on the column.
     #[test]
     fn with_the_rail_open_on_macos_the_search_box_centres_on_the_terminal_column() {
-        let (column, lead) = (1200., 80.);
+        let (column, lead) = (1200., TRAFFIC_LIGHTS_LEAD);
         let band = search_band(true, lead, 0., 0., None, Some(49.));
         assert_eq!(band_in_column(band, lead, column), (0., column));
         assert_eq!(band.clear, 49. + TITLEBAR_SEARCH_CLEAR_GAP);
@@ -3195,10 +3239,10 @@ mod tests {
         assert_eq!(docked.clear, 0.);
     }
 
-    /// Fullscreen keeps `TitleBar`'s 80pt and adds the bar's own inset.
+    /// Fullscreen keeps the traffic lights' lead and adds the bar's own inset.
     #[test]
     fn fullscreen_on_macos_reaches_back_over_the_bars_extra_inset_as_well() {
-        let lead = 80. + 12.;
+        let lead = TRAFFIC_LIGHTS_LEAD + 12.;
         let band = search_band(true, lead, 0., 0., Some(58.), Some(49.));
         assert_eq!(band_in_column(band, lead, 1440.), (0., 1440.));
     }

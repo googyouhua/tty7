@@ -189,6 +189,9 @@ pub(crate) struct TabRow {
     pub(crate) agent: Option<crate::core::cli_agent::CLIAgent>,
     pub(crate) status: Option<crate::core::cli_agent::AgentStatus>,
     pub(crate) unread: usize,
+    /// "waiting 3m" while an agent in the tab is blocked on the user, counted
+    /// from the longest wait. Only this window's own tabs know it.
+    pub(crate) waited: Option<String>,
     pub(crate) ssh: Option<u32>,
     pub(crate) active: bool,
     /// Branch and diff counts, the same line the tab sidebar shows. Only this
@@ -1018,6 +1021,7 @@ impl Tty7App {
     /// in strip order; other workspaces' tabs come in the order they have.
     pub(crate) fn tab_rows_for(&self, id: WorkspaceId, mru: bool, cx: &App) -> Vec<TabRow> {
         if id == self.workspace {
+            let now_ms = crate::core::config::unix_now().saturating_mul(1000);
             let order = match mru {
                 true => self.tabs_by_mru(),
                 false => (0..self.tabs.len()).collect(),
@@ -1045,6 +1049,7 @@ impl Tty7App {
                         agent: tab.agent(cx),
                         status: tab.agent_status(cx),
                         unread: tab.agent_unread_count(cx),
+                        waited: tab.agent_waited(now_ms, cx),
                         ssh: self.tab_ssh_dot(tab, cx),
                         active: i == self.active,
                         git: tab.git_status(None, cx),
@@ -1090,6 +1095,7 @@ impl Tty7App {
                 agent: v.agent,
                 status: v.status,
                 unread: 0,
+                waited: None,
                 ssh: None,
                 active: Some(v.id) == active,
                 git: git(v.cwd.as_deref()),
@@ -1205,7 +1211,13 @@ impl Tty7App {
     }
 
     fn switcher_disconnect(&mut self, target: &RemoteTarget, cx: &mut Context<Self>) {
-        crate::ui::remote_workspace::RemoteLinks::disconnect(cx, target.host_id());
+        // Deferred: the disconnect detaches the panes of every window on that
+        // machine, and reads each window's app to find them — this one among
+        // them, which is mid-update right here. Reading it now panics inside
+        // the menu's mouse-up handler, and that panic cannot unwind out of
+        // the platform callback, so the whole process aborts.
+        let host = target.host_id();
+        cx.defer(move |cx| crate::ui::remote_workspace::RemoteLinks::disconnect(cx, host));
         if self
             .connect
             .as_ref()
@@ -3185,6 +3197,13 @@ impl Tty7App {
                                     .child(meta)
                             })),
                     )
+                    .children(tab.waited.clone().map(|waited| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(gpui::rems(11. / 16.))
+                            .text_color(muted)
+                            .child(waited)
+                    }))
                     .when(tab.active, |r| {
                         r.child(
                             div()
@@ -3591,6 +3610,48 @@ fn tab_count(n: usize) -> String {
 mod tests {
     use super::*;
 
+    /// The host menu's Disconnect runs inside an update of this window's own
+    /// app, and the disconnect reads that app to find the panes to let go of.
+    /// Done in place, that read panicked on the double lease — inside a
+    /// mouse-up handler, where a panic aborts the process and takes every
+    /// window down with it.
+    #[gpui::test]
+    fn disconnecting_the_machine_this_window_is_on_does_not_crash(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{RemoteRef, WindowView, WindowViews};
+        use crate::ui::windows::WindowRegistry;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "build-box".into(),
+        };
+        let handle = vcx.window_handle();
+        let workspace = vcx.update(|_, cx| app.read(cx).workspace);
+        vcx.update(|_, cx| {
+            WindowRegistry::init(cx);
+            WindowRegistry::register(cx, workspace, handle, app.downgrade());
+            let mut entry =
+                WindowView::on_remote(RemoteRef::new(target.clone(), WorkspaceId::new()));
+            entry.id = workspace;
+            entry.open = true;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![entry],
+                    active: None,
+                },
+            );
+        });
+
+        app.update(&mut vcx, |this, cx| this.switcher_disconnect(&target, cx));
+        vcx.background_executor.run_until_parked();
+
+        assert_eq!(
+            vcx.update(|_, cx| RemoteLinks::status_of(cx, workspace)),
+            Some(crate::ui::remote_workspace::RemoteStatus::Disconnected),
+            "the disconnect still lands once the menu's update is over"
+        );
+    }
+
     /// The workspace row's shape: a `flex_1` column, and in it a truncating
     /// name sized by its own text beside the slot number. gpui measures that
     /// name once against the column's zero basis, and used to answer the
@@ -3789,6 +3850,7 @@ mod tests {
             agent: None,
             status: None,
             unread: 0,
+            waited: None,
             ssh: None,
             active: false,
             git: None,
@@ -4500,7 +4562,7 @@ mod gpui_tests {
         });
     }
 
-    /// One of the three places on the card a test wants to put the pointer.
+    /// One of the places on the card a test wants to put the pointer.
     #[derive(Clone, Copy)]
     enum Spot {
         Workspaces,

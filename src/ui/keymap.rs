@@ -4,7 +4,7 @@ use crate::core::actions::*;
 use crate::core::config::{Config, KeybindingOverride};
 use crate::terminal::view::{
     AlternatePaste, ClearScrollback, CopyRaw, CopyText, FindInTerminal, FindNext, FindPrevious,
-    InsertNewline, InsertNewlineFallback, PasteText, ToggleComposer,
+    InsertNewline, InsertNewlineFallback, PasteText, RunReverseSearchSelection, ToggleComposer,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::palette;
@@ -53,6 +53,16 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-+", IncreaseFontSize, None),
         KeyBinding::new("tab", SendTab, Some("Terminal")),
         KeyBinding::new("shift-tab", SendBackTab, Some("Terminal")),
+        // The Ctrl+R menu runs its selection on Cmd+Enter, which on macOS is
+        // also `ToggleFullscreen`. Scoped to the open menu, it is deeper in
+        // the dispatch path than the window binding and wins only there.
+        // `cmd`, not `secondary`: the menu's own key handler runs on the
+        // platform key everywhere, and Ctrl+Enter off macOS only accepts.
+        KeyBinding::new(
+            "cmd-enter",
+            RunReverseSearchSelection,
+            Some("Terminal && reverse_search"),
+        ),
     ];
     // The switcher's footer tells you Tab is the way across to the tab column
     // once a query is in the box. gpui-component's Root binds `tab` to its
@@ -434,7 +444,11 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // shipping unbound: the palette and the Keybindings page both carry
         // this, so a key is one line of config away.
         ("NewWindow", per_platform("secondary-n", "")),
-        ("CloseWindow", ""),
+        // Closing the window is how tty7 is put away with every shell still
+        // running, and Cmd+Q — the only chord a Mac user reaches for — stops
+        // the server instead. Cmd+Shift+W is what "Close Window" means on
+        // macOS and is free here. Off macOS that chord is `CloseActiveTab`.
+        ("CloseWindow", per_platform("secondary-shift-w", "")),
         (
             "CloseActiveTab",
             per_platform("secondary-w", "secondary-shift-w"),
@@ -457,6 +471,13 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // Linux terminal and in this prompt editor's Ctrl+A family, so it ships
         // unbound there rather than on a chord nobody would guess.
         ("NewAgentTab", per_platform("secondary-shift-a", "")),
+        // U for "up next": the agent that has waited on you longest. Free in
+        // the table on both sides, and a letter under Ctrl+Shift off macOS,
+        // where window actions live. GNOME's IBus claims Ctrl+Shift+U for
+        // Unicode entry while it is the active input method, and wins there:
+        // that user rebinds this one, the price every Ctrl+Shift letter pays
+        // to some input method or other.
+        ("FocusNextAgentNeedingAttention", "secondary-shift-u"),
         ("StopWorkspace", ""),
         ("DeleteWorkspace", ""),
         ("RenameWorkspace", ""),
@@ -1182,6 +1203,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::CmdCopySessionId).to_string(),
         ),
         "NewAgentTab" => (CommandGroup::Agents, t(L10nKey::CmdNewAgentTab).to_string()),
+        "FocusNextAgentNeedingAttention" => (
+            CommandGroup::Agents,
+            t(L10nKey::CmdNextAgentNeedingAttention).to_string(),
+        ),
         "TogglePalette" => (
             CommandGroup::Application,
             t(L10nKey::AppMenuSearchEverywhere).to_string(),
@@ -1790,6 +1815,9 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ForkAgentSessionUp" => KeyBinding::new(keystroke, ForkAgentSessionUp, None),
         "CopyAgentSessionId" => KeyBinding::new(keystroke, CopyAgentSessionId, None),
         "NewAgentTab" => KeyBinding::new(keystroke, NewAgentTab, None),
+        "FocusNextAgentNeedingAttention" => {
+            KeyBinding::new(keystroke, FocusNextAgentNeedingAttention, None)
+        }
         "SplitRight" => KeyBinding::new(keystroke, SplitRight, None),
         "SplitDown" => KeyBinding::new(keystroke, SplitDown, None),
         "FocusNextPane" => KeyBinding::new(keystroke, FocusNextPane, None),
@@ -3239,6 +3267,20 @@ mod gpui_tests {
                 fired(cx, per_platform("secondary-t", "secondary-shift-t")).first(),
                 Some(&NewTab::name_for_type()),
                 "and NewTab keeps its own default"
+            );
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn cmd_shift_w_closes_the_window_with_its_shells_still_running(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            assert_eq!(
+                fired(cx, "cmd-shift-w").first(),
+                Some(&CloseWindow::name_for_type()),
+                "Cmd+Q stops the server, so a Mac needs a chord that only puts tty7 away"
             );
         });
     }

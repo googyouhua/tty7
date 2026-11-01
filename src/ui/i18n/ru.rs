@@ -2112,6 +2112,16 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdNewAgentTabSubtitle => {
             "открыть последнего использованного агента в новой вкладке"
         }
+        L10nKey::CmdNextAgentNeedingAttention => "Агент: к следующему, кто ждёт внимания",
+        L10nKey::CmdNextAgentNeedingAttentionSubtitle => {
+            "сначала ждущие агенты, начиная с самого давнего, затем непрочитанные завершённые ходы"
+        }
+        L10nKey::AppNoAgentNeedsAttention => "В открытых окнах ни один агент не ждёт вас.",
+        L10nKey::AgentWaitingFor => "ждёт {age}",
+        L10nKey::AgeUnderMinute => "<1 мин",
+        L10nKey::AgeMinutes => "{count} мин",
+        L10nKey::AgeHours => "{count} ч",
+        L10nKey::AgeDays => "{count} д",
         L10nKey::CmdForkSession => "Форк сеанса",
         L10nKey::CmdForkSessionSubtitle => "продолжить копию сеанса агента в новой вкладке",
         L10nKey::CmdMarkTabAsUnread => "Отметить непрочитанной",
@@ -2415,6 +2425,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpErrorInvalidOctalMode => "неверные права в восьмеричной записи",
         L10nKey::PaneRestoredScreenBanner => {
             "экран восстановлен, оболочка новая: ничего из того, что выше, уже не работает"
+        }
+        L10nKey::AppRestartServerAfterUpdateDetail => {
+            "tty7 обновлён до {ours}, но сервер всё ещё работает на сборке {build}. Он может заменить себя этой сборкой на месте, сохранив оболочки, но панели встроенного SSH-клиента tty7 закроются. Заменить сейчас или позже из настроек."
         }
         L10nKey::AppRestartServerBodyInPlace => {
             "Сервер tty7 заменит себя этой сборкой на месте. Оболочки продолжат работать, окно переподключится через мгновение. Панели встроенного SSH-клиента tty7 закроются, их потребуется открыть снова."

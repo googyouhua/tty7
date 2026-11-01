@@ -196,10 +196,12 @@ its first mark. Older servers omit `context` entirely.
 ### `tty7 agents`
 
 Every pane running a recognised coding agent. Table:
-`PANE AGENT STATUS MESSAGE`, status one of `idle` / `working` / `waiting` /
-`done`. JSON: `{"agents":[...]}`, plus a `"diagnostics"` array when an agent's
-status hook is missing or out of date — that is why an agent can be listed with
-a status that never moves.
+`PANE AGENT STATUS FOR MESSAGE`, status one of `idle` / `working` / `waiting` /
+`done`, and `FOR` how long it has held that status (`45s`, `3m`, `2h`; `-` from
+an older server). JSON: `{"agents":[...]}`, each state carrying `since_ms`, the
+Unix time in milliseconds it entered that status, plus a `"diagnostics"` array
+when an agent's status hook is missing or out of date — that is why an agent
+can be listed with a status that never moves.
 
 ### `tty7 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]`
 
@@ -424,7 +426,7 @@ list a retry needs.
 | Command | Effect |
 |---|---|
 | `server status` | Same as `tty7 status` |
-| `server logs` | Tail the server log; prints the path, and says so when logging was never enabled (`TTY7_LOG=info` before the server starts) |
+| `server logs` | Tail the server log and print its path; info logging is enabled by default (`TTY7_LOG=off` disables it) |
 | `server start` | Bring up a server on this machine |
 | `server stop` | Stop it — **every pane on the machine dies** |
 | `server restart` | Stop, then start — same consequence |
