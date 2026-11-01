@@ -175,6 +175,10 @@ pub enum CommandKind {
         session_id: String,
     },
     ConnectSavedProfile(Uuid),
+    /// Open the workspace a target names — a container today, anything the
+    /// host picker can list tomorrow. Unlike `ConnectSavedProfile` this needs
+    /// no saved profile behind it.
+    ConnectTarget(Box<crate::core::session::RemoteTarget>),
     EditSavedProfile(Uuid),
     /// Open the shell the window's inventory lists under this label, as the
     /// New Tab menu's row for it would.
@@ -324,6 +328,7 @@ impl CommandKind {
             | CopySessionId(_)
             | HideSession { .. }
             | ConnectSavedProfile(_)
+            | ConnectTarget(_)
             | EditSavedProfile(_)
             | OpenShell(_)
             | QuickConnect(_)
@@ -487,6 +492,7 @@ impl CommandKind {
             | CopySessionId(_)
             | HideSession { .. }
             | ConnectSavedProfile(_)
+            | ConnectTarget(_)
             | EditSavedProfile(_)
             | OpenShell(_)
             | SaveSshSessionAsHost

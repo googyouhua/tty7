@@ -7343,6 +7343,17 @@ impl Tty7App {
             }
             OpenSshConnect(input) => self.open_typed_ssh_connect(&input, window, cx),
             ConnectSavedProfile(id) => self.connect_ssh_profile(id, window, cx),
+            // A target that needs no profile behind it: the container is the
+            // host. The connect runs exactly as it does from the switcher's
+            // host list, so consent, install and workspace land the same way.
+            ConnectTarget(target) => {
+                let choice = crate::ui::remote_connect::HostChoice {
+                    label: target.to_string(),
+                    detail: String::new(),
+                    target: *target,
+                };
+                self.connect_to_host(choice, cx);
+            }
             // ⌥ held as the row is taken splits, as it does on the menu's row.
             OpenShell(label) => {
                 let at = SpawnWhere::from_modifiers(window.modifiers());

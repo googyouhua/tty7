@@ -1712,6 +1712,7 @@ l10n_keys! {
     CmdQuitTty7,
     CmdQuitTty7Subtitle,
     CmdQuickConnect,
+    CmdConnectContainer,
     CmdQuickConnectSaveProfile,
     CmdRecent,
     AppRestartServerTitle,

@@ -579,6 +579,15 @@ impl Source for Hosts<'_> {
 /// just as clearly a place to go, so it gets its own row.
 pub(crate) fn typed_address_rows(query: &str) -> Vec<Item> {
     let query = query.trim();
+    // A container says so: `docker:<name>`. It gets one row and no "save as
+    // host", because there is nothing to save — the container is the host.
+    if let Some(target) = crate::core::session::RemoteTarget::parse_container(query) {
+        let name = query.trim_start_matches("docker:").to_string();
+        return vec![Item::new(
+            t_fmt(L10nKey::CmdConnectContainer, &[("container", &name)]),
+            CommandKind::ConnectTarget(Box::new(target)),
+        )];
+    }
     // Whitespace first: an address has none, and the address parser would read
     // `ssh -p 2222 deploy@box` as the user `ssh -p 2222 deploy` on `box`.
     if query.contains(char::is_whitespace) {
@@ -606,9 +615,12 @@ pub(crate) fn typed_address_rows(query: &str) -> Vec<Item> {
     Vec::new()
 }
 
-/// The Hosts tab: every saved host, most used first.
+/// The Hosts tab: every saved host, most used first, then the running
+/// containers this machine can reach. Containers lead nowhere else — there is
+/// no profile to edit and no favourites entry to keep.
 pub(crate) fn host_items(cx: &App) -> Vec<Item> {
-    crate::ui::ssh_connect::ssh_profiles_by_frecency(cx)
+    let mut items: Vec<Item> = container_items(cx);
+    items.extend(crate::ui::ssh_connect::ssh_profiles_by_frecency(cx)
         .into_iter()
         .map(|p| {
             let endpoint = crate::core::ssh_profile::to_connect_string(&p);
@@ -621,6 +633,25 @@ pub(crate) fn host_items(cx: &App) -> Vec<Item> {
                 item = item.with_subtitle(endpoint);
             }
             item
+        }));
+    items
+}
+
+fn container_items(cx: &App) -> Vec<Item> {
+    crate::ui::remote_connect::available_hosts(cx)
+        .into_iter()
+        .filter(|host| {
+            matches!(
+                host.target,
+                crate::core::session::RemoteTarget::Docker { .. }
+            )
+        })
+        .map(|host| {
+            Item::new(
+                host.label,
+                CommandKind::ConnectTarget(Box::new(host.target)),
+            )
+            .with_subtitle(host.detail)
         })
         .collect()
 }
@@ -647,6 +678,20 @@ mod tests {
             .into_iter()
             .map(|c| c.title)
             .collect()
+    }
+
+    /// A container is an address with no profile behind it, so it earns one
+    /// row and no "save as host" beside it.
+    #[test]
+    fn a_container_address_offers_exactly_one_connect() {
+        crate::ui::i18n::set_locale("en");
+        let rows = typed_address_rows("docker:api-dev");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].title,
+            t_fmt(L10nKey::CmdConnectContainer, &[("container", "api-dev")])
+        );
+        assert!(typed_address_rows("docker:").is_empty());
     }
 
     #[test]

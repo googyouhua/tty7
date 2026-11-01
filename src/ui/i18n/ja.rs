@@ -2073,6 +2073,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdQuitTty7 => "tty7 を終了",
         L10nKey::CmdQuitTty7Subtitle => "サーバーを停止し、実行中のすべてのシェルを終了",
         L10nKey::CmdQuickConnect => "「{target}」に接続",
+        L10nKey::CmdConnectContainer => "コンテナ {container} に接続",
         L10nKey::CmdQuickConnectSaveProfile => "「{target}」をプロファイルとして保存…",
         L10nKey::CmdRecent => "最近",
         L10nKey::AppRestartServerTitle => "tty7 server を再起動しますか？",

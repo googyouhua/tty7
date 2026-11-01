@@ -2010,6 +2010,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdQuitTty7 => "Quit tty7",
         L10nKey::CmdQuitTty7Subtitle => "stops the server; every running shell ends",
         L10nKey::CmdQuickConnect => "Connect to \"{target}\"",
+        L10nKey::CmdConnectContainer => "Connect to the container {container}",
         L10nKey::CmdQuickConnectSaveProfile => "Save \"{target}\" as profile…",
         L10nKey::CmdRecent => "Recent",
         L10nKey::AppRestartServerTitle => "Restart tty7 server?",

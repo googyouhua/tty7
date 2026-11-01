@@ -1865,6 +1865,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdQuitTty7 => "退出 tty7",
         L10nKey::CmdQuitTty7Subtitle => "停止服务；结束所有运行中的 shell",
         L10nKey::CmdQuickConnect => "连接到“{target}”",
+        L10nKey::CmdConnectContainer => "连接到容器 {container}",
         L10nKey::CmdQuickConnectSaveProfile => "将“{target}”保存为主机配置…",
         L10nKey::CmdRecent => "最近使用",
         L10nKey::AppRestartServerTitle => "重启 tty7 server？",
