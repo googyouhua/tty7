@@ -464,6 +464,10 @@ impl Tty7App {
     }
 
     pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Containers are listed on demand: the hunt happens when the switcher
+        // opens and is skipped while the last answer is still fresh, so a
+        // container started a moment ago shows up without a restart.
+        crate::ui::remote_connect::sweep_docker(cx);
         self.open_switcher_in(Column::Left, false, None, window, cx);
     }
 
