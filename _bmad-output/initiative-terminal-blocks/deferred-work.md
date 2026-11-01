@@ -65,3 +65,30 @@
 - source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-markdown-local-link.md`
   summary: 接管段落拍平为纯文本（加粗/斜体/行内代码样式丢失，换行不保留）
   evidence: 词与链接目标保留、复制可用；恢复 marks 需重做内联渲染，非小补丁
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-ws-unreachable-ui-freeze.md`
+  summary: 全屏 occlude 遮罩（daemon-mismatch 无 cancel、auth sheet scrim）在无可操作内容时仍拦截全部点击。
+  evidence: 本次 native 重拨已落为非模态 Failed；剩余 trap 为既有行为，本次 diff 未触及 prompt/scrim，属旧 bug/后续想法。
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-ws-unreachable-ui-freeze.md`
+  summary: 纯远端 workspace（零 native pane）打开不可达时是否仍冻结（maybe-false，若真则为 high）。
+  evidence: 远端 new_terminal 分支本已异步，本次只修了 native 同步重拨；需复现命名 ws 类型才能判定，复验=按 ws 类型分别复现切换/配置可达性。
+- source_plan: none
+  summary: pane 链路从每 pane 一条 SSH session 改为 direct-streamlocal 到 daemon.sock，消除 MaxSessions 触顶与每 pane 一个 `--stdio --pane` 进程（`crates/tty7-core/src/daemon/ssh/mod.rs:496`）。
+  evidence: 与“连接/认证卡死 UI”拆分：它不改变冻结点本身，只减少再次触发认证的前提（重连触顶后另拨链路），可独立评审与合并。
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-ssh-connect-ui-freeze.md`
+  summary: auth_sheet_window 的 `most_recent` 兜底不校验窗口可见性/焦点，密码框可能弹到无关窗口并抢焦点。
+  evidence: 需要窗口可见性 API；已先按发起窗口→host 窗口→最近窗口的顺序收敛，普通单窗口场景不触发。
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-ssh-connect-ui-freeze.md`
+  summary: pane 级 auth sheet 现在始终 modal，但不标注来自哪个 tab，后台 tab 的提示会盖住当前窗口。
+  evidence: 属于 UX 增项（来源 tab 文案 + 跳转），本轮只保证可见可答。
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-ssh-connect-ui-freeze.md`
+  summary: ssh banner 在 session 内累积（`clear()` 不清 `banners`），旧连接的安全提示会一直留在窗口里。
+  evidence: 需要产品决定 banner 作用域/自动消失；当前每条都可单独 Dismiss。
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-ssh-connect-ui-freeze.md`
+  summary: 安装进行中时 strip/switcher 展示进度条，本窗口的 Cancel 入口被隐藏，慢安装无法取消。
+  evidence: 需要改安装进度渲染分支并新增文案；取消逻辑本身已能清理进度与同意。
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-ssh-connect-ui-freeze.md`
+  summary: 已有 sheet 时新 prompt 仍走 GiveBack→parked；单窗口用户若现有 sheet 一直不答，仍要等 120s。
+  evidence: 需要评估 per-host sheet 队列（同一窗口串行抬 sheet），本轮只保证无人可答时快速失败。
+- source_plan: `/ws/tty7/_bmad-output/initiative-terminal-blocks/plan-ssh-connect-ui-freeze.md`
+  summary: 缺 switcher Cancel band 的渲染测试与 overlay 图层顺序的点击穿透测试。
+  evidence: 需要 switcher render harness 与 `simulate_mouse_down` + `debug_bounds`；本轮以 `.occlude()` 修复点击穿透，行为未锁测。

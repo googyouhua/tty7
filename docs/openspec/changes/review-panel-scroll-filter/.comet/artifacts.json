@@ -1,0 +1,8 @@
+{
+  "openspec_proposal": "docs/openspec/changes/review-panel-scroll-filter/proposal.md",
+  "openspec_design": "docs/openspec/changes/review-panel-scroll-filter/design.md",
+  "openspec_tasks": "docs/openspec/changes/review-panel-scroll-filter/tasks.md",
+  "openspec_delta_spec": "docs/openspec/changes/review-panel-scroll-filter/specs/review-panel/spec.md",
+  "handoff_context": "docs/openspec/changes/review-panel-scroll-filter/.comet/handoff/design-context.json",
+  "handoff_markdown": "docs/openspec/changes/review-panel-scroll-filter/.comet/handoff/design-context.md"
+}
