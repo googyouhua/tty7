@@ -1956,6 +1956,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteAliasMissing => "«{alias}» больше нет в ~/.ssh/config",
         L10nKey::RemoteWslNoSsh => "У рабочей области WSL нет SSH-соединения",
         L10nKey::RemoteDockerNoSsh => "У рабочей области контейнера нет SSH-соединения",
+        L10nKey::RemoteDockerEndpointRemote => "docker указывает на удалённый демон ({endpoint}); эта версия поддерживает только контейнеры на этой машине",
         L10nKey::RemoteLocalStdioNoSsh => "У локальной рабочей области --stdio нет SSH-соединения",
         L10nKey::RemoteHostNotTty7 => "{machine} ответил, но не как сервер tty7: {error}",
         L10nKey::RemoteWorkspaceListFailed => {

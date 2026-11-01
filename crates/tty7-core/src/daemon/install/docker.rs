@@ -57,6 +57,61 @@ pub fn validate_container(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Endpoints that are this machine's own daemon. Everything else — `ssh://`,
+/// `tcp://`, `http://` — is a daemon somewhere else, which this transport
+/// cannot serve: `docker exec` would run on that other machine while tty7's
+/// files, panes and workspace state all assume the machine the user is sitting
+/// at.
+fn is_local_endpoint(host: &str) -> bool {
+    let host = host.trim();
+    host.starts_with("unix://")
+        || host.starts_with("npipe://")
+        || host.starts_with("fd://")
+        || host.starts_with("\0")
+}
+
+/// The remote daemon this machine's docker CLI is pointed at, or `None` when it
+/// is pointed at the local one.
+///
+/// `DOCKER_HOST` wins over the context, exactly as the docker CLI reads it. A
+/// context that cannot be inspected is treated as local: refusing on a failed
+/// `docker context inspect` would take the feature away from every machine
+/// whose CLI is fine but whose context command is not.
+pub fn remote_endpoint() -> Option<String> {
+    remote_endpoint_from(std::env::var("DOCKER_HOST").ok().as_deref())
+}
+
+/// The decision itself, split out so it can be tested without touching the
+/// process environment every other test shares.
+fn remote_endpoint_from(docker_host: Option<&str>) -> Option<String> {
+    if let Some(host) = docker_host {
+        let host = host.trim();
+        if !host.is_empty() {
+            return (!is_local_endpoint(host)).then(|| host.to_string());
+        }
+    }
+    let out = std::process::Command::new(DOCKER_EXE)
+        .args([
+            "context",
+            "inspect",
+            "--format",
+            "{{.Endpoints.docker.Host}}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let host = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if host.is_empty() || is_local_endpoint(&host) {
+        None
+    } else {
+        Some(host)
+    }
+}
+
 /// `docker exec -i <container> <argv...>`.
 ///
 /// `-i` keeps stdin open, which is the only thing carrying this channel: the
@@ -415,6 +470,28 @@ mod tests {
         assert!(validate_container("").is_err());
         assert!(validate_container("a b").is_err());
         assert!(validate_container("a\nb").is_err());
+    }
+
+    #[test]
+    fn docker_host_decides_before_the_context_is_asked() {
+        assert_eq!(
+            remote_endpoint_from(Some("ssh://root@10.0.0.5")).as_deref(),
+            Some("ssh://root@10.0.0.5")
+        );
+        assert_eq!(remote_endpoint_from(Some("tcp://10.0.0.5:2375")).as_deref(), Some("tcp://10.0.0.5:2375"));
+        // An explicit local endpoint means local, whatever the context says.
+        assert_eq!(remote_endpoint_from(Some("unix:///var/run/docker.sock")), None);
+        assert_eq!(remote_endpoint_from(Some("   ")), None);
+    }
+
+    #[test]
+    fn only_this_machines_endpoints_count_as_local() {
+        for local in ["unix:///var/run/docker.sock", "npipe:////./pipe/docker_engine", "fd://3"] {
+            assert!(is_local_endpoint(local), "{local}");
+        }
+        for remote in ["ssh://root@10.0.0.5", "tcp://10.0.0.5:2375", "http://10.0.0.5:2376"] {
+            assert!(!is_local_endpoint(remote), "{remote}");
+        }
     }
 
     #[test]

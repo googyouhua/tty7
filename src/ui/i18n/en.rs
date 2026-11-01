@@ -1723,6 +1723,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteAliasMissing => "\"{alias}\" is no longer in ~/.ssh/config",
         L10nKey::RemoteWslNoSsh => "a WSL workspace has no SSH connection",
         L10nKey::RemoteDockerNoSsh => "a container workspace has no SSH connection",
+        L10nKey::RemoteDockerEndpointRemote => "docker is pointed at a remote daemon ({endpoint}); this version only supports containers on this machine",
         L10nKey::RemoteLocalStdioNoSsh => "a local --stdio workspace has no SSH connection",
         L10nKey::RemoteHostNotTty7 => "{machine} answered, but not as a tty7 server: {error}",
         L10nKey::RemoteWorkspaceListFailed => {

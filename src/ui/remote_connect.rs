@@ -253,6 +253,11 @@ pub fn sweep_docker(cx: &mut App) {
 /// there to ask. A machine without docker is not an error: the group simply
 /// does not appear.
 fn docker_containers_probed() -> Option<Vec<(String, String)>> {
+    // A remote daemon's containers are not this machine's hosts: listing them
+    // would offer connections that cannot work.
+    if tty7_core::daemon::install::docker::remote_endpoint().is_some() {
+        return None;
+    }
     let out = std::process::Command::new("docker")
         .args(["ps", "--format", "{{.Names}}\t{{.Image}}"])
         .stdin(std::process::Stdio::null())
@@ -425,7 +430,18 @@ pub fn control_route(target: &RemoteTarget, cx: &App) -> Result<RouteHeader, Str
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
         ),
         RemoteTarget::Wsl { distro } => RouteHeader::wsl(distro.clone()),
-        RemoteTarget::Docker { container } => RouteHeader::docker(container.clone()),
+        RemoteTarget::Docker { container } => {
+            // A daemon somewhere else makes `docker exec` run there while the
+            // window, the files and the workspace state all live here. v1 has
+            // one machine in mind, so say so instead of half-working.
+            if let Some(endpoint) = tty7_core::daemon::install::docker::remote_endpoint() {
+                return Err(t_fmt(
+                    L10nKey::RemoteDockerEndpointRemote,
+                    &[("endpoint", &endpoint)],
+                ));
+            }
+            RouteHeader::docker(container.clone())
+        }
         _ => spec_for(target, cx).map(RouteHeader::ssh)?,
     };
     note_origin(&header.target, target);
