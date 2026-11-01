@@ -88,5 +88,5 @@ Tracer path：发现容器 → 首次确认装机 → 进入完整 workspace →
 - Decision: 2026-11-01 — 从 `initiative-terminal-blocks` 独立出来，Docker 主机能力与命令块无共同边界。
 - Decision: 2026-11-01 — 只切一条 epic。理由：R1-R11 落在同一批文件（`session.rs` 的 `RemoteTarget`、`router.rs` 的 `RouteTarget`/`origin_key`、`remote_connect.rs` 的发现、`install/` 的装机），没有部署边界，且只有一起交付才满足本 initiative 的 Outcome；把 R7/R8 单切会让第一条 epic 交付一个「每天重建就丢布局」的容器主机，正是 PRD 要消除的体验。
 - Decision: 2026-11-01 — 不设独立的平台基线 epic。理由：没有独立部署边界；基线（`docker` CLI 发现、容器枚举管道）由这条 epic 的头两条 story 承担。
-- Decision: 2026-11-01 — tracer 路径：发现容器 → 首次确认装机 → 进入 workspace → 断开回收；整条走通前不切后续 story。
+- Decision: 2026-11-01 — tracer 路径：手动按名或 ID 接入 → 首次确认装机 → 进入 workspace → 断开回收；发现与列表面板另设 entry，整条走通前不切后续 story。
 - Decision: 2026-11-01 — v1 只做 macOS / Linux。Q1（同名 `docker-desktop` 与容器并存）与 Q6（Windows 上 `docker` CLI 发现）一并后置 v2，不再是 R1 的 v1 阻塞项；判据是 epic 的 Boundaries。

@@ -74,5 +74,5 @@ risk: medium
 - Decision: 2026-11-01 — 本 epic 一次交付 R1-R11，不切第二条第 epic；唯一站得住的切点是 R7/R8，被拒。
 - Decision: 2026-11-01 — R11 留在本 epic 内交付，不后置。
 - Decision: 2026-11-01 — 切 story 之前先钉死 Q2（安装目录回退顺序）与 Q3（强杀后退出上界）：两者都是 R5/R9 的验收阈值，只能由代码回答，各为一个 spike。
-- Decision: 2026-11-01 — tracer：发现容器 → 首次确认装机 → 进入 workspace → 断开回收。
+- Decision: 2026-11-01 — tracer：手动按容器名或 ID 接入 → 首次确认装机 → 进入 workspace → 断开回收；发现与列表面板另设 entry 4，不在 tracer 里。
 - Decision: 2026-11-01 — v1 只做 macOS / Linux，Windows 后置 v2；代价是 R1 的「同名 WSL 发行版不互相命中」不在 v1 验收里。理由：Windows 的 docker 生态（Docker Desktop + WSL 后端）需要单独设计，混进来会把 tracer 拖长。

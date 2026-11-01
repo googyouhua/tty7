@@ -14,24 +14,26 @@ risk = "high"
 [[entry]]
 id = 2
 type = "spike"
-title = "spike: 强杀客户端后容器内进程的退出上界"
+title = "强杀客户端后容器内进程的退出上界 (kill-9 bound)"
 description = "阈值探测。测出 docker exec 通道在正常关闭、连接中断、kill -9 三种情形下，容器内 tty7-server 退出的时间上界。放在最前，因为这是全 epic 最不确定的一处。"
 verify = "给出三种情形各自的时间（或「不退出」），R9 的验收写上具体秒数。"
 covers = ["R9"]
 after = []
 hitl = false
 risk = "high"
+refine = true
 
 [[entry]]
 id = 3
 type = "spike"
-title = "spike: 安装目录回退顺序"
+title = "安装目录回退顺序 (install dir fallback)"
 description = "阈值探测。在一组真实镜像上（root、非 root、只读 rootfs、noexec 挂载）测出「可写且可执行」的安装目录顺序。"
 verify = "产出一张表：每类镜像下按顺序尝试的路径、命中哪一个、失败原因；R5 的验收按这张表收紧。"
 covers = ["R5"]
 after = []
 hitl = false
 risk = "medium"
+refine = true
 
 [[entry]]
 id = 4
