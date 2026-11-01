@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub mod asset;
+pub mod docker;
 pub mod checksums;
 #[cfg(feature = "remote-install")]
 pub mod download;

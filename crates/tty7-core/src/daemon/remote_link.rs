@@ -17,6 +17,8 @@ pub enum RemoteLink {
 
     Wsl(ProcessStream),
 
+    Docker(ProcessStream),
+
     LocalStdio(ProcessStream),
 }
 
@@ -42,6 +44,36 @@ impl RemoteLink {
         )?))
     }
 
+    /// A link into a running container: `docker exec -i <container> <argv>`.
+    ///
+    /// No shell on the way in. `--stdio` is passed as argv, so a container
+    /// without `/bin/sh` still gets as far as the server failing to start
+    /// rather than the exec failing to parse a command line. The container name
+    /// is validated first: it ends up in an argument list, not a command
+    /// string, but a leading `-` would still be read as a docker option.
+    pub fn docker(container: &str, server: &str, channel: RouteChannel) -> io::Result<RemoteLink> {
+        crate::daemon::install::docker::validate_container(container)?;
+        let argv = docker_link_argv(server, channel);
+        Ok(RemoteLink::Docker(spawn_stdio_owned(
+            crate::daemon::install::docker::DOCKER_EXE,
+            &crate::daemon::install::docker::exec_args(container, &argv),
+        )?))
+    }
+
+    pub fn docker_shell(
+        container: &str,
+        command: &str,
+        channel: RouteChannel,
+    ) -> io::Result<RemoteLink> {
+        crate::daemon::install::docker::validate_container(container)?;
+        let command = channel.bridge_command(command);
+        let argv = ["sh".to_string(), "-c".to_string(), command];
+        Ok(RemoteLink::Docker(spawn_stdio_owned(
+            crate::daemon::install::docker::DOCKER_EXE,
+            &crate::daemon::install::docker::exec_args(container, &argv),
+        )?))
+    }
+
     pub fn wsl_shell(distro: &str, command: &str, channel: RouteChannel) -> io::Result<RemoteLink> {
         super::install::wsl::validate_distro(distro)?;
         let command = channel.bridge_command(command);
@@ -57,6 +89,7 @@ impl RemoteLink {
             RemoteLink::StreamLocal(_) => "streamlocal",
             RemoteLink::SessionExec(_) => "session-exec",
             RemoteLink::Wsl(_) => "wsl-stdio",
+            RemoteLink::Docker(_) => "docker-stdio",
             RemoteLink::LocalStdio(_) => "local-stdio",
         }
     }
@@ -64,7 +97,10 @@ impl RemoteLink {
     pub fn is_stdio_bridge(&self) -> bool {
         matches!(
             self,
-            RemoteLink::SessionExec(_) | RemoteLink::Wsl(_) | RemoteLink::LocalStdio(_)
+            RemoteLink::SessionExec(_)
+                | RemoteLink::Wsl(_)
+                | RemoteLink::Docker(_)
+                | RemoteLink::LocalStdio(_)
         )
     }
 
@@ -74,6 +110,14 @@ impl RemoteLink {
             RemoteLink::StreamLocal(_) | RemoteLink::SessionExec(_)
         )
     }
+}
+
+fn docker_link_argv(server: &str, channel: RouteChannel) -> Vec<String> {
+    let mut argv = vec![server.to_string(), "--stdio".to_string()];
+    if channel == RouteChannel::Pane {
+        argv.push("--pane".to_string());
+    }
+    argv
 }
 
 fn wsl_link_argv<'a>(server: &'a str, channel: RouteChannel) -> Vec<&'a str> {
@@ -315,7 +359,7 @@ impl AsyncRead for RemoteLink {
             RemoteLink::StreamLocal(s) | RemoteLink::SessionExec(s) => {
                 Pin::new(s).poll_read(cx, buf)
             }
-            RemoteLink::Wsl(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_read(cx, buf),
+            RemoteLink::Wsl(s) | RemoteLink::Docker(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -330,14 +374,14 @@ impl AsyncWrite for RemoteLink {
             RemoteLink::StreamLocal(s) | RemoteLink::SessionExec(s) => {
                 Pin::new(s).poll_write(cx, buf)
             }
-            RemoteLink::Wsl(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_write(cx, buf),
+            RemoteLink::Wsl(s) | RemoteLink::Docker(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             RemoteLink::StreamLocal(s) | RemoteLink::SessionExec(s) => Pin::new(s).poll_flush(cx),
-            RemoteLink::Wsl(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_flush(cx),
+            RemoteLink::Wsl(s) | RemoteLink::Docker(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -346,7 +390,7 @@ impl AsyncWrite for RemoteLink {
             RemoteLink::StreamLocal(s) | RemoteLink::SessionExec(s) => {
                 Pin::new(s).poll_shutdown(cx)
             }
-            RemoteLink::Wsl(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_shutdown(cx),
+            RemoteLink::Wsl(s) | RemoteLink::Docker(s) | RemoteLink::LocalStdio(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }

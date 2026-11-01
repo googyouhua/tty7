@@ -1460,6 +1460,7 @@ impl Tty7App {
         Self::prompt_deferred_adoption(window, cx);
         crate::ui::remote_connect::register(cx);
         crate::ui::remote_connect::sweep_wsl(cx);
+        crate::ui::remote_connect::sweep_docker(cx);
         Self::prompt_remote_daemon_mismatch(window, cx);
         app.reopen_remote_at_startup(cx);
         app

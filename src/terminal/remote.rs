@@ -194,6 +194,7 @@ impl PaneWorkspace {
         use crate::daemon::router::RouteHeader;
         let header = match (&self.target, &self.spec) {
             (RemoteTarget::Wsl { distro }, _) => RouteHeader::wsl(distro.clone()),
+            (RemoteTarget::Docker { container }, _) => RouteHeader::docker(container.clone()),
             (RemoteTarget::LocalStdio { program, args }, _) => {
                 let mut argv: Vec<&str> = args.iter().map(String::as_str).collect();
                 if !argv.contains(&"--pane") {

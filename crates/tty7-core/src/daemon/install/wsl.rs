@@ -113,7 +113,7 @@ fn strip_bom(s: &str) -> String {
     s.trim_start_matches('\u{feff}').to_string()
 }
 
-const HOME_SCRIPT: &str = "printf '__tty7_wsl__ home=%s\\n' \"$HOME\"\n";
+pub(super) const HOME_SCRIPT: &str = "printf '__tty7_wsl__ home=%s\\n' \"$HOME\"\n";
 
 const CD_HOME: &str = "cd \"$HOME\" 2>/dev/null || cd /\n";
 
@@ -162,7 +162,7 @@ const fn konst_contains(haystack: &str, needle: &str) -> bool {
     false
 }
 
-fn stat_script(path: &str) -> String {
+pub(super) fn stat_script(path: &str) -> String {
     let p = shell_quote(path);
     format!(
         "p={p}\n\
@@ -176,7 +176,7 @@ fn stat_script(path: &str) -> String {
     )
 }
 
-fn parse_stat(stdout: &str) -> Result<Option<RemoteStat>, String> {
+pub(super) fn parse_stat(stdout: &str) -> Result<Option<RemoteStat>, String> {
     for line in stdout.lines() {
         let Some(rest) = marked(line, "stat=") else {
             continue;
@@ -212,7 +212,7 @@ fn parse_stat(stdout: &str) -> Result<Option<RemoteStat>, String> {
     ))
 }
 
-fn list_script(dir: &str) -> String {
+pub(super) fn list_script(dir: &str) -> String {
     let d = shell_quote(dir);
     format!(
         "d={d}\n\
@@ -224,7 +224,7 @@ fn list_script(dir: &str) -> String {
     )
 }
 
-fn parse_list(stdout: &str) -> Result<Option<Vec<String>>, String> {
+pub(super) fn parse_list(stdout: &str) -> Result<Option<Vec<String>>, String> {
     let mut saw_dir = false;
     let mut entries = Vec::new();
     for line in stdout.lines() {
@@ -250,7 +250,7 @@ fn parse_list(stdout: &str) -> Result<Option<Vec<String>>, String> {
     }
 }
 
-fn marked<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+pub(super) fn marked<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     line.trim()
         .strip_prefix(MARKER)?
         .trim_start()

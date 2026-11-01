@@ -43,6 +43,7 @@ pub fn available_hosts(cx: &App) -> Vec<HostChoice> {
     }
 
     out.extend(wsl_hosts(cx));
+    out.extend(docker_hosts(cx));
 
     for imported in crate::core::ssh_config::import_profiles() {
         let alias = imported.profile.name.clone();
@@ -127,8 +128,10 @@ fn live_label(cx: &App, target: &RemoteTarget) -> Option<String> {
             .into_iter()
             .find(|h| h.target == *target)
             .map(|h| h.label),
+        // A container names itself: `docker:<name>` is the label.
         RemoteTarget::Alias { .. }
         | RemoteTarget::Direct { .. }
+        | RemoteTarget::Docker { .. }
         | RemoteTarget::LocalStdio { .. } => None,
     }
 }
@@ -177,6 +180,100 @@ fn local_stdio_host() -> Option<HostChoice> {
         detail: format!("{program} --stdio ({})", t(L10nKey::RemoteThisComputer)),
         target,
     })
+}
+
+/// A container is listed as `docker:<name>` and connects the same way a WSL
+/// distro does: a local exec channel with no SSH in it.
+fn docker_detail(image: &str) -> String {
+    format!("Docker · {image}")
+}
+
+fn docker_hosts(cx: &App) -> Vec<HostChoice> {
+    let containers = cx
+        .try_global::<DockerContainers>()
+        .map(|state| state.names.as_slice())
+        .unwrap_or_default();
+    docker_choices(containers)
+}
+
+fn docker_choices(containers: &[(String, String)]) -> Vec<HostChoice> {
+    containers
+        .iter()
+        .map(|(name, image)| HostChoice {
+            target: RemoteTarget::Docker {
+                container: name.clone(),
+            },
+            label: name.clone(),
+            detail: docker_detail(image),
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct DockerContainers {
+    names: Vec<(String, String)>,
+    probed_at: Option<Instant>,
+    in_flight: bool,
+}
+
+impl Global for DockerContainers {}
+
+const DOCKER_TTL: Duration = Duration::from_secs(30);
+
+/// Containers are listed on demand, never polled: `docker ps` costs a process
+/// and a daemon round trip, and a container that starts while the connector is
+/// closed is picked up the next time it opens.
+pub fn sweep_docker(cx: &mut App) {
+    {
+        let state = cx.default_global::<DockerContainers>();
+        if state.in_flight || state.probed_at.is_some_and(|at| at.elapsed() < DOCKER_TTL) {
+            return;
+        }
+    }
+    cx.update_global::<DockerContainers, _>(|state, _| state.in_flight = true);
+    cx.spawn(async move |cx| {
+        let probed = cx
+            .background_spawn(async { docker_containers_probed() })
+            .await;
+        let _ = cx.update(|cx| {
+            cx.update_global::<DockerContainers, _>(|state, _| {
+                if let Some(names) = probed {
+                    state.names = names;
+                }
+                state.probed_at = Some(Instant::now());
+                state.in_flight = false;
+            });
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
+/// `name\timage` for every running container, or `None` when docker is not
+/// there to ask. A machine without docker is not an error: the group simply
+/// does not appear.
+fn docker_containers_probed() -> Option<Vec<(String, String)>> {
+    let out = std::process::Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}\t{{.Image}}"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (name, image) = line.split_once('\t')?;
+                if name.is_empty() {
+                    return None;
+                }
+                Some((name.to_string(), image.to_string()))
+            })
+            .collect(),
+    )
 }
 
 fn wsl_detail() -> String {
@@ -316,6 +413,7 @@ fn spec_from(
             ))
         }
         RemoteTarget::Wsl { .. } => Err(t(L10nKey::RemoteWslNoSsh).to_string()),
+        RemoteTarget::Docker { .. } => Err(t(L10nKey::RemoteDockerNoSsh).to_string()),
         RemoteTarget::LocalStdio { .. } => Err(t(L10nKey::RemoteLocalStdioNoSsh).to_string()),
     }
 }
@@ -327,6 +425,7 @@ pub fn control_route(target: &RemoteTarget, cx: &App) -> Result<RouteHeader, Str
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
         ),
         RemoteTarget::Wsl { distro } => RouteHeader::wsl(distro.clone()),
+        RemoteTarget::Docker { container } => RouteHeader::docker(container.clone()),
         _ => spec_for(target, cx).map(RouteHeader::ssh)?,
     };
     note_origin(&header.target, target);

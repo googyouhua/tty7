@@ -1456,6 +1456,7 @@ l10n_keys! {
     RemoteProfileMissing,
     RemoteAliasMissing,
     RemoteWslNoSsh,
+    RemoteDockerNoSsh,
     RemoteLocalStdioNoSsh,
     RemoteHostNotTty7,
     RemoteWorkspaceListFailed,

@@ -45,6 +45,7 @@ impl RouteChannel {
 pub enum RouteTarget {
     Ssh(Box<NativeSshSpec>),
     Wsl { distro: String },
+    Docker { container: String },
     LocalStdio { program: String, args: Vec<String> },
 }
 
@@ -125,6 +126,22 @@ impl RouteHeader {
         }
     }
 
+    /// A link into a running container, reached with `docker exec`.
+    ///
+    /// The container carries everything the route needs: no profile, no port,
+    /// no credentials. The installer and the bridge are both started from the
+    /// client side, so the header says only which container.
+    pub fn docker(container: impl Into<String>) -> RouteHeader {
+        RouteHeader {
+            target: RouteTarget::Docker {
+                container: container.into(),
+            },
+            server_command: None,
+            channel: RouteChannel::Control,
+            action: RouteAction::Forward,
+        }
+    }
+
     pub fn local_stdio(program: impl Into<String>, args: &[&str]) -> RouteHeader {
         RouteHeader {
             target: RouteTarget::LocalStdio {
@@ -152,6 +169,7 @@ impl RouteHeader {
         match &self.target {
             RouteTarget::Ssh(spec) => format!("ssh {}@{}:{}", spec.user, spec.host, spec.port),
             RouteTarget::Wsl { distro } => format!("wsl {distro}"),
+            RouteTarget::Docker { container } => format!("docker {container}"),
             RouteTarget::LocalStdio { program, .. } => format!("local {program}"),
         }
     }
@@ -162,6 +180,7 @@ impl RouteTarget {
         match self {
             RouteTarget::Ssh(spec) => ConnectionKey::from_spec(spec).as_str().to_string(),
             RouteTarget::Wsl { distro } => format!("wsl:{distro}"),
+            RouteTarget::Docker { container } => format!("docker:{container}"),
             RouteTarget::LocalStdio { program, .. } => format!("local-stdio:{program}"),
         }
     }
@@ -802,6 +821,26 @@ async fn restart_server(
                 .await??;
             Ok(())
         }
+        // A container's server is installed and launched from here too, so all
+        // three moves mean what they do over SSH; only the transport differs.
+        (RouteTarget::Docker { container }, action) => {
+            let container = container.clone();
+            let action = action;
+            setup
+                .blocking(move || match action {
+                    RouteAction::ReplaceServer => {
+                        crate::daemon::install::docker::forget_docker_server(&container);
+                        crate::daemon::install::docker::ensure_docker_server(&container).map(|_| ())
+                    }
+                    RouteAction::UpdateServer => {
+                        crate::daemon::install::docker::forget_docker_server(&container);
+                        crate::daemon::install::docker::ensure_docker_server(&container).map(|_| ())
+                    }
+                    _ => crate::daemon::install::docker::restart_docker_daemon(&container),
+                })
+                .await??;
+            Ok(())
+        }
         _ => Err(anyhow::anyhow!(
             "restarting tty7's server is only supported for machines it serves, not {}",
             header.describe()
@@ -815,6 +854,13 @@ async fn ensure_wsl_server(distro: &str, setup: &RouteSetup) -> anyhow::Result<S
     let distro = distro.to_string();
     Ok(setup
         .blocking(move || crate::daemon::install::wsl::ensure_wsl_server(&distro))
+        .await??)
+}
+
+async fn ensure_docker_server(container: &str, setup: &RouteSetup) -> anyhow::Result<String> {
+    let container = container.to_string();
+    Ok(setup
+        .blocking(move || crate::daemon::install::docker::ensure_docker_server(&container))
         .await??)
 }
 
@@ -850,6 +896,30 @@ async fn open_link(
                     crate::daemon::install::wsl::forget_wsl_server(distro);
                     let binary = ensure_wsl_server(distro, setup).await?;
                     let link = RemoteLink::wsl(distro, &binary, setup.channel)?;
+                    Ok((link, None))
+                }
+                Err(e) => Err(e.into()),
+            }
+        }
+        RouteTarget::Docker { container } => {
+            if let Some(command) = header.server_command.as_deref() {
+                let link = RemoteLink::docker_shell(container, command, setup.channel)?;
+                return Ok((link, None));
+            }
+
+            let from_memory = crate::daemon::install::docker::remembered_docker_server(container)
+                .is_some();
+            let binary = ensure_docker_server(container, setup).await?;
+            match RemoteLink::docker(container, &binary, setup.channel) {
+                Ok(link) => Ok((link, None)),
+                Err(stale) if from_memory => {
+                    log::info!(
+                        "docker:{container}: the remembered server would not start ({stale}); \
+                         looking again"
+                    );
+                    crate::daemon::install::docker::forget_docker_server(container);
+                    let binary = ensure_docker_server(container, setup).await?;
+                    let link = RemoteLink::docker(container, &binary, setup.channel)?;
                     Ok((link, None))
                 }
                 Err(e) => Err(e.into()),

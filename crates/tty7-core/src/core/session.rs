@@ -136,6 +136,9 @@ pub enum RemoteTarget {
     Wsl {
         distro: String,
     },
+    Docker {
+        container: String,
+    },
     LocalStdio {
         program: String,
         args: Vec<String>,
@@ -155,7 +158,23 @@ impl RemoteTarget {
         }
     }
 
+    /// A container named the way it is written in a quick-connect field:
+    /// `docker:<name>`. The prefix is required so a container is never
+    /// mistaken for a host called `docker`.
+    pub fn parse_container(input: &str) -> Option<RemoteTarget> {
+        let name = input.trim().strip_prefix("docker:")?.trim();
+        if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return None;
+        }
+        Some(RemoteTarget::Docker {
+            container: name.to_string(),
+        })
+    }
+
     pub fn parse_direct(input: &str) -> Option<RemoteTarget> {
+        if let Some(container) = RemoteTarget::parse_container(input) {
+            return Some(container);
+        }
         let q = crate::core::ssh_profile::parse_quick_connect(input)?;
         let port = q.port_or_default();
         Some(RemoteTarget::direct(
@@ -173,6 +192,7 @@ impl RemoteTarget {
                 format!("ssh-direct:{user}@{}:{port}", host.to_ascii_lowercase())
             }
             RemoteTarget::Wsl { distro } => format!("wsl:{distro}"),
+            RemoteTarget::Docker { container } => format!("docker:{container}"),
             RemoteTarget::LocalStdio { program, args } => {
                 format!("local-stdio:{program} {}", args.join(" "))
             }
@@ -184,7 +204,9 @@ impl RemoteTarget {
             RemoteTarget::Profile { .. }
             | RemoteTarget::Alias { .. }
             | RemoteTarget::Direct { .. } => true,
-            RemoteTarget::Wsl { .. } | RemoteTarget::LocalStdio { .. } => false,
+            RemoteTarget::Wsl { .. }
+            | RemoteTarget::Docker { .. }
+            | RemoteTarget::LocalStdio { .. } => false,
         }
     }
 
@@ -197,7 +219,8 @@ impl RemoteTarget {
             RemoteTarget::Profile { .. }
             | RemoteTarget::Alias { .. }
             | RemoteTarget::Direct { .. }
-            | RemoteTarget::Wsl { .. } => true,
+            | RemoteTarget::Wsl { .. }
+            | RemoteTarget::Docker { .. } => true,
             RemoteTarget::LocalStdio { .. } => false,
         }
     }
@@ -217,6 +240,7 @@ impl RemoteTarget {
             RemoteTarget::Alias { alias } => alias_known(alias),
             RemoteTarget::Direct { .. }
             | RemoteTarget::Wsl { .. }
+            | RemoteTarget::Docker { .. }
             | RemoteTarget::LocalStdio { .. } => true,
         }
     }
@@ -242,6 +266,7 @@ impl std::fmt::Display for RemoteTarget {
                 Ok(())
             }
             RemoteTarget::Wsl { distro } => write!(f, "wsl:{distro}"),
+            RemoteTarget::Docker { container } => write!(f, "docker:{container}"),
             RemoteTarget::LocalStdio { program, .. } => {
                 let name = std::path::Path::new(program)
                     .file_name()
@@ -938,6 +963,28 @@ mod tests {
             .hosts_our_server(),
             "a stdio program is whatever the user named, not a daemon of ours"
         );
+    }
+
+    /// A container spells itself with a prefix, so a host actually called
+    /// `docker` never turns into a container by accident.
+    #[test]
+    fn a_container_target_needs_the_prefix_and_names_itself() {
+        let parsed = RemoteTarget::parse_direct("docker:api-dev").unwrap();
+        assert_eq!(
+            parsed,
+            RemoteTarget::Docker {
+                container: "api-dev".into()
+            }
+        );
+        assert_eq!(parsed.connection_key(), "docker:api-dev");
+        assert_eq!(parsed.to_string(), "docker:api-dev");
+        assert!(parsed.hosts_our_server());
+        assert!(!parsed.is_ssh());
+
+        assert_eq!(RemoteTarget::parse_container("docker:"), None);
+        assert_eq!(RemoteTarget::parse_container("docker: a b"), None);
+        assert_eq!(RemoteTarget::parse_container("api-dev"), None);
+        assert_eq!(RemoteTarget::parse_container("ssh://docker"), None);
     }
 
     #[test]
