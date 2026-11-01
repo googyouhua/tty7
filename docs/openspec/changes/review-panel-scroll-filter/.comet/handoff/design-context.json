@@ -1,0 +1,16 @@
+{
+  "change": "review-panel-scroll-filter",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "task_hash_policy": "task-content-v1",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "272c933d372597bd48eeb04b113b615a5548897c426e56688540822bff03034c",
+  "files": [
+    { "path": "docs/openspec/changes/review-panel-scroll-filter/proposal.md", "sha256": "b31a13eb43768cd85d442ed578e29c183c51898d6133f1eec8b29f38955283ca" },
+    { "path": "docs/openspec/changes/review-panel-scroll-filter/design.md", "sha256": "08efc27c4034e9eca4db67e40c43c98416dbef56fc0be30c75442cd0d8170c53" },
+    { "path": "docs/openspec/changes/review-panel-scroll-filter/tasks.md", "sha256": "9029344ff1de86c74230cd73e3bc3caf66aec5a39a92cc8f9ecefc377a5c8f79" },
+    { "path": "docs/openspec/changes/review-panel-scroll-filter/.openspec.yaml", "sha256": "d71302f07db183bc30ff75198cd90cb17632c1d016043d0f43248f117bdc2e26" },
+    { "path": "docs/openspec/changes/review-panel-scroll-filter/specs/review-panel/spec.md", "sha256": "9ac5bee171a4f2eb358d744cb2419a3d195af500c72d28b3eebc89de44617d6d" }
+  ]
+}
