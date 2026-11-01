@@ -57,8 +57,10 @@ risk: medium
 能力边界：一个容器就是一台主机。不涉及容器编排、不替用户起停容器、不做镜像构建、不聚合 compose 项目、不支持 Podman / nerdctl 等其它运行时（prd §5、§6.2）。非目标见 PRD §5。
 
 - Touch point: `RemoteTarget` / `RouteHeader` / `RemoteOps` — 本地 exec 通道与远端装机抽象；owner: epic-docker-hosts
+- Touch point: `RouteTarget::origin_key` — 容器主机的身份键 `docker:<name>`，R7 与 R1 都挂在它上面；owner: epic-docker-hosts
 - Touch point: 连接器发现逻辑（`sweep_wsl` 同族）— 容器列表来源与容器/发行版区分；owner: epic-docker-hosts
 - Touch point: 装机资产选择（`asset_for_uname`）— 按容器而非宿主架构选 musl 资产；owner: epic-docker-hosts
+- 不改动：`tty7-server --stdio` 与 musl 发布矩阵（addendum §1），容器场景直接复用现有产物。
 
 Tracer path：发现容器 → 首次确认装机 → 进入完整 workspace → 断开回收，这条路径的第一个 epic 必须整条走通。
 
@@ -85,3 +87,6 @@ Tracer path：发现容器 → 首次确认装机 → 进入完整 workspace →
 - Decision: 2026-11-01 — 容器身份是容器名；重建即复用 workspace、保留 tab 与布局、pane 明示停止。
 - Decision: 2026-11-01 — 首次确认后静默装机，容器重建不再询问。
 - Decision: 2026-11-01 — 从 `initiative-terminal-blocks` 独立出来，Docker 主机能力与命令块无共同边界。
+- Decision: 2026-11-01 — 只切一条 epic。理由：R1-R11 落在同一批文件（`session.rs` 的 `RemoteTarget`、`router.rs` 的 `RouteTarget`/`origin_key`、`remote_connect.rs` 的发现、`install/` 的装机），没有部署边界，且只有一起交付才满足本 initiative 的 Outcome；把 R7/R8 单切会让第一条 epic 交付一个「每天重建就丢布局」的容器主机，正是 PRD 要消除的体验。
+- Decision: 2026-11-01 — 不设独立的平台基线 epic。理由：没有独立部署边界；基线（`docker` CLI 发现、容器枚举管道）由这条 epic 的头两条 story 承担。
+- Decision: 2026-11-01 — tracer 路径：发现容器 → 首次确认装机 → 进入 workspace → 断开回收；整条走通前不切后续 story。
