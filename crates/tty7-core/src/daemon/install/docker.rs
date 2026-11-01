@@ -78,7 +78,27 @@ fn is_local_endpoint(host: &str) -> bool {
 /// `docker context inspect` would take the feature away from every machine
 /// whose CLI is fine but whose context command is not.
 pub fn remote_endpoint() -> Option<String> {
-    remote_endpoint_from(std::env::var("DOCKER_HOST").ok().as_deref())
+    // `DOCKER_HOST` is a process-local read and costs nothing, so it is never
+    // cached: a shell that changes it and reconnects must see the change. The
+    // context is a `docker context inspect` process, and the caller is the
+    // window thread, so the answer is reused briefly.
+    let from_env = std::env::var("DOCKER_HOST").ok();
+    if from_env.as_deref().is_some_and(|h| !h.trim().is_empty()) {
+        return remote_endpoint_from(from_env.as_deref());
+    }
+    static CONTEXT: OnceLock<Mutex<Option<(std::time::Instant, Option<String>)>>> = OnceLock::new();
+    let slot = CONTEXT.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = slot.lock()
+        && let Some((at, answer)) = guard.as_ref()
+        && at.elapsed() < Duration::from_secs(30)
+    {
+        return answer.clone();
+    }
+    let answer = remote_endpoint_from(None);
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some((std::time::Instant::now(), answer.clone()));
+    }
+    answer
 }
 
 /// The decision itself, split out so it can be tested without touching the
