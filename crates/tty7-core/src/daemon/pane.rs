@@ -2787,6 +2787,22 @@ impl DaemonPane {
         self.state.lock().unwrap().subscriber_epoch == epoch
     }
 
+    /// Send one reply to the connection that currently controls this pane,
+    /// if it is still `epoch`.
+    ///
+    /// Deliberately takes no `Sender` clone: the subscriber channel closing
+    /// is how the writer learns a controller was displaced, and a clone held
+    /// by the pane's read loop would keep it alive past that handover.
+    pub fn tell_controller(&self, epoch: u64, msg: DaemonMsg) {
+        let st = self.state.lock().unwrap();
+        if st.subscriber_epoch != epoch {
+            return;
+        }
+        if let Some(sub) = &st.subscriber {
+            let _ = sub.send(msg);
+        }
+    }
+
     pub fn agent_state(&self) -> Option<crate::daemon::control::PaneAgentState> {
         agent_state_snapshot(&self.state.lock().unwrap())
     }
@@ -2878,6 +2894,21 @@ impl DaemonPane {
         };
         out.context = Some(self.context());
         out
+    }
+
+    /// The pane's closed command blocks, oldest first.
+    ///
+    /// A clone of the table under the state lock — never the process walk or
+    /// its listening-port probe — so it is cheap enough to answer on the
+    /// pane's own read loop, where the user's keystrokes are also waiting.
+    pub fn command_blocks(&self) -> Vec<crate::daemon::protocol::CommandBlock> {
+        self.state
+            .lock()
+            .unwrap()
+            .command_blocks
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// What the pane knows about itself beyond its process list.

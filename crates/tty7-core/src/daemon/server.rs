@@ -5,7 +5,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
 use crate::daemon::pane::DaemonPane;
-use crate::daemon::protocol::{ClientMsg, DaemonMsg, DaemonVersion, LeaseRequest, RemoteKind};
+use crate::daemon::protocol::{
+    ClientMsg, DaemonMsg, DaemonVersion, LeaseRequest, PaneContext, PaneProcs, RemoteKind,
+};
 use crate::daemon::ssh::SshConnection;
 use crate::daemon::transport::{self, Stream};
 
@@ -1510,6 +1512,28 @@ fn run_stream(
                         target.clear_command_blocks();
                     }
                 }
+                ClientMsg::QueryProcs { pane_id } => {
+                    // The pane link's form of the query answers with the
+                    // block table alone. It has to stay cheap: this read loop
+                    // also carries the user's keystrokes, so it never walks
+                    // the process tree or runs the listening-port probe.
+                    // A client that wants the full picture asks on a
+                    // connection of its own, where `handle_conn` answers it.
+                    let blocks = match registry.get(pane_id) {
+                        Some(target) => target.command_blocks(),
+                        None => Vec::new(),
+                    };
+                    pane.tell_controller(
+                        epoch,
+                        DaemonMsg::Procs(PaneProcs {
+                            context: Some(PaneContext {
+                                blocks,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                    );
+                }
                 _ => {}
             }
         }
@@ -1974,6 +1998,85 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             assert!(cleared, "the clear arm actually dropped the table");
+        }
+
+        /// The pane link answers `QueryProcs` with the block table alone, so
+        /// a client can refresh folds without opening a second connection.
+        /// The empty process list is the proof this went through
+        /// `run_stream` and not the connection-level dispatch, which walks
+        /// the tree.
+        #[test]
+        fn the_pane_link_answers_query_procs_with_the_block_table_alone() {
+            use crate::daemon::pane::DaemonPane;
+            use crate::daemon::protocol::ShellSpec;
+
+            let reg = Arc::new(Registry::new());
+            let pane = DaemonPane::spawn(
+                917_003,
+                Some(std::path::PathBuf::from("/")),
+                SIZE,
+                Some(ShellSpec {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exec cat".into()],
+                    args_are_tty7_defaults: false,
+                }),
+                None,
+                None,
+                None,
+                false,
+                || {},
+            )
+            .expect("spawn pane");
+            reg.insert(pane);
+
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let reg = reg.clone();
+            let h = thread::spawn(move || {
+                let _ = handle_conn(server, reg);
+            });
+
+            ClientMsg::Attach {
+                pane_id: 917_003,
+                size: SIZE,
+                allow_remote_clipboard_write: false,
+            }
+            .encode(&mut client)
+            .unwrap();
+
+            // Marks in through `cat`'s echo pair one block on the daemon.
+            // Retried for the same reason as the conn test above: input
+            // sent before `cat` replaces the starting shell is consumed as
+            // shell input rather than echoed.
+            let marks = b"\x1b]133;B\x07\x1b]133;C;echo%20hi\x07hi\r\n\x1b]133;D;0\x07".to_vec();
+            let mut blocks = Vec::new();
+            for _ in 0..20 {
+                ClientMsg::Input(marks.clone()).encode(&mut client).unwrap();
+                ClientMsg::QueryProcs { pane_id: 917_003 }
+                    .encode(&mut client)
+                    .unwrap();
+                loop {
+                    match DaemonMsg::read(&mut client).expect("the link stays up") {
+                        DaemonMsg::Procs(procs) => {
+                            assert!(
+                                procs.procs.is_empty(),
+                                "the pane link must not walk the process tree"
+                            );
+                            assert!(procs.ports.is_empty(), "nor run the port probe");
+                            blocks = procs.context.expect("the reply carries its context").blocks;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if !blocks.is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(!blocks.is_empty(), "the echoed marks paired one block");
+
+            let _ = client.shutdown(std::net::Shutdown::Both);
+            h.join().unwrap();
         }
 
         #[test]

@@ -23,7 +23,7 @@ use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 use crate::core::config::CursorStyle as ConfigCursorStyle;
 use crate::core::osc::{Note, NoteBudget, OscTokenizer, TitleEffect, TitleLifetime};
 use crate::daemon::protocol::{
-    AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
+    AuthPromptKind, AuthResponse, ClientMsg, CommandBlock, DaemonMsg, KnownHostEntry, KnownHostId,
     LoopbackForward, LoopbackForwardRequest, ManagedForward, NativeSshSpec, PaneProcs,
     RemoteContext, RemoteKind, RestoreFrom, SftpEntry, SftpJobProgress, SftpOp, SftpOpResult,
     SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase, SshTestReport, WinSize, WorkspaceOp,
@@ -117,6 +117,9 @@ struct ReaderSignals {
     /// parses — see `crate::terminal::blocks`. Written by the reader thread,
     /// read by the paint path and the block actions.
     blocks: BlockStore,
+    /// The daemon's block table as of the last `QueryProcs` reply on this
+    /// link, waiting for the view's poll to adopt it.
+    block_table: Arc<Mutex<Option<Vec<CommandBlock>>>>,
     /// Whether this pane's pty is one a conhost renders into, and so whether
     /// the reader puts back the cursor a repaint parked. Decided per pane from
     /// its [`PtySource`], and shared rather than copied because the reader can
@@ -646,6 +649,11 @@ pub struct RemoteTerminal {
     /// and copies them. On the pane rather than its view so a relink keeps
     /// both the spans and the fold state.
     blocks: BlockStore,
+    /// The daemon's command-block table from the last `QueryProcs` reply on
+    /// this pane's own link. The pane-link form of that query answers with
+    /// the block table alone, so adoption costs no second (routed)
+    /// connection — written by the reader, taken by the view's poll.
+    block_table: Arc<Mutex<Option<Vec<CommandBlock>>>>,
     route: PaneRoute,
     proxy: EventProxy,
     reader_thread: Option<JoinHandle<()>>,
@@ -973,6 +981,11 @@ impl RemoteTerminal {
         if let Ok(mut tracker) = self.blocks.lock() {
             tracker.reset_for_relink();
         }
+        // A reply from the old link is about the old stream position; the
+        // next poll asks the new one.
+        if let Ok(mut slot) = self.block_table.lock() {
+            *slot = None;
+        }
 
         let quit = Arc::new(AtomicBool::new(false));
         let reader = Self::spawn_reader(
@@ -1004,6 +1017,7 @@ impl RemoteTerminal {
                 clipboard_write_busy: self.clipboard_write_busy.clone(),
                 lease: self.lease.clone(),
                 blocks: self.blocks.clone(),
+                block_table: self.block_table.clone(),
                 // Deliberately the pane's existing answer rather than one
                 // rebuilt from `route`: the pty on the far side is the same pty
                 // it was before the link dropped, and only this value still
@@ -1110,6 +1124,7 @@ impl RemoteTerminal {
         let clipboard_write_busy = Arc::new(AtomicBool::new(false));
         let lease = Arc::new(Mutex::new(None));
         let blocks: BlockStore = Arc::new(Mutex::new(BlockTracker::default()));
+        let block_table: Arc<Mutex<Option<Vec<CommandBlock>>>> = Arc::new(Mutex::new(None));
 
         let reader_quit = Arc::new(AtomicBool::new(false));
         let local_conpty = Arc::new(AtomicBool::new(pty == PtySource::LocalConpty));
@@ -1140,6 +1155,7 @@ impl RemoteTerminal {
                 clipboard_write_busy: clipboard_write_busy.clone(),
                 lease: lease.clone(),
                 blocks: blocks.clone(),
+                block_table: block_table.clone(),
                 local_conpty: local_conpty.clone(),
                 color_scheme_updates: color_scheme_updates.clone(),
             },
@@ -1183,6 +1199,7 @@ impl RemoteTerminal {
             clipboard_write_busy,
             lease,
             blocks,
+            block_table,
             route: PaneRoute::Local,
             proxy,
             reader_thread: Some(reader_thread),
@@ -1262,6 +1279,7 @@ impl RemoteTerminal {
                     clipboard_write_busy,
                     lease,
                     blocks,
+                    block_table,
                     local_conpty,
                     color_scheme_updates,
                 } = signals;
@@ -1532,7 +1550,10 @@ impl RemoteTerminal {
                         // into the shell. A live Output reports once folded.
                         if !matches!(
                             msg,
-                            DaemonMsg::Size(_) | DaemonMsg::Snapshot(_) | DaemonMsg::Output(_)
+                            DaemonMsg::Size(_)
+                                | DaemonMsg::Snapshot(_)
+                                | DaemonMsg::Output(_)
+                                | DaemonMsg::Procs(_)
                         ) && std::mem::take(&mut report_scheme)
                             && modes.is_on(COLOR_SCHEME_UPDATES)
                         {
@@ -1900,6 +1921,17 @@ impl RemoteTerminal {
                                 teardown(None);
                                 break 'main;
                             }
+                            DaemonMsg::Procs(procs) => {
+                                // The pane-link form of `QueryProcs` answers
+                                // with the block table alone; the view's next
+                                // poll takes it and adopts it. Storing it here
+                                // keeps the daemon's answer off the UI thread.
+                                if let Some(context) = procs.context
+                                    && let Ok(mut slot) = block_table.lock()
+                                {
+                                    *slot = Some(context.blocks);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -2097,6 +2129,25 @@ impl RemoteTerminal {
             block_id,
             folded,
         });
+    }
+
+    /// Ask the daemon for this pane's block table over the pane's own link.
+    ///
+    /// Non-blocking: the daemon answers the pane-link form of `QueryProcs`
+    /// with the table alone, and the reader parks it for
+    /// [`Self::take_block_table`]. A daemon from before this form ignores
+    /// the frame, which reads as "no table to adopt" — never as an error,
+    /// and never as a reason to open a second connection.
+    pub fn request_block_table(&self, pane_id: u64) {
+        self.link.send(ClientMsg::QueryProcs { pane_id });
+    }
+
+    /// The block table from the last pane-link reply, if one has arrived.
+    pub fn take_block_table(&self) -> Option<Vec<CommandBlock>> {
+        self.block_table
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
     }
 
     /// Tell the daemon its block table is stale (entry-5, CAP-5): the GUI
@@ -2714,24 +2765,6 @@ impl RemoteTerminal {
             }
         }
         query(pane_id).unwrap_or_default()
-    }
-
-    /// The same table through this pane's own route: a pane on a remote host
-    /// is owned by the daemon at the far end of [`Self::route`], and only a
-    /// query sent down that link can see its blocks. Unreachable links read
-    /// as empty, with the same silent-default error semantics as
-    /// [`Self::query_procs`] — adoption enriches spans, so a failed poll is
-    /// silence, never a stall.
-    pub fn query_procs_routed(&self, pane_id: u64) -> PaneProcs {
-        fn query(route: &PaneRoute, pane_id: u64) -> anyhow::Result<PaneProcs> {
-            let mut stream = connect_routed(route)?;
-            ClientMsg::QueryProcs { pane_id }.encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
-                DaemonMsg::Procs(procs) => Ok(procs),
-                other => Err(anyhow::anyhow!("unexpected reply to QueryProcs: {other:?}")),
-            }
-        }
-        query(&self.route, pane_id).unwrap_or_default()
     }
 }
 
@@ -5994,18 +6027,6 @@ mod tests {
         assert!(route.header().is_none(), "nothing to route to");
         let err = connect_routed(&route).expect_err("must not reach the local daemon");
         assert!(err.to_string().contains("cannot be routed"), "{err}");
-    }
-
-    /// A routed procs query an unreachable link answers as empty: adoption
-    /// enriches spans, so a failed poll is silence with the same
-    /// silent-default semantics as the local query — never a stall.
-    #[test]
-    fn a_routed_procs_query_without_a_link_reads_as_empty() {
-        crate::core::config::pin_test_config_dir();
-        let (client_side, _daemon_side) = UnixStream::pair().unwrap();
-        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
-        term.route = PaneRoute::Unroutable("no ssh details".into());
-        assert_eq!(term.query_procs_routed(7), PaneProcs::default());
     }
 
     #[test]
