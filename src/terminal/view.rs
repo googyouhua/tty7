@@ -477,9 +477,9 @@ pub struct TerminalView {
     /// Whether a rescan is already waiting out the debounce. One task at a
     /// time, however fast the pane is printing.
     pub(super) search_scan_armed: bool,
-    /// When the daemon's block table was last asked for (or adopted, when a
-    /// reply was already waiting). Gated to a slow poll: the ids it carries
-    /// enrich rather than route, and asking must never wait on the daemon.
+    /// When the daemon's block table was last asked for. Gated to a slow
+    /// poll: the ids it carries enrich rather than route, and asking must
+    /// never wait on the daemon.
     last_block_adopt: Option<std::time::Instant>,
     pub bell_flash: bool,
     /// Bumped by every bell, so only the timer armed by the latest one clears

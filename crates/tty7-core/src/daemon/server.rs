@@ -1519,9 +1519,13 @@ fn run_stream(
                     // the process tree or runs the listening-port probe.
                     // A client that wants the full picture asks on a
                     // connection of its own, where `handle_conn` answers it.
-                    let blocks = match registry.get(pane_id) {
-                        Some(target) => target.command_blocks(),
-                        None => Vec::new(),
+                    let blocks = if pane_id == id {
+                        pane.block_table_snapshot()
+                    } else {
+                        match registry.get(pane_id) {
+                            Some(target) => target.block_table_snapshot(),
+                            None => Vec::new(),
+                        }
                     };
                     pane.tell_controller(
                         epoch,
@@ -2043,6 +2047,13 @@ mod tests {
             .encode(&mut client)
             .unwrap();
 
+            // Fail rather than hang if the pane-link arm ever stops
+            // answering: a hung test blocks the whole suite instead of
+            // naming the bug.
+            client
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+
             // Marks in through `cat`'s echo pair one block on the daemon.
             // Retried for the same reason as the conn test above: input
             // sent before `cat` replaces the starting shell is consumed as
@@ -2055,8 +2066,8 @@ mod tests {
                     .encode(&mut client)
                     .unwrap();
                 loop {
-                    match DaemonMsg::read(&mut client).expect("the link stays up") {
-                        DaemonMsg::Procs(procs) => {
+                    match DaemonMsg::read(&mut client) {
+                        Ok(DaemonMsg::Procs(procs)) => {
                             assert!(
                                 procs.procs.is_empty(),
                                 "the pane link must not walk the process tree"
@@ -2065,7 +2076,8 @@ mod tests {
                             blocks = procs.context.expect("the reply carries its context").blocks;
                             break;
                         }
-                        _ => {}
+                        Ok(_) => {}
+                        Err(e) => panic!("the pane link stopped answering QueryProcs: {e}"),
                     }
                 }
                 if !blocks.is_empty() {

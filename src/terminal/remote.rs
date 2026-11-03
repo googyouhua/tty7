@@ -1550,10 +1550,7 @@ impl RemoteTerminal {
                         // into the shell. A live Output reports once folded.
                         if !matches!(
                             msg,
-                            DaemonMsg::Size(_)
-                                | DaemonMsg::Snapshot(_)
-                                | DaemonMsg::Output(_)
-                                | DaemonMsg::Procs(_)
+                            DaemonMsg::Size(_) | DaemonMsg::Snapshot(_) | DaemonMsg::Output(_)
                         ) && std::mem::take(&mut report_scheme)
                             && modes.is_on(COLOR_SCHEME_UPDATES)
                         {
@@ -1926,6 +1923,13 @@ impl RemoteTerminal {
                                 // with the block table alone; the view's next
                                 // poll takes it and adopts it. Storing it here
                                 // keeps the daemon's answer off the UI thread.
+                                // Re-check `quit`: a relink clears the slot
+                                // after retiring this reader, and a frame
+                                // dequeued just before the flag is visible
+                                // must not restore the old link's table.
+                                if quit.load(Ordering::SeqCst) {
+                                    return;
+                                }
                                 if let Some(context) = procs.context
                                     && let Ok(mut slot) = block_table.lock()
                                 {
@@ -6027,6 +6031,19 @@ mod tests {
         assert!(route.header().is_none(), "nothing to route to");
         let err = connect_routed(&route).expect_err("must not reach the local daemon");
         assert!(err.to_string().contains("cannot be routed"), "{err}");
+    }
+
+    /// A pane link that never answers leaves the adoption slot empty and the
+    /// request path non-blocking — the shape of an older daemon. The query
+    /// is fire-and-forget, and the view takes nothing, so adoption degrades
+    /// to silence instead of a stall or a dropped link.
+    #[test]
+    fn a_pane_link_that_never_answers_leaves_the_block_table_empty() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.request_block_table(7);
+        assert_eq!(term.take_block_table(), None);
     }
 
     #[test]

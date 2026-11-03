@@ -2896,21 +2896,6 @@ impl DaemonPane {
         out
     }
 
-    /// The pane's closed command blocks, oldest first.
-    ///
-    /// A clone of the table under the state lock — never the process walk or
-    /// its listening-port probe — so it is cheap enough to answer on the
-    /// pane's own read loop, where the user's keystrokes are also waiting.
-    pub fn command_blocks(&self) -> Vec<crate::daemon::protocol::CommandBlock> {
-        self.state
-            .lock()
-            .unwrap()
-            .command_blocks
-            .iter()
-            .cloned()
-            .collect()
-    }
-
     /// What the pane knows about itself beyond its process list.
     ///
     /// Always filled, including on the branches above that have no tree to
@@ -3040,9 +3025,11 @@ impl DaemonPane {
         clear_command_blocks(&mut st);
     }
 
-    /// A clone of the pane's closed command blocks, oldest first, for the
-    /// periodic snapshot writer. Small (capped at [`COMMAND_BLOCK_CAP`]),
-    /// so the keeper writes it unconditionally.
+    /// A clone of the pane's closed command blocks, oldest first.
+    ///
+    /// Small (capped at [`COMMAND_BLOCK_CAP`]), so the periodic snapshot
+    /// writer takes it unconditionally, and the pane link may answer
+    /// `QueryProcs` with it from the keystroke read loop.
     pub fn block_table_snapshot(&self) -> Vec<CommandBlock> {
         self.state
             .lock()
@@ -5224,6 +5211,87 @@ mod tests {
         };
         assert_eq!(twin(7), Some(7), "a tie goes to the pane the hook named");
         assert_eq!(twin(1), None, "and is no one's otherwise");
+    }
+
+    /// The pane-link reply must not keep the previous controller's channel
+    /// alive: the writer learns it was displaced when that channel closes.
+    /// `tell_controller` sends through the stored sender without cloning it,
+    /// and its epoch guard refuses a stale epoch, so a displaced link stays
+    /// closed and gets no answer while the current one still does.
+    #[test]
+    fn tell_controller_follows_the_current_epoch_and_lets_the_old_channel_close() {
+        let pane = DaemonPane::spawn(
+            1,
+            Some(PathBuf::from("/")),
+            ws(80, 24),
+            Some(ShellSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exec cat".into()],
+                args_are_tty7_defaults: false,
+            }),
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .expect("spawn pane");
+
+        let quiet = || std::time::Duration::from_millis(500);
+
+        let (tx_a, rx_a) = std::sync::mpsc::channel();
+        let epoch_a = pane.attach(tx_a);
+        pane.tell_controller(epoch_a, DaemonMsg::Cwd(PathBuf::from("/for-a")));
+        let mut heard = None;
+        while let Ok(msg) = rx_a.recv_timeout(quiet()) {
+            if let DaemonMsg::Cwd(path) = msg
+                && path == std::path::Path::new("/for-a")
+            {
+                heard = Some(path);
+                break;
+            }
+        }
+        assert_eq!(
+            heard.as_deref(),
+            Some(std::path::Path::new("/for-a")),
+            "the current epoch is answered"
+        );
+
+        let (tx_b, rx_b) = std::sync::mpsc::channel();
+        let epoch_b = pane.attach(tx_b);
+        assert_ne!(epoch_a, epoch_b);
+
+        pane.tell_controller(epoch_a, DaemonMsg::Cwd(PathBuf::from("/stale")));
+        let mut stale = false;
+        loop {
+            match rx_a.recv_timeout(quiet()) {
+                Ok(DaemonMsg::Cwd(path)) => stale |= path == std::path::Path::new("/stale"),
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("the displaced channel is still open — a Sender clone survived")
+                }
+            }
+        }
+        assert!(!stale, "a displaced epoch must not be answered");
+
+        pane.tell_controller(epoch_b, DaemonMsg::Cwd(PathBuf::from("/for-b")));
+        let mut heard = None;
+        while let Ok(msg) = rx_b.recv_timeout(quiet()) {
+            if let DaemonMsg::Cwd(path) = msg
+                && path == std::path::Path::new("/for-b")
+            {
+                heard = Some(path);
+                break;
+            }
+        }
+        assert_eq!(
+            heard.as_deref(),
+            Some(std::path::Path::new("/for-b")),
+            "the new epoch is answered"
+        );
+
+        pane.kill();
     }
 
     #[test]
