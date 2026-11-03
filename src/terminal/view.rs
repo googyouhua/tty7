@@ -477,9 +477,9 @@ pub struct TerminalView {
     /// Whether a rescan is already waiting out the debounce. One task at a
     /// time, however fast the pane is printing.
     pub(super) search_scan_armed: bool,
-    /// When the daemon's block table was last adopted into the pane's spans.
-    /// Gated to a slow poll: adoption is a blocking round trip, and the ids
-    /// it carries enrich rather than route.
+    /// When the daemon's block table was last asked for. Gated to a slow
+    /// poll: the ids it carries enrich rather than route, and asking must
+    /// never wait on the daemon.
     last_block_adopt: Option<std::time::Instant>,
     pub bell_flash: bool,
     /// Bumped by every bell, so only the timer armed by the latest one clears
@@ -4255,25 +4255,27 @@ impl TerminalView {
     fn maybe_adopt_daemon_blocks(&mut self) {
         const BLOCK_ADOPT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
         let now = std::time::Instant::now();
-        if self
+        let due = !self
             .last_block_adopt
-            .is_some_and(|t| now.duration_since(t) < BLOCK_ADOPT_INTERVAL)
-        {
-            return;
-        }
-        self.last_block_adopt = Some(now);
-        // The table lives where the pane lives: a local pane's daemon answers
-        // the direct query, while a remote pane's table is only visible down
-        // its own route. Either way a failed or empty poll is silence, and
-        // the push-back below already rides the pane's own link.
-        let procs = match self.host_id.is_local() {
-            true => RemoteTerminal::query_procs(self.pane_id),
-            false => self.terminal.query_procs_routed(self.pane_id),
+            .is_some_and(|t| now.duration_since(t) < BLOCK_ADOPT_INTERVAL);
+        // The table lives where the pane lives, and the only way to it is
+        // that pane's own link. Asking costs one small frame; opening a
+        // second, routed connection to ask would spawn a wsl.exe bridge and
+        // block this UI thread for as long as it takes to come up. The reply
+        // is parked by the reader and taken on a later tick, so nothing here
+        // waits on the daemon. A failed or empty poll is silence.
+        let blocks = match self.terminal.take_block_table() {
+            Some(blocks) => blocks,
+            None => {
+                if !due {
+                    return;
+                }
+                self.last_block_adopt = Some(now);
+                self.terminal.request_block_table(self.pane_id);
+                return;
+            }
         };
-        let Some(context) = procs.context else {
-            return;
-        };
-        if context.blocks.is_empty() {
+        if blocks.is_empty() {
             return;
         }
         if let Ok(mut tracker) = self.terminal.block_tracker().lock() {
@@ -4281,7 +4283,7 @@ impl TerminalView {
             // row are reported back: push them up so the daemon converges to
             // what the GUI shows (entry-5, CAP-5). Both directions — a
             // pre-adoption fold and a pre-adoption unfold alike.
-            let newly = tracker.adopt(&context.blocks);
+            let newly = tracker.adopt(&blocks);
             let pushes: Vec<(u64, bool)> = newly
                 .into_iter()
                 .map(|(_, block_id, folded)| (block_id, folded))

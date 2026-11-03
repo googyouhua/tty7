@@ -1031,6 +1031,10 @@ pub enum ClientMsg {
     ListForwards {
         pane_id: u64,
     },
+    /// Ask for a pane's process tree on a connection of its own, or — on the
+    /// pane's attached stream — just its command-block table. The pane-link
+    /// answer leaves `procs` and `ports` empty so it stays cheap on the read
+    /// loop that also carries keystrokes.
     QueryProcs {
         pane_id: u64,
     },
